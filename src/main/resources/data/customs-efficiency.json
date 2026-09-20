@@ -1,0 +1,55 @@
+{
+  "ports": [
+    {
+      "portId": "YGG",
+      "portName": "友谊关口岸",
+      "edgeId": "E4",
+      "baseHours": 2.5,
+      "periods": {
+        "normal": 1.0,
+        "peak": 1.4,
+        "holiday": 1.8
+      },
+      "cargoTypes": {
+        "general": 1.0,
+        "cold": 1.2,
+        "dangerous": 1.6,
+        "oversized": 2.0
+      }
+    },
+    {
+      "portId": "MC",
+      "portName": "芒街口岸",
+      "edgeId": "E9",
+      "baseHours": 3.0,
+      "periods": {
+        "normal": 1.0,
+        "peak": 1.3,
+        "holiday": 1.7
+      },
+      "cargoTypes": {
+        "general": 1.0,
+        "cold": 1.2,
+        "dangerous": 1.5,
+        "oversized": 1.9
+      }
+    },
+    {
+      "portId": "HK",
+      "portName": "河口口岸",
+      "edgeId": "E36",
+      "baseHours": 2.0,
+      "periods": {
+        "normal": 1.0,
+        "peak": 1.4,
+        "holiday": 1.8
+      },
+      "cargoTypes": {
+        "general": 1.0,
+        "cold": 1.2,
+        "dangerous": 1.6,
+        "oversized": 2.0
+      }
+    }
+  ]
+}

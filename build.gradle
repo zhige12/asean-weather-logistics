@@ -1,0 +1,62 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '4.1.0'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+description = 'asean-weather-logistics'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // === Spring Boot 基础 ===
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    developmentOnly 'org.springframework.boot:spring-boot-devtools'
+
+    // === Lombok ===
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+    testCompileOnly 'org.projectlombok:lombok'
+    testAnnotationProcessor 'org.projectlombok:lombok'
+
+    // === JGraphT（图算法引擎） ===
+    implementation 'org.jgrapht:jgrapht-core:1.5.2'
+    implementation 'org.jgrapht:jgrapht-io:1.5.2'
+
+    // === GraphHopper（直接读取 OSM PBF 文件） ===
+    implementation('com.graphhopper:graphhopper-core:10.2') {
+        exclude group: 'org.slf4j', module: 'slf4j-simple'
+    }
+
+    // OSM PBF 解析（读取路网数据）
+    implementation 'org.openstreetmap.osmosis:osmosis-core:0.49.1'
+    implementation 'org.openstreetmap.osmosis:osmosis-pbf:0.49.1'
+    implementation 'org.openstreetmap.pbf:osmpbf:1.5.0'
+
+    // === JSON 解析 ===
+    // jackson-databind 由 Spring Boot BOM 统一管理版本（勿显式指定，避免与 jackson-dataformat-xml 等组件版本冲突）
+    implementation 'com.google.code.gson:gson:2.10.1'
+
+    // === 测试 ===
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// 本机 32GB 内存 + 低延迟交互：给足堆并用 ZGC，避免 GC 停顿影响演示
+tasks.named('bootRun') {
+    jvmArgs = ['-Xms1g', '-Xmx4g', '-XX:+UseZGC']
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

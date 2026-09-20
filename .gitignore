@@ -1,0 +1,61 @@
+# ---------- 日志 ----------
+*.log
+
+# ---------- 环境变量 / 密钥 ----------
+.env.local
+.env.*.local
+
+# ---------- IDE ----------
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# ---------- Java / Gradle 构建产物 ----------
+build/
+.gradle/
+*.class
+
+# ---------- 前端依赖 / 构建产物 ----------
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ---------- Android / Capacitor 构建产物 ----------
+frontend/android/app/build/
+frontend/android/build/
+frontend/android/.gradle/
+frontend/android/local.properties
+frontend/android/.idea/
+frontend/android/capacitor-cordova-android-plugins/
+
+# ---------- 大数据 / 瓦片 / 地图源 ----------
+# 注意：加前导斜杠，只匹配项目根目录
+/data/
+/tools/data/
+/tools/planetiler/
+*.pbf
+*.osm
+*.mbtiles
+*.shp
+*.dbf
+*.sqlite
+*.zip
+
+# ---------- 通用大文件（jar 保留 wrapper）----------
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+!frontend/android/gradle/wrapper/gradle-wrapper.jar
+
+# ---------- 安装包 ----------
+*.apk
+*.aab
+
+# ---------- 备份 / 临时 / 调试 ----------
+*.bak
+*.tmp
+tools/_*.ps1
+tools/_*.txt
+
+# ---------- 运行时缓存 ----------
+/decision-cache/
