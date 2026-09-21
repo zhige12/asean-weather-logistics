@@ -81,6 +81,35 @@ public class DemoConfigService {
             "BALANCED", "平衡",
             "AGGRESSIVE", "激进");
 
+    /**
+     * 预设智能体模板（计划书 §3.3 开放点一 · 智能体模板库）：
+     * 一键套用「风险偏好 + 货物类型 + 触达范围」的专属智能体，证明“同一引擎、千企千面”。
+     * 物流公司可基于自身货类与路线特征选择模板，正式落地时可自定义扩展。
+     */
+    public record AgentTemplate(String id, String name, String desc, String riskProfile,
+                                String cargoTypeId, List<String> targets) {}
+
+    public static final Map<String, AgentTemplate> TEMPLATES = new LinkedHashMap<>();
+
+    static {
+        // 冷链火龙果智能体：生鲜冷链、保守熔断、全角色触达（当前示范场景）
+        TEMPLATES.put("COLD_DRAGONFRUIT", new AgentTemplate("COLD_DRAGONFRUIT",
+                "冷链火龙果智能体", "生鲜冷链·保守熔断80mm·全角色触达（示范场景）",
+                "CONSERVATIVE", "DRAGON_FRUIT", List.copyOf(ALL_TARGETS)));
+        // 电子元件防潮智能体：高货值、延误2h起算货损、不扰沿岸百姓
+        TEMPLATES.put("ELECTRONICS_MOISTURE", new AgentTemplate("ELECTRONICS_MOISTURE",
+                "电子元件防潮智能体", "高货值防潮·延误2h起算货损·调度/司机/船东触达",
+                "CONSERVATIVE", "ELECTRONICS",
+                List.of(TARGET_DISPATCHER, TARGET_DRIVER, TARGET_DRIVER_VN, TARGET_SHIPOWNER)));
+        // 大宗普货智能体：耐储运、激进放宽阈值、仅调度员与司机
+        TEMPLATES.put("BULK_GENERAL", new AgentTemplate("BULK_GENERAL",
+                "大宗普货智能体", "耐储运普货·激进放宽120mm·仅调度员与司机",
+                "AGGRESSIVE", "DRAGON_FRUIT", List.of(TARGET_DISPATCHER, TARGET_DRIVER)));
+    }
+
+    /** 当前选中的模板 id（null=用户手动微调后的自定义配置） */
+    private volatile String activeTemplate = "COLD_DRAGONFRUIT";
+
     private volatile String riskProfile = "CONSERVATIVE";
     private volatile String cargoTypeId = "DRAGON_FRUIT";
     private volatile Set<String> outreachTargets =
@@ -106,14 +135,17 @@ public class DemoConfigService {
         return outreachTargets.contains(target);
     }
 
-    /** 部分更新配置；非法值忽略。返回更新后的完整配置。 */
+    /** 部分更新配置；非法值忽略。手动微调即视为自定义配置（清除模板高亮）。返回更新后的完整配置。 */
     public synchronized Map<String, Object> update(String newRiskProfile, String newCargoTypeId,
                                                    Set<String> newTargets) {
+        boolean changed = false;
         if (newRiskProfile != null && RISK_PROFILES.containsKey(newRiskProfile)) {
             this.riskProfile = newRiskProfile;
+            changed = true;
         }
         if (newCargoTypeId != null && CARGO_TYPES.containsKey(newCargoTypeId)) {
             this.cargoTypeId = newCargoTypeId;
+            changed = true;
         }
         if (newTargets != null) {
             Set<String> cleaned = new LinkedHashSet<>();
@@ -123,7 +155,24 @@ public class DemoConfigService {
                 }
             }
             this.outreachTargets = cleaned;
+            changed = true;
         }
+        if (changed) {
+            this.activeTemplate = null;
+        }
+        return toMap();
+    }
+
+    /** 一键套用预设智能体模板（计划书 §3.3 开放点一）。 */
+    public synchronized Map<String, Object> applyTemplate(String templateId) {
+        AgentTemplate t = TEMPLATES.get(templateId);
+        if (t == null) {
+            return toMap();
+        }
+        this.riskProfile = t.riskProfile();
+        this.cargoTypeId = t.cargoTypeId();
+        this.outreachTargets = new LinkedHashSet<>(t.targets());
+        this.activeTemplate = t.id();
         return toMap();
     }
 
@@ -140,6 +189,8 @@ public class DemoConfigService {
         m.put("outreachTargets", outreachTargets());
         m.put("allTargets", ALL_TARGETS);
         m.put("targetNames", TARGET_NAMES);
+        m.put("activeTemplate", activeTemplate);
+        m.put("templates", TEMPLATES);
         return m;
     }
 }

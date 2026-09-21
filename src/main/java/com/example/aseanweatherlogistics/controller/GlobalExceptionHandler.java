@@ -7,6 +7,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -36,6 +37,17 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MissingServletRequestParameterException.class)
     public ResponseEntity<Map<String, Object>> handleMissingParam(MissingServletRequestParameterException ex) {
         return build(HttpStatus.BAD_REQUEST, "缺少参数", "缺少必填参数：" + ex.getParameterName());
+    }
+
+    /**
+     * 缺失的静态资源/瓦片（如覆盖范围外的 /tiles/**.pbf）：返回 404 空响应。
+     * Spring Boot 3.2+ 对找不到的静态资源抛 NoResourceFoundException，若不单独处理会落入
+     * 下面的 Exception 兼底被误判成 500；MapLibre 收到 500+JSON 会报“Unable to parse the tile”
+     * 并刷屏，还可能触发“大量加载失败自动切换”把刚选中的矢量底图又切走。404 则被当作“该瓦片无数据”干净跳过。
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<Void> handleNoResource(NoResourceFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
     }
 
     /** 兜底：任何未捕获异常都记日志并返回结构化 500，避免前端拿到 HTML 错误页 */

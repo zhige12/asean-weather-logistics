@@ -7,6 +7,29 @@
     <div class="muted plat-hint">同一套引擎，物流公司按自己的风险偏好、货物、触达范围配置专属智能体</div>
 
     <div v-if="cfg" class="cfg-body">
+      <!-- 预设智能体模板库（开放点一）：一键套用行业预设 -->
+      <div v-if="cfg.templates" class="cfg-block">
+        <div class="cfg-label">
+          智能体模板库
+          <span class="cfg-value">{{ cfg.activeTemplate ? "已套用预设" : "自定义配置" }}</span>
+        </div>
+        <div class="tpl-options">
+          <button
+            v-for="(t, id) in cfg.templates"
+            :key="id"
+            class="tpl-btn"
+            :class="{ active: cfg.activeTemplate === id }"
+            @click="applyTemplate(id)"
+          >
+            <div class="tpl-name">{{ t.name }}</div>
+            <div class="tpl-desc">{{ t.desc }}</div>
+          </button>
+        </div>
+        <div class="cfg-effect">
+          一键套用行业预设（风险偏好 + 货物类型 + 触达范围），下方参数与方案对比实时联动
+        </div>
+      </div>
+
       <!-- 风险容忍度 -->
       <div class="cfg-block">
         <div class="cfg-label">
@@ -123,6 +146,16 @@ function applyProfile() {
 function applyCargo(id) {
   apply({ cargoType: id });
 }
+async function applyTemplate(id) {
+  try {
+    const { data } = await axios.post("/api/platform/template", { id });
+    cfg.value = data;
+    tip();
+    emit("config-changed", data);
+  } catch (e) {
+    console.error("apply template failed", e);
+  }
+}
 function toggleTarget(t) {
   const next = new Set(targets.value);
   if (next.has(t)) next.delete(t);
@@ -220,6 +253,36 @@ defineExpose({ load });
 .cargo-options {
   display: flex;
   gap: 8px;
+}
+.tpl-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tpl-btn {
+  text-align: left;
+  border: 1px solid rgba(30, 50, 90, 0.14);
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  color: inherit;
+  transition: all 0.2s;
+}
+.tpl-btn.active {
+  border-color: #7c5cff;
+  background: rgba(188, 140, 255, 0.14);
+  box-shadow: 0 0 0 1px rgba(124, 92, 255, 0.3) inset;
+}
+.tpl-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-h, #1c2a44);
+}
+.tpl-desc {
+  font-size: 10px;
+  color: #64748f;
+  margin-top: 2px;
 }
 .cargo-btn {
   flex: 1;

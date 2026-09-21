@@ -43,6 +43,7 @@ function ensureStyle() {
   0%, 100% { opacity: 0.5; filter: drop-shadow(0 0 2px rgba(0,0,0,0.5)); }
   50% { opacity: 1; filter: drop-shadow(0 0 6px rgba(0,0,0,0.8)) drop-shadow(0 0 3px rgba(255,255,255,0.7)); }
 }
+.rf-arrow-lite { filter: none; opacity: 0.95; }
 .rf-endpoint-pulse { animation: rf-epulse 1.2s ease-in-out infinite; }
 @keyframes rf-epulse {
   0%, 100% { opacity: 0.6; }
@@ -80,15 +81,33 @@ export function createRouteFlow(map, options = {}) {
     glowWidth: 10,
     outerWidth: 22,
     coreWidth: 6,
-    pane: 'markerPane'
+    pane: 'markerPane',
+    // 箭头 JS 循环帧率上限：移动端 WebView 传 15 降 CPU，PC 保持 60
+    fps: 60,
+    // 轻量特效模式（移动端）：关闭箭头 drop-shadow 滤镜与脉冲/流光 CSS 动画，
+    // 这些动画不受 fps 限帧约束、在手机 WebView 上是滑动掉帧主因。大屏保持 false。
+    lite: false
   }, options);
+
+  // 流光/呼吸动画靠 SVG className 的 CSS keyframes 驱动，地图开 preferCanvas 后
+  // L.polyline 默认落到 Canvas 渲染器上，className/getElement 全部失效。
+  // 这里显式给特效线指定一个独立 SVG 渲染器（挂到特效 pane），与底图渲染策略解耦。
+  const flowRenderer = L.svg({ pane: opts.pane });
+  const lite = !!opts.lite;
+  const frameInterval = 1000 / Math.max(1, opts.fps);
 
   let tracks = [];
   let color = opts.color;
   let pxPerM = 0.0002;
   let raf = null;
   let lastTs = 0;
+  let lastArrowTs = 0; // fps 限帧用：上次真正写箭头的时间戳
   let destroyed = false;
+  // 用户手势（拖拽/捏合/滚轮）计数：进行中暂停箭头写入并隐藏 outer/glow 特效层，
+  // 只留 core 主线，降低低端设备 WebView 滑动时的渲染开销。
+  // 注意只统计带 originalEvent 的手势事件：司机端导航跟随每 1~2s 程序化 setView，
+  // 若也算手势会导致流光层高频闪烁隐藏。
+  let userGesture = 0;
 
   // 起终点脉冲标记
   let startMarker = null;
@@ -97,7 +116,8 @@ export function createRouteFlow(map, options = {}) {
   function makeArrow() {
     const icon = L.divIcon({
       className: 'rf-arrow-outer',
-      html: '<div class="rf-arrow rf-arrow-pulse"></div>',
+      // 轻量模式：去掉 rf-arrow-pulse（filter/opacity 关键帧动画），配合 .rf-arrow-lite 关闭 drop-shadow
+      html: lite ? '<div class="rf-arrow rf-arrow-lite"></div>' : '<div class="rf-arrow rf-arrow-pulse"></div>',
       iconSize: [0, 0]
     });
     const marker = L.marker([0, 0], { icon, pane: opts.pane, interactive: false, keyboard: false });
@@ -118,8 +138,9 @@ export function createRouteFlow(map, options = {}) {
         color: segColor,
         weight: opts.outerWidth,
         opacity: 0.4,
-        className: 'rf-outer rf-outer-pulse',
+        className: lite ? 'rf-outer' : 'rf-outer rf-outer-pulse',
         pane: opts.pane,
+        renderer: flowRenderer,
         interactive: false
       }),
       glow: L.polyline(pts, {
@@ -127,8 +148,9 @@ export function createRouteFlow(map, options = {}) {
         weight: opts.glowWidth,
         opacity: 0.9,
         dashArray: '22 56',
-        className: 'rf-glow rf-glow-anim',
+        className: lite ? 'rf-glow' : 'rf-glow rf-glow-anim',
         pane: opts.pane,
+        renderer: flowRenderer,
         interactive: false
       }),
       core: L.polyline(pts, {
@@ -137,6 +159,7 @@ export function createRouteFlow(map, options = {}) {
         opacity: 0.98,
         className: 'rf-core',
         pane: opts.pane,
+        renderer: flowRenderer,
         interactive: false
       })
     };
@@ -272,33 +295,42 @@ export function createRouteFlow(map, options = {}) {
     const dt = Math.min((ts - lastTs) / 1000, 0.05);
     lastTs = ts;
     const speedM = opts.speedPxPerSec / pxPerM;
-    // 缩放动画进行中：整段暂停，不要写 setLatLng。
+    // 以下任一情况都跳过本帧的箭头写入：
+    // 1) 用户手势进行中（拖拽/捏合，见 userGesture）；
+    // 2) 缩放动画插值中 —— 保留 _animatingZoom/lastZoomTs 老判据兼容无 move 事件的程序化缩放；
+    // 3) 未到帧率预算（1000/fps）——移动端 15fps 限帧。
     //
-    // 原因（已核对 Leaflet 源码）：_animateZoom 一开始就调用
+    // 缩放判据的背景（已核对 Leaflet 源码）：_animateZoom 一开始就调用
     // _move(center, 目标zoom, ...)，而 _move 第一件事是 this._zoom = zoom —— 也就是
     // 动画刚起步，map._zoom 已经是「目标级别」，同时 mapPane 还在用 CSS transform
     // 从旧级别插值过去。此时 marker.setLatLng() 会按目标级别算好像素位置写进 translate3d，
     // 之后又被 pane 的 transform 缩放一次 = 双重变换，表现就是箭头「跟不上缩放速度」。
-    //
     // pane 的 transform 本来就会让箭头随地图平滑缩放并始终贴合路线，所以动画期间跳过即可。
     // _animatingZoom 是 Leaflet 自己的标志位，动画结束由 transitionend 清除，另有
     // setTimeout(...,250) 兜底，不会卡住；Leaflet 内部各组件也是用同一个判断跳过动画期的定位。
-    const zoomAnimating = !!map._animatingZoom;
-    for (const t of tracks) {
-      if (t.total <= 0 || !t.arrows.length) continue;
-      if (zoomAnimating) continue;
-      t.progress = (t.progress + speedM * dt) % t.total;
-      for (let i = 0; i < t.arrows.length; i++) {
-        const d = (t.progress + i * t.spacingM) % t.total;
-        const p = pointAt(t, d);
-        t.arrows[i].marker.setLatLng(p);
-        const ahead = Math.min(t.total, d + Math.max(60, t.spacingM * 0.08));
-        const q = pointAt(t, ahead);
-        const ang = bearing(p, q);
-        const el = t.arrows[i].el || (t.arrows[i].marker.getElement() && t.arrows[i].marker.getElement().firstChild);
-        if (el) {
-          t.arrows[i].el = el;
-          el.style.transform = `rotate(${(ang - 90).toFixed(1)}deg)`;
+    // _animatingZoom 只覆盖按钮/程序化的动画缩放；手机双指捏合走 TouchZoom，
+    // 仅发 zoom/zoomend 而不置 _animatingZoom。用最近一次 zoom 事件时间戳兜住捏合：
+    // 缩放进行中暂停写箭头位置，避免与 Leaflet 对 markerPane 的逐帧重定位叠加成
+    // “双重变换”（即“箭头/线跟不上缩放”）。停手 ~120ms 或 zoomend 后自动恢复；
+    // 即便 zoomend 因异常漏触发，时间戳过期也会自愈，不会把箭头永久冻住。
+    const zoomAnimating = !!map._animatingZoom || (ts - lastZoomTs) < 120;
+    if (userGesture === 0 && !zoomAnimating && ts - lastArrowTs >= frameInterval) {
+      lastArrowTs = ts;
+      for (const t of tracks) {
+        if (t.total <= 0 || !t.arrows.length) continue;
+        t.progress = (t.progress + speedM * dt) % t.total;
+        for (let i = 0; i < t.arrows.length; i++) {
+          const d = (t.progress + i * t.spacingM) % t.total;
+          const p = pointAt(t, d);
+          t.arrows[i].marker.setLatLng(p);
+          const ahead = Math.min(t.total, d + Math.max(60, t.spacingM * 0.08));
+          const q = pointAt(t, ahead);
+          const ang = bearing(p, q);
+          const el = t.arrows[i].el || (t.arrows[i].marker.getElement() && t.arrows[i].marker.getElement().firstChild);
+          if (el) {
+            t.arrows[i].el = el;
+            el.style.transform = `rotate(${(ang - 90).toFixed(1)}deg)`;
+          }
         }
       }
     }
@@ -348,8 +380,39 @@ export function createRouteFlow(map, options = {}) {
     start();
   }
 
+  // 记录最近一次缩放事件时刻（zoom 在捏合过程中会连续触发），供 frame() 判定“正在缩放”
+  let lastZoomTs = 0;
+  const markZoom = () => { lastZoomTs = performance.now(); };
+  map.on('zoom', markZoom);
   const onZoom = () => { if (tracks.length) layout(); };
   map.on('zoomend', onZoom);
+  
+  // 用户手势期隐藏：movestart/zoomstart（带 originalEvent 才算）隐藏 outer/glow 特效层，
+  // moveend/zoomend 恢复原透明度并重排箭头。用计数而非布尔，避免缩放+平移重叠时提前恢复。
+  const isUserEvent = e => !!(e && e.originalEvent);
+  const setGestureVisible = (show) => {
+    tracks.forEach(t => {
+      t.outer.setStyle({ opacity: show ? 0.4 : 0 });
+      t.glow.setStyle({ opacity: show ? 0.9 : 0 });
+    });
+  };
+  const onGestureStart = e => {
+    if (!isUserEvent(e)) return
+    userGesture++
+    if (userGesture === 1) setGestureVisible(false)
+  };
+  const onGestureEnd = e => {
+    if (!isUserEvent(e)) return
+    userGesture = Math.max(0, userGesture - 1)
+    if (userGesture === 0) {
+      setGestureVisible(true)
+      if (tracks.length) layout()
+    }
+  };
+  map.on('movestart', onGestureStart);
+  map.on('zoomstart', onGestureStart);
+  map.on('moveend', onGestureEnd);
+  map.on('zoomend', onGestureEnd);
 
   return {
     /** 兼容旧接口：整条路线单色 */
@@ -394,7 +457,12 @@ export function createRouteFlow(map, options = {}) {
     destroy() {
       destroyed = true;
       stop();
+      map.off('zoom', markZoom);
       map.off('zoomend', onZoom);
+      map.off('movestart', onGestureStart);
+      map.off('zoomstart', onGestureStart);
+      map.off('moveend', onGestureEnd);
+      map.off('zoomend', onGestureEnd);
       clearTracks();
       clearEndpoints();
     }

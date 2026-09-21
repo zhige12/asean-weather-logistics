@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -38,6 +39,19 @@ public class OutreachService {
     /** 首批自动确认的百姓人数（其余走二次呼叫演示） */
     private static final int PUBLIC_FIRST_CONFIRM_COUNT = 8;
 
+    /** 分级叫应等级 → 中文名（计划书模块四：黄=关注 / 橙=准备 / 红=立即行动） */
+    public static final Map<String, String> LEVEL_NAMES = Map.of(
+            "NORMAL", "常规通知", "YELLOW", "黄色关注", "ORANGE", "橙色准备", "RED", "红色立即行动");
+    /** 分级叫应等级 → 触达通道（黄=App推送 / 橙=App+短信 / 红=App+语音外呼） */
+    public static final Map<String, String> LEVEL_CHANNELS = Map.of(
+            "NORMAL", "App推送", "YELLOW", "App推送", "ORANGE", "App+短信", "RED", "App+语音外呼");
+    /** 分级叫应等级 → 确认方式（黄=点击确认 / 橙=回复确认 / 红=语音确认） */
+    public static final Map<String, String> LEVEL_CONFIRM = Map.of(
+            "NORMAL", "点击确认", "YELLOW", "点击确认", "ORANGE", "回复确认", "RED", "语音确认");
+    /** 分级叫应等级 → 未确认升级策略 */
+    public static final Map<String, String> LEVEL_ESCALATION = Map.of(
+            "NORMAL", "—", "YELLOW", "App二次提醒", "ORANGE", "短信+App二次提醒", "RED", "未确认自动上报调度端");
+
     public record TargetStatus(String id, String role, String roleName, String name,
                                boolean delivered, boolean confirmed, boolean escalated,
                                String channel, Long confirmedAt) {
@@ -69,6 +83,10 @@ public class OutreachService {
     private final Map<String, Map<String, String>> messages = new ConcurrentHashMap<>();
     private volatile String activePlanId;
     private volatile long dispatchedAt;
+    /** 当前批次的分级叫应等级（NORMAL/YELLOW/ORANGE/RED），由沙盘风险状态研判 */
+    private volatile String alertLevel = "NORMAL";
+    /** 红色级：叫应窗口结束仍未确认、已自动上报调度端的目标 id */
+    private final Set<String> reported = ConcurrentHashMap.newKeySet();
 
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "outreach-scheduler");
@@ -95,6 +113,8 @@ public class OutreachService {
         messages.clear();
         this.activePlanId = planId;
         this.dispatchedAt = System.currentTimeMillis();
+        this.alertLevel = computeAlertLevel();
+        this.reported.clear();
 
         // 双向切换方向（3.4）：road_to_water / water_to_road / dual_risk / normal
         boolean waterBlocked = sandbox.waterBlocked();
@@ -102,8 +122,8 @@ public class OutreachService {
         String direction = sandbox.direction();
 
         decisionLog.log("DISPATCH", "确认切换方案",
-                String.format("调度员确认方案%s（%s），任务变更指令生成并下发（切换方向：%s）",
-                        planId, planName, direction));
+                String.format("调度员确认方案%s（%s），任务变更指令生成并下发（切换方向：%s，叫应等级：%s）",
+                        planId, planName, direction, LEVEL_NAMES.getOrDefault(alertLevel, alertLevel)));
 
         // ---- 调度员（PC大屏）：送达即确认（本人操作） ----
         if (config.targetEnabled(DemoConfigService.TARGET_DISPATCHER)) {
@@ -115,21 +135,21 @@ public class OutreachService {
         // ---- 货车司机阿明：执行指令 + 权益保障包（中越双语） ----
         if (config.targetEnabled(DemoConfigService.TARGET_DRIVER)) {
             put(new TargetStatus("driver-1", DemoConfigService.TARGET_DRIVER,
-                    "货车司机", "阿明（桂A·D12345）", true, false, false, "App推送", null),
+                    "货车司机", "阿明（桂A·D12345）", true, false, false, LEVEL_CHANNELS.get(alertLevel), null),
                     driverMessages(planId, waterBlocked));
         }
 
         // ---- 越方接力司机阿雄（第⑨幕「越南同事也收到通知」）：越南语为主文案 ----
         if (config.targetEnabled(DemoConfigService.TARGET_DRIVER_VN)) {
             put(new TargetStatus("driver-vn-1", DemoConfigService.TARGET_DRIVER_VN,
-                    "越南司机", "阿雄（越籍车队）", true, false, false, "App推送（越语）", null),
+                    "越南司机", "阿雄（越籍车队）", true, false, false, LEVEL_CHANNELS.get(alertLevel) + "（越语）", null),
                     driverMessagesVn(planId, waterBlocked));
         }
 
         // ---- 船东/船员：按切换方向生成（公路切水运=准备装船 / 水运切公路=取消装船 / 正常=过闸建议） ----
         if (config.targetEnabled(DemoConfigService.TARGET_SHIPOWNER)) {
             put(new TargetStatus("ship-1", DemoConfigService.TARGET_SHIPOWNER,
-                    "船东/船员", "船东/船员", true, false, false, "App推送", null),
+                    "船东/船员", "船东/船员", true, false, false, LEVEL_CHANNELS.get(alertLevel), null),
                     Map.of("message", shipMessage(planId, waterBlocked, roadBlocked)));
         }
 
@@ -149,6 +169,13 @@ public class OutreachService {
                     PUBLIC_FIRST_CONFIRM_DELAY_S + ESCALATE_DELAY_S, TimeUnit.SECONDS);
             scheduler.schedule(this::confirmEscalated,
                     PUBLIC_FIRST_CONFIRM_DELAY_S + ESCALATE_DELAY_S + ESCALATED_CONFIRM_DELAY_S,
+                    TimeUnit.SECONDS);
+        }
+
+        // 红色立即行动：叫应窗口结束仍未确认的关键角色 → 自动上报调度端人工介入（分级叫应闭环）
+        if ("RED".equals(alertLevel)) {
+            scheduler.schedule(this::reportUnconfirmedToDispatcher,
+                    PUBLIC_FIRST_CONFIRM_DELAY_S + ESCALATE_DELAY_S + ESCALATED_CONFIRM_DELAY_S + 3,
                     TimeUnit.SECONDS);
         }
 
@@ -182,6 +209,10 @@ public class OutreachService {
         m.put("planId", activePlanId == null ? "" : activePlanId);
         // 批次时间戳：司机端据此识别"同一会话内调度端二次下发"（id 不变但方案已变）
         m.put("dispatchedAt", dispatchedAt);
+        m.put("alertLevel", alertLevel);
+        m.put("alertLevelName", LEVEL_NAMES.getOrDefault(alertLevel, alertLevel));
+        m.put("confirmMode", LEVEL_CONFIRM.getOrDefault(alertLevel, "点击确认"));
+        m.put("escalationPolicy", LEVEL_ESCALATION.getOrDefault(alertLevel, "—"));
         return m;
     }
 
@@ -206,6 +237,13 @@ public class OutreachService {
         m.put("confirmed", confirmed);
         m.put("pending", rows.size() - confirmed);
         m.put("escalated", escalated);
+        // 分级叫应等级（黄/橙/红）：驱动大屏与司机端的分级标识与升级策略展示
+        m.put("alertLevel", alertLevel);
+        m.put("alertLevelName", LEVEL_NAMES.getOrDefault(alertLevel, alertLevel));
+        m.put("alertChannel", LEVEL_CHANNELS.getOrDefault(alertLevel, "App推送"));
+        m.put("confirmMode", LEVEL_CONFIRM.getOrDefault(alertLevel, "点击确认"));
+        m.put("escalationPolicy", LEVEL_ESCALATION.getOrDefault(alertLevel, "—"));
+        m.put("reported", new ArrayList<>(reported));
         return m;
     }
 
@@ -214,6 +252,8 @@ public class OutreachService {
         messages.clear();
         activePlanId = null;
         dispatchedAt = 0;
+        alertLevel = "NORMAL";
+        reported.clear();
         broadcast();
         return status();
     }
@@ -281,6 +321,49 @@ public class OutreachService {
             routeAgentService.broadcastEvent("outreach-update", status());
         } catch (Exception e) {
             log.debug("outreach broadcast failed: {}", e.toString());
+        }
+    }
+
+    /**
+     * 分级叫应等级研判：由沙盘风险状态推导。
+     * 红=已触发熔断/禁航；橙=降雨达阈值 80% 以上（逼近）；黄=达阈值 50% 以上（关注）。
+     * r 取友谊关、芒街两断面「预报降雨 / 各自熔断阈值」的最大值。
+     */
+    private String computeAlertLevel() {
+        if (sandbox.roadBlocked() || sandbox.waterBlocked()) {
+            return "RED";
+        }
+        double r = Math.max(
+                ratio(sandbox.ygg().forecastMm, config.fuseThresholdMm()),
+                ratio(sandbox.mc().forecastMm, DecisionSandboxService.MC_THRESHOLD_MM));
+        if (r >= 0.8) {
+            return "ORANGE";
+        }
+        if (r >= 0.5) {
+            return "YELLOW";
+        }
+        return "NORMAL";
+    }
+
+    private static double ratio(double mm, double threshold) {
+        return threshold <= 0 ? 0.0 : mm / threshold;
+    }
+
+    /** 红色级叫应闭环：叫应窗口结束仍未确认的关键角色（司机/船东）自动上报调度端。 */
+    private void reportUnconfirmedToDispatcher() {
+        List<String> names = new ArrayList<>();
+        for (TargetStatus t : targets.values()) {
+            if (!t.confirmed()
+                    && !DemoConfigService.TARGET_DISPATCHER.equals(t.role())
+                    && !DemoConfigService.TARGET_PUBLIC.equals(t.role())
+                    && reported.add(t.id())) {
+                names.add(t.roleName());
+            }
+        }
+        if (!names.isEmpty()) {
+            decisionLog.log("ESCALATE", "红色叫应上报调度端",
+                    "红色立即行动级：" + String.join("、", names) + " 超时未确认，已自动上报调度端人工介入");
+            broadcast();
         }
     }
 

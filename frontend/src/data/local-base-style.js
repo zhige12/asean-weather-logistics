@@ -1,11 +1,14 @@
 // 自研本地矢量底图样式（OpenMapTiles schema，对应 planetiler OpenMapTilesProfile 输出）。
 // 数据源指向后端静态映射 /tiles/{z}/{x}/{y}.pbf，完全离线、无第三方在线依赖。
+// 注意：MapLibre 在 Web Worker 中加载瓦片，Worker 没有文档基址，相对 URL 无法解析
+// （new Request('/tiles/...') 抛 "Failed to parse URL"）→ 必须拼成绝对 URL。
+const TILE_BASE = (typeof location !== 'undefined' && location.origin) ? location.origin : ''
 export default {
   version: 8,
   sources: {
     local: {
       type: 'vector',
-      tiles: ['/tiles/{z}/{x}/{y}.pbf'],
+      tiles: [`${TILE_BASE}/tiles/{z}/{x}/{y}.pbf`],
       maxzoom: 14
     }
   },

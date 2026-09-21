@@ -7,6 +7,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -58,6 +59,25 @@ public class PlatformConfigController {
         // 阈值或货物变化后：沙盘立即按新阈值重估（熔断状态实时联动）
         if (sandbox.pushed()) {
             sandbox.evaluate("开放平台配置调整");
+        }
+        return updated;
+    }
+
+    /**
+     * 一键套用预设智能体模板（冷链火龙果 / 电子元件防潮 / 大宗普货）：
+     * 同时切换风险偏好+货物类型+触达名单，沙盘与方案对比实时联动。
+     */
+    @PostMapping("/template")
+    public Map<String, Object> applyTemplate(@RequestBody Map<String, Object> body) {
+        String id = body.get("id") instanceof String s ? s : "";
+        Map<String, Object> updated = config.applyTemplate(id);
+        decisionLog.log("CONFIG", "套用智能体模板",
+                String.format("套用模板：%s（风险容忍度=%s，阈值%.0fmm，货物=%s，触达%s个角色）",
+                        updated.get("activeTemplate"), updated.get("riskProfileName"),
+                        updated.get("fuseThresholdMm"), updated.get("cargoTypeName"),
+                        ((List<?>) updated.getOrDefault("outreachTargets", List.of())).size()));
+        if (sandbox.pushed()) {
+            sandbox.evaluate("套用智能体模板");
         }
         return updated;
     }

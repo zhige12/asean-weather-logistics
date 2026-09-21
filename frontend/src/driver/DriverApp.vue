@@ -1,143 +1,138 @@
 <template>
   <div class="phone" :class="{ 'nav-mode': navigating || previewing }">
-    <!-- ====== HOME PAGE ====== -->
-    <div v-if="!navigating && !previewing" class="home-page">
-      <div class="home-hero">
-        <div class="home-logo">
-          <span class="logo-icon">🚛</span>
-          <h1>跨境物流导航</h1>
-          <p class="home-sub">东盟 · 气象智能预警 · 安全护航</p>
-        </div>
+    <!-- ====== HOME PAGE（高德风格：全屏地图 + 悬浮搜索 + 宫格 + 胶囊 Tab）====== -->
+    <div v-if="!navigating && !previewing" class="home-page amap">
+      <!-- 全屏可交互地图背景 -->
+      <div ref="homeMapEl" class="home-map"></div>
+
+      <!-- 右侧浮动地图控件 -->
+      <div class="hm-ctrl">
+        <button class="hm-ctrl-btn" title="放大" @click="homeZoom(1)">＋</button>
+        <button class="hm-ctrl-btn" title="缩小" @click="homeZoom(-1)">－</button>
+        <button class="hm-ctrl-btn" title="回到网络中心" @click="homeLocate()">📍</button>
       </div>
 
-      <div class="home-form">
-        <div class="form-card">
-          <div class="form-row">
-            <label class="form-label">出发地</label>
-            <div class="form-input-wrap">
-              <span class="input-icon from">起</span>
-              <input v-model="originId" list="node-suggestions"
-                     placeholder="输入城市名或 ID，如 南宁"
-                     @focus="$event.target.select()" />
+      <!-- 模式 / 路线状态浮标 -->
+      <div class="hm-modechip" :class="mode === 'LOGISTICS' ? 'logi' : 'pub'">
+        <span class="mode-name">{{ mode === 'LOGISTICS' ? '物流任务模式' : '普通导航模式' }}</span>
+        <template v-if="mode === 'LOGISTICS'">
+          <span class="strip-dot"></span>
+          <span class="strip-text">{{ statusText }}</span>
+          <button v-if="task && task.status !== 'ACCEPTED'" class="mode-act accept" :disabled="taskAccepting" @click="acceptTask">
+            {{ taskAccepting ? '接单中…' : '确认接单' }}
+          </button>
+          <span v-else class="mode-act done">已接单</span>
+          <span class="mode-act-exit" @click="exitLogisticsMode">退出</span>
+        </template>
+        <span v-else class="mode-hint">免费导航 · 天气与口岸提醒</span>
+      </div>
+
+      <!-- 悬浮搜索框：收起单行 / 展开起终点输入 -->
+      <div class="hm-search" :class="{ open: homeSearchOpen }">
+        <div v-if="!homeSearchOpen" class="hm-search-bar" @click="homeSearchOpen = true">
+          <span class="hm-ico">🔍</span>
+          <span class="hm-ph">查找地点、规划路线</span>
+          <span class="hm-ico">🎤</span>
+        </div>
+        <div v-else class="hm-search-panel">
+          <!-- 起终点一体输入盒：左侧绿-虚线-红站点轨道 + 右侧交换按钮（高德/滴滴式），替代盒式双输入框 -->
+          <div class="od-box">
+            <div class="od-rail"><span class="od-dot from"></span><span class="od-line"></span><span class="od-dot to"></span></div>
+            <div class="od-fields">
+              <input v-model="originId" list="node-suggestions" placeholder="从哪里出发？如 南宁" @focus="$event.target.select()" />
+              <div class="od-divider"></div>
+              <input v-model="destinationId" list="node-suggestions" placeholder="要去哪里？如 河内" @focus="$event.target.select()" />
             </div>
-          </div>
-          <div class="form-swap" @click="swapOD">
-            <span>⇅</span>
-          </div>
-          <div class="form-row">
-            <label class="form-label">目的地</label>
-            <div class="form-input-wrap">
-              <span class="input-icon to">终</span>
-              <input v-model="destinationId" list="node-suggestions"
-                     placeholder="输入城市名或 ID，如 河内"
-                     @focus="$event.target.select()" />
-            </div>
+            <button class="od-swap" title="交换起终点" @click="swapOD">⇅</button>
           </div>
           <datalist id="node-suggestions">
             <option v-for="(name, id) in NODE_NAMES" :key="id" :value="name">{{ id }}</option>
           </datalist>
-
           <div class="quick-picks">
             <span class="quick-label">常用路线</span>
             <div class="quick-chips">
-              <button v-for="r in quickRoutes" :key="r.key" class="quick-chip"
-                      @click="originId = r.from; destinationId = r.to">
-                {{ r.label }}
-              </button>
+              <button v-for="r in quickRoutes" :key="r.key" class="quick-chip" @click="originId = r.from; destinationId = r.to">{{ r.label }}</button>
             </div>
           </div>
-
-          <button class="start-btn" :disabled="routeLoading || candidateLoading || !originId || !destinationId"
-                  @click="btnAction">
-            <span v-if="routeLoading || candidateLoading" class="spinner"></span>
-            <span v-if="routeLoading">路线计算中…</span>
-            <span v-else-if="candidateLoading">搜索路线中…</span>
-            <span v-else>{{ candidates.length ? '查看路线预览' : '搜索路线并进入地图预览' }}</span>
-          </button>
-        </div>
-
-        <!-- 多路线候选 -->
-        <div v-if="candidates.length && !navigating && !previewing" class="cand-section">
-          <div class="cand-header">
-            <span>可选路线（{{ candidates.length }} 条）</span>
-            <span class="cand-hint">点选一条进入地图预览</span>
-          </div>
-          <div v-for="c in candidates" :key="c.key" class="cand-item" :class="{ sel: c.key === selectedKey }"
-               @click="openPreview(c.key)">
-            <div class="cand-left">
-              <span class="cand-radio" :class="{ on: c.key === selectedKey }"></span>
-              <div class="cand-info">
-                <div class="cand-title">{{ c.label }}</div>
-                <div class="cand-via">{{ c.via }}</div>
-                <div class="cand-meta">
-                  <span class="meta-tag">{{ c.hours }}h</span>
-                  <span class="meta-tag">{{ c.distanceKm }}km</span>
-                  <span class="meta-tag" :class="{ warn: c.riskCount > 0 }">
-                    {{ c.riskCount > 0 ? '⚠ ' + c.riskCount + ' 风险' : '✓ 无风险' }}
-                  </span>
+          <!-- 多路线候选 -->
+          <div v-if="candidates.length" class="cand-section">
+            <div class="cand-header">
+              <span>可选路线（{{ candidates.length }} 条）</span>
+              <span class="cand-hint">点选一条进入地图预览</span>
+            </div>
+            <div v-for="c in candidates" :key="c.key" class="cand-item" :class="{ sel: c.key === selectedKey }" @click="openPreview(c.key)">
+              <div class="cand-left">
+                <span class="cand-radio" :class="{ on: c.key === selectedKey }"></span>
+                <div class="cand-info">
+                  <div class="cand-title">{{ c.label }}</div>
+                  <div class="cand-via">{{ c.via }}</div>
+                  <div class="cand-meta">
+                    <span class="meta-tag">{{ c.hours }}h</span>
+                    <span class="meta-tag">{{ c.distanceKm }}km</span>
+                    <span class="meta-tag" :class="{ warn: c.riskCount > 0 }">{{ c.riskCount > 0 ? '⚠ ' + c.riskCount + ' 风险' : '✓ 无风险' }}</span>
+                  </div>
                 </div>
               </div>
+              <div class="cand-right">
+                <span v-if="c.hazardProbability >= 0" class="prob-pill" :class="probClass(c.hazardProbability)">{{ c.hazardProbability }}%</span>
+                <span class="prob-arrow" v-if="c.key === selectedKey">▶</span>
+              </div>
             </div>
-            <div class="cand-right">
-              <span v-if="c.hazardProbability >= 0" class="prob-pill" :class="probClass(c.hazardProbability)">
-                {{ c.hazardProbability }}%
-              </span>
-              <span class="prob-arrow" v-if="c.key === selectedKey">▶</span>
-            </div>
+          </div>
+          <div class="hm-search-actions">
+            <button class="hm-close" @click="homeSearchOpen = false">收起</button>
+            <button class="start-btn" :disabled="routeLoading || candidateLoading || !originId || !destinationId" @click="btnAction">
+              <span v-if="routeLoading || candidateLoading" class="spinner"></span>
+              <span v-if="routeLoading">路线计算中…</span>
+              <span v-else-if="candidateLoading">搜索路线中…</span>
+              <span v-else>{{ candidates.length ? '查看路线预览' : '搜索路线并进入地图预览' }}</span>
+            </button>
           </div>
         </div>
+      </div>
 
-        <!-- 司机/货物信息快捷入口 -->
-        <div class="home-bottom">
-          <!-- 模式标识（剧本第一/四幕） -->
-          <div class="mode-bar" :class="mode === 'LOGISTICS' ? 'logi' : 'pub'">
-            <span class="mode-name">
-              {{ mode === 'LOGISTICS' ? '📋 物流任务模式' : '🧭 普通导航模式' }}
-            </span>
-            <span class="mode-hint">
-              {{ mode === 'LOGISTICS' ? (task ? task.taskId : '') : '免费导航 · 天气与口岸提醒' }}
-            </span>
-            <button v-if="mode === 'LOGISTICS' && task && task.status !== 'ACCEPTED'"
-                    class="mode-act accept" :disabled="taskAccepting" @click="acceptTask">
-              {{ taskAccepting ? '接单中…' : '确认接单' }}
-            </button>
-            <span v-else-if="mode === 'LOGISTICS'" class="mode-act done">已接单</span>
-            <span v-if="mode === 'LOGISTICS'" class="mode-act-exit" @click="exitLogisticsMode">退出任务</span>
-          </div>
+      <!-- 宫格快捷入口（物流功能） -->
+      <div v-show="!homeSearchOpen" class="hm-grid">
+        <button v-for="g in homeGrid" :key="g.key" class="hm-grid-item" @click="onHomeGrid(g.key)">
+          <span class="hm-grid-ico" :style="{ background: g.color }">{{ g.icon }}</span>
+          <span class="hm-grid-label">{{ g.label }}</span>
+        </button>
+      </div>
 
-          <!-- 路线状态条（绿色=畅通，剧本第四幕）；仅物流任务模式显示 -->
-          <div v-if="mode === 'LOGISTICS'" class="status-strip" :class="statusClass">
-            <span class="strip-dot"></span>
-            <span class="strip-text">{{ statusText }}</span>
-          </div>
+      <!-- 去X 导航卡片 -->
+      <div v-if="homeGoCard && !homeSearchOpen" class="hm-gocard">
+        <span class="hm-go-ico">🚗</span>
+        <div class="hm-go-info">
+          <div class="hm-go-title">去{{ destinationName }}</div>
+          <div class="hm-go-meta">{{ goKm }}公里 · {{ goMin }}分钟</div>
+          <div class="hm-go-bar"></div>
+        </div>
+        <button class="hm-go-btn" @click="btnAction">导航</button>
+      </div>
 
-          <div class="info-bar">
-            <span class="driver-tag">{{ driverName }} · {{ cargo.plate }}</span>
-            <span class="cargo-tag">{{ cargo.name }} {{ cargo.weight }}t</span>
-            <span class="link" @click="tab = 'me'">{{ mode === 'LOGISTICS' ? '详情 ›' : '编辑 ›' }}</span>
-          </div>
-          <nav class="home-nav">
-            <span :class="{ active: tab === 'route' }" @click="tab = 'route'">路线</span>
-            <span :class="{ active: tab === 'task', 'has-task': taskChange && !taskChange.confirmed }" @click="tab = 'task'">
-              任务<span v-if="taskChange && !taskChange.confirmed" class="task-dot"></span>
-            </span>
-            <span :class="{ active: tab === 'alert' }" @click="tab = 'alert'">预警</span>
-            <span :class="{ active: tab === 'kb' }" @click="tab = 'kb'">知识库</span>
-            <span :class="{ active: tab === 'me' }" @click="tab = 'me'">我</span>
-          </nav>
+      <!-- 底部胶囊 Tab -->
+      <nav class="hm-tabbar">
+        <button v-for="t in homeTabs" :key="t.key" class="hm-tab" :class="{ active: tab === t.key }" @click="tab = t.key">
+          <span class="hm-tab-ico">{{ t.icon }}</span>
+          <span class="hm-tab-label">{{ t.label }}</span>
+          <span v-if="t.key === 'task' && taskChange && !taskChange.confirmed" class="hm-tab-dot"></span>
+        </button>
+      </nav>
 
-          <!-- 非首页 tab 内容（任务/预警/知识库/我） -->
-          <div v-if="tab !== 'route'" class="tab-content">
-            <button class="drv-back-btn" @click="tab = 'route'">
-              <span class="back-arrow">‹</span> 返回
-            </button>
+      <!-- 非首页 tab：底部抽屉 -->
+      <div v-if="tab !== 'route'" class="hm-sheet">
+        <div class="hm-sheet-head">
+          <span>{{ tabTitle }}</span>
+          <button class="hm-sheet-close" @click="tab = 'route'">✕</button>
+        </div>
+        <div class="hm-sheet-body">
             <!-- ===== 任务变更（调度大屏对齐：第五幕） ===== -->
             <div v-show="tab === 'task'">
               <section class="card task-card" :class="{ confirmed: taskChange && taskChange.confirmed }">
                 <div class="card-head">
-                  <span>📱 任务变更通知</span>
+                  <span>任务变更通知</span>
                   <span v-if="taskChange" class="task-state" :class="taskChange.confirmed ? 'ok' : 'pending'">
-                    {{ taskChange.confirmed ? '✅ 已确认' : '⏳ 待确认' }}
+                    {{ taskChange.confirmed ? '已确认' : '待确认' }}
                   </span>
                 </div>
                 <template v-if="taskChange">
@@ -154,7 +149,7 @@
                   <pre class="task-msg">{{ taskMessageText }}</pre>
                   <!-- 权益保障包高亮 -->
                   <div class="rights-box">
-                    <div class="rights-title">🛡 您的权益保障</div>
+                    <div class="rights-title">您的权益保障</div>
                     <div class="rights-item">✓ 随船期间按出勤计算工时，额外发放随船补贴</div>
                     <div class="rights-item">✓ 车辆滚装段已购买专项运输险</div>
                     <div class="rights-item">✓ 船上安排司机休息舱位，含餐饮</div>
@@ -162,7 +157,7 @@
                     <div class="rights-item">✓ 本次变更属不可抗力调度调整，不视为司机违约</div>
                   </div>
                   <button v-if="!taskChange.confirmed" class="confirm-task-btn" :disabled="taskConfirming" @click="confirmTaskChange">
-                    {{ taskConfirming ? '确认中…' : '✅ 确认接收' }}
+                    {{ taskConfirming ? '确认中…' : '确认接收' }}
                   </button>
                   <button v-else class="confirm-task-btn done" disabled>已确认接收 · 新路线已同步</button>
                   <div class="task-hint">如有异议，请联系调度中心。切换运输方式是调度端的决策权限。</div>
@@ -173,7 +168,7 @@
               <!-- AI 方案建议（让司机理解调度决策依据） -->
               <section class="card">
                 <div class="card-head">
-                  <span>🧠 AI 方案建议</span>
+                  <span>AI 方案建议</span>
                   <button class="refresh" @click="loadAgentPlans" :disabled="agentPlansLoading">{{ agentPlansLoading ? '分析中…' : '查看方案' }}</button>
                 </div>
                 <template v-if="agentPlans">
@@ -183,19 +178,19 @@
                       <span class="plan-name">{{ p.name }}</span>
                     </div>
                     <div class="plan-meta">
-                      <span :class="{ warn: p.extraHours > 0 }">⏱ {{ p.extraHours != null ? (p.extraHours>0?'+':'')+p.extraHours+'h' : '不可用' }}</span>
-                      <span :class="{ ok: p.costDeltaYuan < 0 }">💰 {{ p.costDeltaYuan != null ? (p.costDeltaYuan>0?'+':'')+p.costDeltaYuan+'元' : '-' }}</span>
-                      <span class="plan-risk">货损{{ p.damageRisk }}</span>
+                      <span :class="{ warn: p.extraHours > 0 }">时效 {{ p.extraHours != null ? (p.extraHours>0?'+':'')+p.extraHours+'h' : '不可用' }}</span>
+                      <span :class="{ ok: p.costDeltaYuan < 0 }">费用 {{ p.costDeltaYuan != null ? (p.costDeltaYuan>0?'+':'')+p.costDeltaYuan+'元' : '-' }}</span>
+                      <span class="plan-risk">货损 {{ p.damageRisk }}</span>
                     </div>
                   </div>
-                  <div class="plan-rec">💡 {{ agentPlans.recommendation }}</div>
+                  <div class="plan-rec">{{ agentPlans.recommendation }}</div>
                 </template>
                 <div v-else class="empty">点击查看调度端 AI 生成的三方案对比</div>
               </section>
 
               <!-- 触达状态（本人视角） -->
               <section class="card" v-if="outreachStatus.total">
-                <div class="card-head"><span>📡 触达状态</span><span class="count">{{ outreachStatus.confirmed }}/{{ outreachStatus.total }}</span></div>
+                <div class="card-head"><span>触达状态</span><span class="count">{{ outreachStatus.confirmed }}/{{ outreachStatus.total }}</span></div>
                 <div class="touch-bar">
                   <div class="touch-fill" :style="{ width: (outreachStatus.confirmed / outreachStatus.total * 100) + '%' }"></div>
                 </div>
@@ -238,30 +233,41 @@
               </section>
             </div>
             <div v-show="tab === 'me'">
-              <section class="card">
-                <div class="card-head"><span>司机信息</span></div>
-                <!-- 物流任务模式下车辆与货物由派单下发，司机不可改，
-                     避免演示中被改动导致大屏与司机端信息对不上 -->
-                <div v-if="mode === 'LOGISTICS'" class="me-locked">
-                  📋 物流任务模式：车牌与货物信息以公司派单为准，不可修改
+              <!-- 资料头卡：头像 + 姓名 + 车牌/车型标签，先亮身份再列明细 -->
+              <section class="me-hero">
+                <div class="me-avatar">{{ (driverName || '司').slice(0, 1) }}</div>
+                <div class="me-hero-info">
+                  <div class="me-hero-name">{{ driverName || '未设置姓名' }}</div>
+                  <div class="me-hero-sub">
+                    <span class="me-plate">{{ cargo.plate || '未登记车牌' }}</span>
+                    <span class="me-truck">{{ truckType }}</span>
+                  </div>
                 </div>
-                <div class="me-row"><span class="me-label">姓名</span><input v-model="driverName" class="me-input" /></div>
-                <div class="me-row"><span class="me-label">车牌</span><input v-model="cargo.plate" class="me-input" :disabled="mode === 'LOGISTICS'" /></div>
+                <span v-if="mode === 'LOGISTICS'" class="me-mode-tag">任务模式</span>
+              </section>
+              <!-- 物流任务模式下车辆与货物由派单下发，司机不可改，
+                   避免演示中被改动导致大屏与司机端信息对不上 -->
+              <div v-if="mode === 'LOGISTICS'" class="me-locked">
+                物流任务模式：车牌与货物信息以公司派单为准，不可修改
+              </div>
+              <!-- 分组列表：无边框行内编辑，右对齐取值，接近微信/货拉拉式表单 -->
+              <section class="me-group">
+                <div class="me-row"><span class="me-label">姓名</span><input v-model="driverName" class="me-input" placeholder="请输入姓名" /></div>
+                <div class="me-row"><span class="me-label">车牌</span><input v-model="cargo.plate" class="me-input" :disabled="mode === 'LOGISTICS'" placeholder="如 桂A·D12345" /></div>
                 <div class="me-row"><span class="me-label">车型</span>
-                  <select v-model="truckType" class="me-input">
+                  <select v-model="truckType" class="me-input me-select">
                     <option>冷藏半挂</option><option>普货半挂</option><option>危化罐车</option><option>大件平板</option><option>厢式中卡</option>
                   </select>
                 </div>
-                <div class="me-row"><span class="me-label">货物</span><input v-model="cargo.name" class="me-input" :disabled="mode === 'LOGISTICS'" /></div>
-                <div class="me-row"><span class="me-label">重量(t)</span><input v-model.number="cargo.weight" type="number" class="me-input" :disabled="mode === 'LOGISTICS'" /></div>
-                <div class="me-row"><span class="me-label">温控</span><input v-model="cargo.temp" class="me-input" :disabled="mode === 'LOGISTICS'" /></div>
-                <div class="me-row"><span class="me-label">语音</span>
-                  <button class="refresh" @click="voiceOn = !voiceOn">{{ voiceOn ? '已开启' : '已关闭' }}</button>
+                <div class="me-row"><span class="me-label">货物</span><input v-model="cargo.name" class="me-input" :disabled="mode === 'LOGISTICS'" placeholder="请输入货物名称" /></div>
+                <div class="me-row"><span class="me-label">重量(t)</span><input v-model.number="cargo.weight" type="number" class="me-input" :disabled="mode === 'LOGISTICS'" placeholder="0" /></div>
+                <div class="me-row"><span class="me-label">温控</span><input v-model="cargo.temp" class="me-input" :disabled="mode === 'LOGISTICS'" placeholder="如 冷鲜 2~6℃" /></div>
+                <div class="me-row"><span class="me-label">语音播报</span>
+                  <button class="me-switch" :class="{ on: voiceOn }" role="switch" :aria-checked="voiceOn" @click="voiceOn = !voiceOn"><span class="me-knob"></span></button>
                 </div>
-                <button class="save-btn" @click="saveDriverInfo">保存信息</button>
               </section>
+              <button class="save-btn" @click="saveDriverInfo">保存信息</button>
             </div>
-          </div>
         </div>
       </div>
     </div>
@@ -272,7 +278,13 @@
       <!-- 地图区域：占上方剩余空间。预览时面板固定在下方，与地图上下分栏、互不重叠 -->
       <div class="nav-map-wrap">
         <!-- 地图 -->
-        <div ref="mapEl" class="nav-map"></div>
+        <div ref="mapEl" :key="_mapRenderKey" class="nav-map"></div>
+
+        <!-- 底图加载遮罩：瓦片没到位前给明确加载态，取代裸白屏 -->
+        <div v-if="mapVeil" class="map-veil">
+          <span class="map-veil-spin"></span>
+          <span class="map-veil-text">地图加载中…</span>
+        </div>
 
         <!-- 地图图例 -->
         <div class="nav-legend">
@@ -318,7 +330,7 @@
             <div class="eta-sheen"></div>
             <div class="preview-head">
               <div class="preview-head-left">
-                <div class="preview-title"><span class="pv-ico">🧭</span>路线预览</div>
+                <div class="preview-title">路线预览</div>
                 <div class="preview-sub">共 {{ candidates.length }} 条可选路线 · 预计到达 {{ etaArrival }}</div>
               </div>
               <div class="nav-risk-badge" :class="previewStatusClass">
@@ -557,6 +569,53 @@
           </div>
         </div>
       </transition>
+
+      <!-- 调度任务变更：导航中弹出的「确认接收」抽屉（贴底，不遮挡上方调度路线预览） -->
+      <transition name="fade">
+        <div v-if="showDispatchConfirm && taskChange" class="dispatch-overlay" :class="{ collapsed: dispatchConfirmCollapsed }">
+          <div class="dispatch-sheet">
+            <div class="dc-head">
+              <span class="dc-title">📱 调度任务变更 · 请确认接收</span>
+              <button class="dc-toggle" @click="dispatchConfirmCollapsed = !dispatchConfirmCollapsed">
+                {{ dispatchConfirmCollapsed ? '展开详情 ▴' : '看路线 ▾' }}
+              </button>
+            </div>
+            <div v-show="!dispatchConfirmCollapsed" class="dc-body">
+              <div class="dc-plan">
+                <span class="task-channel">{{ taskChange.channel || 'App推送' }}</span>
+                <span class="task-plan">方案 {{ taskChange.planId }}</span>
+              </div>
+              <div class="task-lang">
+                <button class="lang-btn" :class="{ on: taskLang === 'zh' }" @click="taskLang = 'zh'">🇨🇳 中文</button>
+                <button class="lang-btn" :class="{ on: taskLang === 'vi' }" @click="taskLang = 'vi'">🇻🇳 Tiếng Việt</button>
+                <button class="speak-btn" @click="speakTask(taskLang)" title="语音播报">🔊 播报</button>
+              </div>
+              <pre class="task-msg">{{ taskMessageText }}</pre>
+              <div class="rights-box">
+                <div class="rights-title">您的权益保障</div>
+                <div class="rights-item">✓ 随船期间按出勤计算工时，额外发放随船补贴</div>
+                <div class="rights-item">✓ 车辆滚装段已购买专项运输险</div>
+                <div class="rights-item">✓ 船上安排司机休息舱位，含餐饮</div>
+                <div class="rights-item">✓ 抵达海防港后公司安排返程交通</div>
+                <div class="rights-item">✓ 本次变更属不可抗力调度调整，不视为司机违约</div>
+              </div>
+            </div>
+            <button class="confirm-task-btn" :disabled="taskConfirming" @click="confirmTaskChange">
+              {{ taskConfirming ? '处理中…' : '✅ 确认接收并进入导航' }}
+            </button>
+            <div class="dc-hint">上方地图为调度中心下发的新路线预览，可点「看路线」查看后再确认接收。</div>
+          </div>
+        </div>
+      </transition>
+    </div>
+
+    <!-- 左边缘侧滑返回指示条：仅拖动时点亮，跟手展示进度（不影响点击） -->
+    <div class="swipe-edge" :class="{ on: swipeEdgeProgress > 0 }" aria-hidden="true">
+      <span class="swipe-edge-glow" :style="{ transform: 'scaleX(' + swipeEdgeProgress + ')' }"></span>
+      <span class="swipe-edge-chev" :style="{
+              transform: 'translateX(' + (-16 + swipeEdgeProgress * 22) + 'px) scale(' + (0.7 + swipeEdgeProgress * 0.3) + ')',
+              opacity: 0.35 + swipeEdgeProgress * 0.65
+            }">‹</span>
     </div>
   </div>
 </template>
@@ -565,11 +624,27 @@
 import axios from 'axios'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import 'maplibre-gl/dist/maplibre-gl.css'
+import '@maplibre/maplibre-gl-leaflet'
+import localBaseStyle from '../data/local-base-style'
+import tiandituBaseStyle from '../data/tianditu-base-style'
 import { reshapeForZoom } from '../utils/pathReshape.js'
 import { Geolocation } from '@capacitor/geolocation'
 import { createRouteFlow } from '../utils/routeFlow.js'
 import { splitRouteByRisk, riskEdgeSet } from '../utils/routeSegments.js'
+import { BASE_CHAIN, baseDef } from '../utils/tileSources.js'
+// Leaflet Canvas 渲染器销毁竞态防护（_redraw 异步排队、销毁后 _ctx 已删仍回调 → reading 'save' 报错）
+import '../utils/leafletCanvasGuard.js'
 import { normalizeForTTS, detectLanguage, HAZARD_VN_MAP } from '../utils/ttsNormalizer.js'
+
+/**
+ * EPSG:3857 墨卡托 Y（单位：度当量）：lat → 180/π · ln(tan(π/4 + φ/2))。
+ * 纬度方向不能用度数直接算跨度（高纬度被拉伸），铺满/适配缩放公式都靠它换算。
+ */
+function mercY(latDeg) {
+  const phi = latDeg * Math.PI / 180
+  return Math.log(Math.tan(Math.PI / 4 + phi / 2)) * 180 / Math.PI
+}
 
 // 口岸坐标（真实经纬度），供司机端地图标注
 const PORTS = [
@@ -678,12 +753,16 @@ export default {
       // 之前 planId 只在 _switchNavForPlan/_autoStartDispatchNav 的参数里用过就丢了，
       // 导致播报和状态卡无从判断"当前是不是水运方案"。改为落库到组件状态，供全流程取用。
       activePlanId: null,
+      // 调度方案切换期间的抑制标志：防止 destinationId watcher 触发 _resetCandidates 清空路线
+      _switchingPlan: false,
       // GPS 定位状态
       gpsStatus: 'searching', // searching | locked | unavailable | simulating
       // 导航状态
       routeLoading: false,
       candidateLoading: false,
       navigating: false,
+      // 本次导航出发时刻：ETA 显示/播报都以此为锚，避免轮询刷新后到达时间被反复重算
+      navigationStartedAt: 0,
       // 全屏大地图预览（选路线阶段）：预览中尚未开始导航，无 GPS 守护
       previewing: false,
       // 预览面板列表收起：收起后浮层更矮，露出更多底图与路线
@@ -725,24 +804,50 @@ export default {
       taskChange: null,
       taskConfirming: false,
       taskLang: 'zh',
+      // 导航中收到调度任务变更：先播报天气灾害 → 切到调度路线预览 → 弹出「确认接收」抽屉
+      showDispatchConfirm: false,
+      dispatchConfirmCollapsed: false,
+      // 已在预览阶段完成路线切换/重算的方案 id：确认时无需再次重算，直接进导航
+      _dispatchPreviewPlanId: null,
+      // 编排进行中的重入保护（outreach-update 可能短时间多次触发）
+      _dispatchHandling: false,
       // 触达状态（本人确认状态同步）
       outreachStatus: { targets: [], total: 0, confirmed: 0, pending: 0 },
       // AI 方案建议（A/B/C 三方案对比，供司机理解调度决策依据）
       agentPlans: null,
       agentPlansLoading: false,
-      // 底图源：false=在线 OSM（默认），true=离线瓦片（断网兜底）
-      _useOfflineTiles: false,
-      _osmFailCount: 0,
-      _tileSourceDetected: false,
+      // 底图：默认在线天地图影像，按「天地图 → OSM → 本地离线矢量」自动降级。
+      // 在线源在探测窗口内无任一瓦片成功（断网/403）即降到下一个；navigator.onLine=false
+      // 时直接从本地矢量起，省掉在线等待。导航图与首页图各持一份降级状态，互不影响。
+      // _mbLayer 仍保留：矢量兜底激活时指向其 MapLibre 桥接层，供既有健康检查逻辑复用。
+      _mbLayer: null,
+      _homeMbLayer: null,
+      _navBase: null,
+      _homeBase: null,
+      // risk-blink 的 JS 脉冲（preferCanvas 后折线无 SVG 元素可挂 CSS 类名）
+      _riskBlinkTimer: null,
+      _riskBlinkPhase: false,
+      _riskBlinkState: { route: false, risk: false },
+      _mapHealthTimers: [],
+      _mapHardRecovered: false,
+      // 改变 key 会让 Vue 直接替换整个地图 DOM，彻底摆脱旧 Leaflet 内部状态
+      _mapRenderKey: 0,
+      // 底图加载遮罩：瓦片没到位时显示加载态，避免白屏
+      mapVeil: false,
       _lastVoiceText: '',
       _lastVoiceAt: 0,
       // 播报世代号：抢占时递增，旧播报链路的回调据此自行作废，避免旧内容继续播
       _voiceSeq: 0,
       // 最近一次 _cancelVoice() 的 Promise：起播前要 await 它，确保旧语音（尤其原生 TTS）真的停了
       _cancelPromise: null,
-      // 高优先级播报占用标记（导航开始播报用）：占用期间其它播报一律不许抢占
+      // 最高优先级播报占用标记（导航开始播报专用）：占用期间其它播报一律不许抢占/取消
       _voiceLocked: false,
       _voiceLockTimer: null,
+      _criticalVoiceSeq: 0,
+      // 最近一次确认真正开始发声的播报世代；用于出发播报"未出声自动重试"
+      _voiceLastStartAt: 0,
+      _voiceLastStartSeq: 0,
+      _voiceActiveSeq: 0,
       // 语音链路诊断：仅 URL 带 ?voicedebug=1 时在导航页显示（不影响正常演示）
       voiceDebugOn: false,
       voiceDebug: '',
@@ -754,8 +859,14 @@ export default {
       _hazardVoiceAt: 0,
       // 全屏导航菜单
       showNavMenu: false,
+      // 首页（高德风格）悬浮搜索框是否展开
+      homeSearchOpen: false,
+      // 首页概览地图独立实例（与导航地图 this.map 互不干扰）
+      _homeMap: null,
       // 退出导航二次确认弹层
       showExitConfirm: false,
+      // 左边缘侧滑返回的跟手进度（0~1）：驱动边缘指示条的位移/透明度，松手达阈值即返回上一级
+      swipeEdgeProgress: 0,
       map: null,
       baseLine: null,
       routeLine: null,
@@ -767,31 +878,42 @@ export default {
     // 当前路线上的风险段（后端 riskSegments 下发的是全量风险，需按路径边过滤，
     // 保证「风险路段」列表与地图上标红的路段完全一致）
     pathRisks() { return this._risksOnRoute(this.route) },
-    // 预计到达终点时刻 = 当前时间 + 全程耗时
+    // 预计到达时刻：导航中以出发时刻 + 当前全程耗时为锚，避免 15s 轮询刷新后 ETA 漂移；
+    // 预览/未开始导航时优先采用后端按天气/通关算好的 estimatedArrival。
+    etaDate() {
+      if (!this.route.estimatedHours) return null
+      if (this.navigating && this.navigationStartedAt) {
+        return new Date(this.navigationStartedAt + this.route.estimatedHours * 3600 * 1000)
+      }
+      const backendEta = Date.parse(this.route.estimatedArrival || '')
+      if (!Number.isNaN(backendEta)) return new Date(backendEta)
+      return new Date(Date.now() + this.route.estimatedHours * 3600 * 1000)
+    },
     etaArrival() {
-      if (!this.route.estimatedHours) return '--'
-      const d = new Date(Date.now() + this.route.estimatedHours * 3600 * 1000)
-      return d.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Shanghai' })
+      if (!this.etaDate) return '--'
+      return this.etaDate.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Shanghai' })
     },
     etaArrivalVN() {
-      if (!this.route.estimatedHours) return '--'
-      const d = new Date(Date.now() + this.route.estimatedHours * 3600 * 1000)
-      return d.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Ho_Chi_Minh' })
+      if (!this.etaDate) return '--'
+      return this.etaDate.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Ho_Chi_Minh' })
     },
-    // TTS 播报用口语化日期格式：9月8日15点30分
+    // TTS 播报用口语化日期格式：9月8日15点30分（固定按北京时间）
     etaArrivalZh() {
-      if (!this.route.estimatedHours) return '--'
-      const d = new Date(Date.now() + this.route.estimatedHours * 3600 * 1000)
-      return `${d.getMonth() + 1}月${d.getDate()}日${d.getHours()}点${d.getMinutes() === 0 ? '' : d.getMinutes() + '分'}`
+      if (!this.etaDate) return '--'
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric',
+        hour: '2-digit', minute: '2-digit', hour12: false
+      }).formatToParts(this.etaDate)
+      const get = t => (parts.find(p => p.type === t) || {}).value || '0'
+      return `${parseInt(get('month'))}月${parseInt(get('day'))}日${parseInt(get('hour'))}点${get('minute') === '00' ? '' : parseInt(get('minute')) + '分'}`
     },
     // TTS 播报用越南语口语化日期格式：ngày 8 tháng 9, 15 giờ 30 phút
     etaArrivalViTTS() {
-      if (!this.route.estimatedHours) return '--'
-      const d = new Date(Date.now() + this.route.estimatedHours * 3600 * 1000)
+      if (!this.etaDate) return '--'
       const parts = new Intl.DateTimeFormat('en-US', {
         timeZone: 'Asia/Ho_Chi_Minh', month: 'numeric', day: 'numeric',
         hour: '2-digit', minute: '2-digit', hour12: false
-      }).formatToParts(d)
+      }).formatToParts(this.etaDate)
       const get = t => (parts.find(p => p.type === t) || {}).value || '0'
       const h = parseInt(get('hour')), m = parseInt(get('minute'))
       return `ngày ${get('day')} tháng ${get('month')}, ${h} giờ ${m === 0 ? '' : m + ' phút'}`
@@ -803,6 +925,47 @@ export default {
       return new Date().toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Ho_Chi_Minh' })
     },
     originName() { return NODE_NAMES[this.resolvedOriginId] || this.originId },
+    /** 首页是否可见（非预览/非导航）：控制首页概览地图的建/销 */
+    homeVisible() { return !this.navigating && !this.previewing },
+    /** 首页宫格快捷入口（物流功能） */
+    homeGrid() {
+      return [
+        { key: 'task', icon: '📋', label: '物流任务', color: '#22c55e' },
+        { key: 'alert', icon: '⚠️', label: '风险预警', color: '#22c55e' },
+        { key: 'plans', icon: '🧠', label: 'AI方案', color: '#3b82f6' },
+        { key: 'kb', icon: '📚', label: '知识库', color: '#a855f7' },
+        { key: 'me', icon: '🚛', label: '我的车辆', color: '#ec4899' }
+      ]
+    },
+    /** 首页底部胶囊 Tab */
+    homeTabs() {
+      return [
+        { key: 'route', icon: '🧭', label: '首页' },
+        { key: 'task', icon: '📋', label: '任务' },
+        { key: 'alert', icon: '⚠️', label: '预警' },
+        { key: 'kb', icon: '📚', label: '知识库' },
+        { key: 'me', icon: '👤', label: '我的' }
+      ]
+    },
+    /** 底部抽屉标题 */
+    tabTitle() {
+      const t = this.homeTabs.find(x => x.key === this.tab)
+      return t ? t.label : ''
+    },
+    /** 是否展示「去X 导航」卡片：已有候选或已规划路线 */
+    homeGoCard() {
+      return !!(this.candidates.length || (this.route && this.route.pathCoords && this.route.pathCoords.length))
+    },
+    goKm() {
+      const c = this.selectedCandidate
+      const km = c ? c.distanceKm : this.route.totalDistanceKm
+      return km != null ? Math.round(km * 10) / 10 : '--'
+    },
+    goMin() {
+      const c = this.selectedCandidate
+      const h = c ? c.hours : this.route.estimatedHours
+      return h != null ? Math.round(h * 60) : '--'
+    },
     destinationName() { return NODE_NAMES[this.resolvedDestinationId] || this.destinationId },
     /** 把用户输入（ID 或中文名）解析为节点 ID */
     resolvedOriginId() { return this._resolveNodeId(this.originId) },
@@ -817,13 +980,13 @@ export default {
     isCanalPlan() { return this.activePlanId === 'B' },
     /** 运输方式简述（中文），供出发播报用。措辞避免与上一句"到南宁港六景作业区"重复 */
     transportBriefZh() {
-      return this.isCanalPlan()
+      return this.isCanalPlan
         ? '本次为公水联运，车辆在港区交接后，您随船经平陆运河至钦州港，再海运至越南海防港'
         : ''
     },
     /** 运输方式简述（越南语）。kênh đào Bình Lục = 平陆运河，与后端触达文案用词一致 */
     transportBriefVi() {
-      return this.isCanalPlan()
+      return this.isCanalPlan
         ? 'Chuyến này là vận tải liên hợp đường bộ - đường thủy, sau khi bàn giao xe tại cảng, '
           + 'anh đi cùng tàu qua kênh đào Bình Lục đến cảng Khâm Châu, rồi đi tiếp bằng đường biển đến cảng Hải Phòng'
         : ''
@@ -939,6 +1102,12 @@ export default {
       this.cargo.to = NODE_NAMES[v] || v
       this._resetCandidates()
     },
+    // 首页概览地图生命周期：回到首页建图，离开首页（预览/导航）销毁，
+    // 避免与导航地图 this.map 抢瓦片与内存。
+    homeVisible(v) {
+      if (v) this.$nextTick(() => this._buildHomeMap())
+      else this._destroyHomeMap()
+    },
     // 绕行方案详情弹层打开时自动语音播报
     showReroute(v) {
       if (v) {
@@ -962,12 +1131,15 @@ export default {
       this.voiceDebugOn = new URLSearchParams(window.location.search).get('voicedebug') === '1'
     } catch (e) { /* 忽略 */ }
     if (this.voiceDebugOn) this._vdbg('诊断开启 · native=' + this._isNativeShell())
-    // 先探测网络/OSM 可达性决定底图源，再建图（避免离线环境开局先闪一片灰）
-    this._detectTileSource().finally(() => {
-      this._tileSourceDetected = true
+    // 底图是本地 MapLibre 矢量瓦片（同源后端供给，离线可用），无需任何在线探测，
+    // 直接建图。
+    this.$nextTick(() => {
       this.initMap()
+      // 首页（高德风格）概览地图：仅在首页可见时建图
+      if (this.homeVisible) this._buildHomeMap()
     })
     this._initRipple()
+    this._initSwipeBack()
     this.connectAgent()
     this.loadCustoms()
     // 越方司机默认越南语播报/展示
@@ -976,12 +1148,14 @@ export default {
     this._loadCurrentTask()
     // 实时时钟
     this._clockTimer = setInterval(() => { this.$forceUpdate() }, 1000)
-    // 语音引擎保活：每 30s ping 一次，防止 Chrome 自动暂停
+    // 语音引擎保活：Chrome 对长句（>15s）会静默暂停且不触发 onend，
+    // 每 10s resume 一次保活，否则出发播报这类长文本会念到一半停住、队列卡死
     this._voiceKeepAlive = setInterval(() => {
-      if ('speechSynthesis' in window && window.speechSynthesis.paused) {
-        window.speechSynthesis.resume()
+      if ('speechSynthesis' in window) {
+        const s = window.speechSynthesis
+        if (s.speaking || s.paused) s.resume()
       }
-    }, 30000)
+    }, 10000)
     // 轮询兜底：15s 一次（SSE 为主通道）
     this.timer = setInterval(this.refreshAll, 15000)
     // AI 预警不再自动定时刷新（由用户点击触发，避免文案消失和重复播报）
@@ -989,25 +1163,23 @@ export default {
   beforeUnmount() {
     clearInterval(this.timer)
     if (this._rippleHandler) document.removeEventListener('pointerdown', this._rippleHandler)
+    if (this._swipeStartHandler) document.removeEventListener('pointerdown', this._swipeStartHandler)
+    if (this._swipeMoveHandler) document.removeEventListener('pointermove', this._swipeMoveHandler)
+    if (this._swipeEndHandler) document.removeEventListener('pointerup', this._swipeEndHandler)
+    if (this._swipeCancelHandler) document.removeEventListener('pointercancel', this._swipeCancelHandler)
     if (this.riskTimer) clearInterval(this.riskTimer)
     if (this._clockTimer) clearInterval(this._clockTimer)
     if (this._voiceKeepAlive) clearInterval(this._voiceKeepAlive)
     // 取消正在进行的播报（web speech + 原生 TTS）
-    this._cancelVoice()
+    this._cancelVoice(true)
     // 清掉高优先级占用定时器，避免卸载后回调还在跑
     if (this._voiceLockTimer) { clearTimeout(this._voiceLockTimer); this._voiceLockTimer = null }
     this._voiceLocked = false
-    if (this._riskMarkers) {
-      this._riskMarkers.forEach(m => { try { this.map.removeLayer(m); } catch (e) {} })
-    }
-    if (this._meMarker) { try { this.map.removeLayer(this._meMarker); } catch (e) {} }
+    this._criticalVoiceSeq = 0
     this._stopRealTimeGPS()
-    if (this._mapRO) { this._mapRO.disconnect(); this._mapRO = null }
-    // 取消待执行的缩放重绘帧，避免 map 已销毁后回调仍去 drawRoute
-    if (this._zoomRedrawRaf) { cancelAnimationFrame(this._zoomRedrawRaf); this._zoomRedrawRaf = null }
     if (this._agentEs) this._agentEs.close()
-    if (this._routeFlow) { this._routeFlow.destroy(); this._routeFlow = null }
-    if (this.map) this.map.remove()
+    this._destroyMap()
+    this._destroyHomeMap()
     if (window.speechSynthesis) window.speechSynthesis.cancel()
   },
   methods: {
@@ -1028,19 +1200,104 @@ export default {
       if (!ids.size) return segs
       return segs.filter(x => x && ids.has(String(x.edgeId)))
     },
+    // ---------- 首页概览地图（高德风格首页背景） ----------
+    /**
+     * 建首页概览地图：独立于导航地图 this.map 的轻量实例，只铺底图、不画路线，
+     * 供首页全屏背景交互（拖动/缩放）。离开首页时由 homeVisible watcher 销毁。
+     */
+    _buildHomeMap() {
+      const el = this.$refs.homeMapEl
+      if (!el) return
+      if (this._homeMap) { try { this._homeMap.invalidateSize() } catch (e) {} return }
+      const cfg = this._mapConfig()
+      try {
+        this._resetMapContainer(el, true)
+        const map = L.map(el, {
+          crs: cfg.crs,
+          zoomControl: false,
+          attributionControl: false,
+          zoomSnap: 0,
+          // 首页概览只铺底图；导航图里因长折线 Canvas 批量绘制才开 preferCanvas，
+          // 这里同样打开保持一致（首页不画路线，无 className 特效依赖）
+          preferCanvas: true,
+          minZoom: cfg.bounds ? 7 : cfg.minZoom,
+          maxZoom: cfg.maxZoom,
+          zoomAnimation: false,
+          ...(cfg.bounds ? { maxBounds: cfg.bounds, maxBoundsViscosity: 1.0 } : {}),
+          bounceAtZoomLimits: false
+        })
+        this._homeMap = map
+        map.setView(cfg.center, cfg.bounds ? 8 : 7)
+        // 首页底图与导航地图同一套降级链：天地图 → OSM → 本地离线矢量（MapLibre GPU）。
+        this._homeBase = { idx: this._baseStartIdx(), map }
+        this._mountBase(map, this._homeBase)
+      } catch (e) {
+        console.error('首页概览地图建图失败', e)
+      }
+    },
+    /** 销毁首页概览地图并清理容器残留 Leaflet 状态 */
+    _destroyHomeMap() {
+      if (this._homeBase) { if (this._homeBase.timer) clearTimeout(this._homeBase.timer); this._homeBase = null }
+      this._homeMbLayer = null
+      if (this._homeMap) {
+        try { this._homeMap.remove() } catch (e) { /* 忽略 */ }
+        this._homeMap = null
+      }
+      const el = this.$refs.homeMapEl
+      this._resetMapContainer(el, !!(el && el._leaflet_id))
+    },
+    homeZoom(d) {
+      if (this._homeMap) this._homeMap.setZoom(this._homeMap.getZoom() + d)
+    },
+    homeLocate() {
+      if (this._homeMap) this._homeMap.setView(this._mapConfig().center, 9)
+    },
+    /** 首页宫格点击：跳转到对应功能抽屉 / 展开搜索 */
+    onHomeGrid(key) {
+      if (key === 'plans') {
+        this.tab = 'task'
+        this.loadAgentPlans()
+        return
+      }
+      this.tab = key
+    },
     // ---------- 地图（计划书 4.4） ----------
     /**
-     * 底图默认用 D 盘离线瓦片（EPSG:4326，z7-z13，经后端 /tiles/** 提供，不依赖外网，
-     * 拔网线也能显示）。注意：4326 瓦片必须设 crs: L.CRS.EPSG4326，否则默认 3857 会整图错位。
-     * 若离线瓦片不可用（换了机器/目录不存在），累计 tileerror 后自动重建为 OSM 在线底图。
+     * 底图固定为本地 MapLibre 矢量瓦片（EPSG:3857，GPU/WebGL 渲染）。
+     * 页面本身就由电脑后端经局域网供给，/tiles/** 与页面同源，瓦片必达，
+     * 不再有「在线 OSM 优先 / 探测 / D 盘 jpg 回退」那一套。
+     *
+     * 这里同时防止「旧 Leaflet 实例绑定到已被 Vue v-if 移除的容器」：
+     * 退出导航/预览后 this.map 仍非空，调度确认再次进入导航时若不校验容器，
+     * 会把路线和视角全部写到旧 DOM 上，新页面看起来就是白屏。
      */
     initMap() {
-      if (!this.$refs.mapEl) return
-      // 地图重建后原特效层失效，置空由 drawRoute 重建
-      if (this._routeFlow) { this._routeFlow.destroy(); this._routeFlow = null }
-      this._buildMap()
+      const el = this.$refs.mapEl
+      if (!el) { this._destroyMap(); return }
+      if (this.map && this.map.getContainer && this.map.getContainer() !== el) {
+        this._destroyMap()
+      }
+      // 同一容器已在用时不要重建：预览切导航会因此避免闪屏和瓦片重复请求
+      if (this.map) {
+        this.map.invalidateSize()
+        try { this.drawRoute() } catch (e) { console.error('复用地图重绘失败', e) }
+        return
+      }
+      try {
+        this._buildMap()
+      } catch (e) {
+        console.error('地图建图失败，安排自动重建', e)
+        this._destroyMap()
+        this._scheduleMapHealthChecks()
+      }
     },
     _buildMap() {
+      const el = this.$refs.mapEl
+      if (!el) { this._destroyMap(); return }
+      // 旧 Leaflet 可能因 HMR/组件重载残留在同一容器上；不清掉 _leaflet_id 时 L.map 会直接抛错，
+      // 页面只剩导航 UI，表现就是调度确认后整屏白屏。
+      if (this._riskBlinkTimer) { clearInterval(this._riskBlinkTimer); this._riskBlinkTimer = null }
+      this._clearMapHealthChecks()
       // 重建地图前先断开旧的尺寸监听，避免还在监听悬空的旧容器
       if (this._mapRO) { this._mapRO.disconnect(); this._mapRO = null }
       // 同理取消待执行的缩放重绘帧（旧 map 的 zoomend 可能刚排了一帧）
@@ -1049,40 +1306,58 @@ export default {
         this.map.remove()
         this.map = null
       }
+      // map.remove 后仍可能残留内部 ID；必须清掉再交给 L.map
+      this._resetMapContainer(el, true)
       // 地图重建后原特效层失效，置空由 drawRoute 重建
       if (this._routeFlow) { this._routeFlow.destroy(); this._routeFlow = null }
-      // 底图双模式：默认在线 OSM（EPSG:3857），离线/不可达时切回离线瓦片（EPSG:4326）。
-      // 两套 crs 的索引规则不同，bounds/缩放约束也不同，全部由 _mapConfig 提供。
+      // 单一底图模式：本地矢量瓦片（EPSG:3857），crs/边界/缩放约束全部由 _mapConfig 提供。
       const cfg = this._mapConfig()
       this._mapBounds = cfg.bounds
-      // 离线 4326 模式才需要「铺满屏幕」的最小缩放锁（在线 3857 全球瓦片无此问题）
-      const coverZoom = cfg.bounds ? this._minZoomForCoverage() : cfg.minZoom
-      this.map = L.map(this.$refs.mapEl, {
+      // 「铺满屏幕」的最小缩放锁：矢量瓦片只覆盖中越走廊，缩太小会露出瓦片覆盖外的空白
+      const coverZoom = this._minZoomForCoverage()
+      // 地图公共选项：提取成变量，catch 分支「清残留后重试」复用同一份，避免两处漂移
+      const mapOpts = {
         crs: cfg.crs,
         zoomControl: true,
-        attributionControl: !!cfg.bounds, // 离线 4326 无 attribution（在线由瓦片层自带）
-        // zoomSnap:0 → 捏合是连续分数级缩放，这是「高德那种丝滑」的关键，
-        // 配合 Leaflet 的 CSS transform 缩放动画，手势期间图层整体平滑跟随。
+        // attribution 由 MapLibre 底图层自己提供
+        attributionControl: false,
+        // 业务折线（路线/风险段/基准线）改走 Canvas 批量绘制 —— 移动端长折线
+        // SVG 重排是缩放卡顿的主因之一。
+        // 两处 SVG 依赖已分别处理：
+        // 1) routeFlow 流光/呼吸特效线在内部显式指定独立 SVG renderer，不受影响；
+        // 2) risk-blink 原靠 getElement() 挂 CSS 类名，canvas 下返回 null，
+        //    已改为 _setRiskBlink 的 JS opacity 脉冲。
+        preferCanvas: true,
+        // zoomSnap:0 → 捏合是连续分数级缩放，这是「高德那种丝滑」的关键。
         zoomSnap: 0,
         minZoom: coverZoom,
         maxZoom: cfg.maxZoom,
-        // 关掉缩放动画，与调度大屏保持一致（大屏路线箭头能贴住地图，就靠这一条）。
-        //
-        // 背景：Leaflet 的动画缩放会给 mapPane 挂 CSS transform，从旧级别插值到新级别。
-        // 期间任何 marker 定位都会被"再缩放一次"，routeFlow 每帧给箭头 setLatLng 时
-        // 表现就是箭头跟不上缩放速度（已在 frame() 里按 map._animatingZoom 暂停写入，
-        // 但整屏图层在 transform 动画中重栅格化仍会造成掉帧）。
-        // 关掉动画后缩放置换，zoomend 紧随其后，箭头与路线一次性摆到正确位置。
-        //
-        // 代价：双指捏合不再有平滑过渡（会直接跳到位）。这是"箭头贴得住"与
-        // "捏合丝滑"之间的取舍，当前按需求选了前者。
-        // 若要两者兼得，下一步是把 preferCanvas 打开（长折线渲染快很多），
-        // 但那会让 risk-blink 失效——它依赖 routeLine.getElement() 挂 CSS 类名，
-        // canvas 渲染时返回 null，需先把红段闪烁改成 setStyle(opacity) 的 JS 驱动。
+        // 关掉 Leaflet 的缩放动画：动画期间 mapPane 挂 CSS transform 插值，
+        // 业务图层（路线/标记仍由 Leaflet 定位）会被"再缩放一次"造成箭头脱节。
+        // 底图一侧不受影响：MapLibre WebGL 在自己 canvas 内跟手渲染缩放，
+        // 这里关的只是 Leaflet 对覆盖层的 transform 插值。
+        // 代价：双指捏合直接跳到位、无平滑过渡（"贴得住"优先于"丝滑"，与大屏一致）。
         zoomAnimation: false,
-        ...(cfg.bounds ? { maxBounds: cfg.bounds, maxBoundsViscosity: 1.0 } : {}),
+        maxBounds: cfg.bounds,
+        maxBoundsViscosity: 1.0,
         bounceAtZoomLimits: false
-      }).setView(cfg.center, Math.min(cfg.maxZoom, Math.ceil(coverZoom)))
+      }
+      let map
+      try {
+        map = L.map(el, mapOpts)
+      } catch (e) {
+        console.error('Leaflet 初始化失败，清理残留后重试', e)
+        this._resetMapContainer(el, true)
+        map = L.map(el, mapOpts)
+      }
+      // 先保存引用再 setView：即使 setView 抛错，后续健康检查也能拿到实例并销毁重建
+      this.map = map
+      try {
+        this.map.setView(cfg.center, Math.min(cfg.maxZoom, Math.ceil(coverZoom)))
+      } catch (e) {
+        console.error('地图初始视角设置失败，退回安全视角', e)
+        this.map.setView(cfg.center, cfg.minZoom)
+      }
 
       // 窗口尺寸变化：先重算「铺满屏幕」的最小缩放，预览中再按新可视区重新适配一次路线，
       // 否则浮层高度按新视口变化后，路线可能又落到浮层下面。
@@ -1105,42 +1380,45 @@ export default {
       // 缩放 / 拖动结束后按新 zoom 重新塑形路径（远景加密、近景抽稀）。
       // 后端给的 pathCoords 是「节点直连」的折线，缩到省级以下时如果不加密会直线穿山；
       // 用户缩放/拖动地图后必须用新的 zoom 重新算一次，否则线就「错位」了。
-      // 手势一结束（zoomend）立刻按新 zoom 重塑形 —— 不用 setTimeout 防抖。
-      // 依据（已核对 Leaflet 源码）：捏合过程中 TouchZoom 走的是 map._move(center, zoom, {pinch:true})，
-      // 只触发 zoom / move，**不会**触发 zoomend；手势结束才调一次 _animateZoom，
-      // 其完成回调才触发一次 zoomend。所以这里不存在"手势中被高频调用"的问题，
-      // 立即重绘是安全的，原来那个 140ms 防抖只是白白拖后了贴路几何的校正。
+      //
+      // 必须同时挂 zoomend 和 moveend：本图开了 zoomSnap:0 + zoomAnimation:false，
+      // 双指捏合松手走的是 TouchZoom._onTouchEnd → map._resetView(center, _limitZoom(zoom))。
+      // 捏合过程中 _move 已把分数级 zoom 逐帧写进 map._zoom，而 zoomSnap:0 时
+      // _limitZoom 不做任何取整、原样返回 → _resetView 里 zoomChanged=false →
+      // **松手后根本不派发 zoomend**（snap=1 的调度大屏取整后 zoom 变了才会触发）。
+      // 只绑 zoomend 的后果：捏合放大后路径几何停留在旧 zoom 的抽稀结果上，
+      // 直线弦切过所有弯道 —— 司机端表现即「双指缩放/拖动后线脱离马路」，
+      // 且导航跟随的 _centerOn 恒用当前 zoom，之后永远等不到重绘。
+      // moveend 在 _moveEnd 里是无条件派发的，用它兜住捏合松手；回调内对比
+      // 当前 zoom 与上次绘制级别，纯拖动（zoom 未变）直接跳过，不会重跑整条重建。
       this._zoomRedrawRaf = null
       const redrawOnZoom = () => {
         if (this._zoomRedrawRaf) return
         this._zoomRedrawRaf = requestAnimationFrame(() => {
           this._zoomRedrawRaf = null
           if (!this.map || !this.route || !this.route.pathCoords) return
+          // zoom 与上次绘制时一致（含抽稀阈值实际生效的整数级）则无需重塑重绘
+          if (this.map.getZoom() === this._routeDrawnZoom) return
           this.drawRoute()
         })
       }
-      // 只监听 zoomend（与调度大屏一致）。
-      // reshapeForZoom 的抽稀阈值只取决于 zoom：它在「地图像素」空间里算点到线段距离，
-      // 而拖动会让所有点等量平移、距离结果不变，所以 moveend 无需重算。
-      // 原来还挂着 moveend，每拖动一次就整条重建（含流光/箭头/风险标记），纯属浪费，
-      // 也会和缩放重绘抢主线程，加剧「线跟不上」。
       this.map.on('zoomend', redrawOnZoom)
+      this.map.on('moveend', redrawOnZoom)
 
-      // 底图瓦片层：默认在线 OSM；瓦片加载失败（离线/被墙/超时）累计后自动切回离线 4326 瓦片
-      const layer = L.tileLayer(cfg.tileUrl, cfg.tileOpts)
-      if (!this._useOfflineTiles) {
-        this._osmFailCount = 0
-        layer.on('tileerror', () => {
-          this._osmFailCount++
-          // 连续若干张瓦片失败才判定 OSM 不可达，避免个别丢包误切
-          if (this._osmFailCount >= 6 && !this._useOfflineTiles) {
-            console.warn('OSM 在线瓦片不可达，切换离线瓦片底图')
-            this._useOfflineTiles = true
-            this._rebuildWithOffline()
-          }
-        })
+      // 底图：天地图(在线) → OSM(在线) → 本地离线矢量(MapLibre) 自动降级。
+      // 遮罩在首个可用底图 ready（在线首张瓦片成功 / 矢量首帧）时收起，见 _navBase.onReady。
+      this._navBase = {
+        idx: this._baseStartIdx(),
+        map: this.map,
+        onReady: () => {
+          this.mapVeil = false
+          if (this._veilTimer) { clearTimeout(this._veilTimer); this._veilTimer = null }
+        }
       }
-      layer.addTo(this.map)
+      this._showMapVeil()
+      this._mountBase(this.map, this._navBase)
+      // 先启动体检：后续路线/标记绘制即使异常，底图仍可加载并触发自动恢复
+      this._scheduleMapHealthChecks()
 
       // 原路线（灰虚线）在下，当前路线（蓝线）在上，风险段（红线）最上
       this.baseLine = L.polyline([], { color: '#9aa5b1', weight: 3, opacity: 0.75, dashArray: '6 6' }).addTo(this.map)
@@ -1166,18 +1444,143 @@ export default {
         }).addTo(this.map)
         this.portMarkers.push(m)
       })
-      this.drawRoute()
-    },
-    /** 在线瓦片不可达 → 重建为离线 4326 底图（保留当前中心/缩放与路线） */
-    _rebuildWithOffline() {
-      const center = this.map ? this.map.getCenter() : null
-      this._buildMap()
-      if (center && this.map) {
-        // 切到离线后缩放到覆盖范围内能容纳的级别
-        const z = Math.min(13, Math.max(this.map.getMinZoom(), this.map.getZoom()))
-        this.map.setView([center.lat, center.lng], z)
+      // 路线绘制本身异常时也不能影响已经启动的底图加载与健康检查
+      try {
+        this.drawRoute()
+      } catch (e) {
+        console.error('路线绘制失败，等待地图健康检查自动恢复', e)
       }
-      this.drawRoute()
+    },
+    /** 清掉容器上残留的 Leaflet 状态：force 时连 DOM 和内部 ID 一起重置 */
+    _resetMapContainer(el, force = false) {
+      if (!el) return
+      const staleId = el._leaflet_id
+      if (!staleId && !force) return
+      try { el.innerHTML = '' } catch (e) { /* 忽略 */ }
+      try { delete el._leaflet_id } catch (e) { el._leaflet_id = undefined }
+    },
+    /** 销毁 Leaflet 实例：退出全屏地图时必须释放，避免下次进入时复用到已移除的 DOM 容器 */
+    _destroyMap() {
+      const el = this.$refs.mapEl
+      if (this._veilTimer) { clearTimeout(this._veilTimer); this._veilTimer = null }
+      this.mapVeil = false
+      if (this._riskBlinkTimer) { clearInterval(this._riskBlinkTimer); this._riskBlinkTimer = null }
+      this._clearMapHealthChecks()
+      if (this._mapRO) { this._mapRO.disconnect(); this._mapRO = null }
+      if (this._zoomRedrawRaf) { cancelAnimationFrame(this._zoomRedrawRaf); this._zoomRedrawRaf = null }
+      if (this._routeFlow) { this._routeFlow.destroy(); this._routeFlow = null }
+      this._riskMarkers = []
+      this._meMarker = null
+      if (this.map) {
+        try { this.map.remove() } catch (e) { /* 忽略 */ }
+        this.map = null
+      }
+      // map.remove() 会级联移除并销毁底图图层，这里只停降级探测定时器 + 断引用
+      if (this._navBase) { if (this._navBase.timer) clearTimeout(this._navBase.timer); this._navBase = null }
+      this._mbLayer = null
+      this._riskBlinkPhase = false
+      this._riskBlinkState = { route: false, risk: false }
+      // this.map 丢失但容器仍有 _leaflet_id 时，也必须清掉，否则下次 L.map 会直接失败
+      this._resetMapContainer(el, !!(el && el._leaflet_id))
+      this.baseLine = null
+      this.routeLine = null
+      this.riskLine = null
+      this.portMarkers = []
+    },
+    _clearMapHealthChecks() {
+      ;(this._mapHealthTimers || []).forEach(t => clearTimeout(t))
+      this._mapHealthTimers = []
+    },
+    /** 建图后自动体检：先软修复，仍无路线则硬重建；底图未出图则由遮罩 + 健康检查兜底 */
+    _scheduleMapHealthChecks() {
+      this._clearMapHealthChecks()
+      ;[250, 1200, 6500].forEach((delay, attempt) => {
+        const t = setTimeout(() => this._recoverNavMap(attempt), delay)
+        this._mapHealthTimers.push(t)
+      })
+    },
+    _mapHasVisibleRoute() {
+      const el = this.routeLine && this.routeLine.getElement ? this.routeLine.getElement() : null
+      if (!el) return false
+      try {
+        if (typeof el.getTotalLength === 'function' && el.getTotalLength() > 1) return true
+        const box = typeof el.getBBox === 'function' ? el.getBBox() : null
+        return !!(box && (box.width > 0 || box.height > 0))
+      } catch (e) {
+        return false
+      }
+    },
+    /** 底图健康检查：在线栅格看是否已有瓦片成功；离线矢量看 MapLibre 是否 loaded */
+    _mapHasVisibleTiles() {
+      const st = this._navBase
+      if (!st) return false
+      if (st.kind === 'raster') return st.loaded > 0
+      const ml = st.mb && typeof st.mb.getMaplibreMap === 'function' ? st.mb.getMaplibreMap() : null
+      if (!ml) return false
+      try { return !!ml.loaded() } catch (e) { return false }
+    },
+    _routeProjectedIntoView() {
+      const coords = this.route.pathCoords || []
+      if (!this.map || !coords.length || !this.$refs.mapEl) return true
+      const rect = this.$refs.mapEl.getBoundingClientRect()
+      const step = Math.max(1, Math.floor(coords.length / 12))
+      for (let i = 0; i < coords.length; i += step) {
+        const p = this.map.latLngToContainerPoint(coords[i])
+        if (p.x >= -80 && p.x <= rect.width + 80 && p.y >= -80 && p.y <= rect.height + 80) return true
+      }
+      return false
+    },
+    _recoverNavMap(attempt) {
+      if (!this.navigating && !this.previewing) return
+      const el = this.$refs.mapEl
+      if (!el) { this._destroyMap(); return }
+      if (!this.map || !this.map.getContainer || this.map.getContainer() !== el) {
+        console.warn('地图容器失效，自动重建', { attempt })
+        this._destroyMap()
+        this._mapRenderKey++
+        this.$nextTick(() => {
+          try {
+            this._buildMap()
+          } catch (e) {
+            console.error('地图健康检查重建失败', e)
+            this._scheduleMapHealthChecks()
+          }
+        })
+        return
+      }
+
+      // 软修复：重新量测布局、同步 SVG 渲染器并重画路线
+      this.map.invalidateSize(true)
+      this._applyCoverageZoom()
+      this._resyncMapRenderer()
+      try {
+        this.drawRoute()
+      } catch (e) {
+        console.error('地图健康检查重绘路线失败', e)
+      }
+      if (this.mapVeil && this._mapHasVisibleTiles()) this.mapVeil = false
+      const hasRouteLayer = !((this.route.pathCoords || []).length) || this._mapHasVisibleRoute()
+      const routeInView = !((this.route.pathCoords || []).length) || this._routeProjectedIntoView()
+      if (!routeInView) this.fitRoute(true)
+      if (!hasRouteLayer && attempt >= 1 && !this._mapHardRecovered) {
+        console.warn('路线图层未渲染，自动硬重建地图')
+        this._mapHardRecovered = true
+        this._destroyMap()
+        this._mapRenderKey++
+        this.$nextTick(() => {
+          try {
+            this._buildMap()
+            this.fitRoute(true)
+          } catch (e) {
+            console.error('地图硬重建失败，继续自动恢复', e)
+            this._scheduleMapHealthChecks()
+          }
+        })
+        return
+      }
+      if (attempt === 0 && this.navigating && !this._navZoomReady) {
+        this.$nextTick(() => this.zoomToNav(0.10, 0, 0))
+      }
     },
     /**
      * 全局点击涟漪反馈（事件委托，无需改动各按钮组件）。
@@ -1203,59 +1606,274 @@ export default {
       }
       document.addEventListener('pointerdown', this._rippleHandler, { passive: true })
     },
-    /** 启动时探测网络/OSM 可达性，决定初始底图（避免离线环境开局先闪一片灰） */
-    async _detectTileSource() {
-      // 浏览器报离线：直接用离线瓦片，不再尝试 OSM
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-        this._useOfflineTiles = true
-        return
-      }
-      // 试拉一张 OSM 瓦片（no-cors，只要能返回就算可达）；超时/失败 → 离线瓦片
-      try {
-        const ctrl = new AbortController()
-        const t = setTimeout(() => ctrl.abort(), 4000)
-        await fetch('https://tile.openstreetmap.org/6/50/26.png', { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal })
-        clearTimeout(t)
-        this._useOfflineTiles = false
-      } catch (e) {
-        this._useOfflineTiles = true
-      }
-      // 网络状态变化：恢复在线时下次建图优先 OSM；掉线时立即切离线
-      window.addEventListener('online', () => { this._useOfflineTiles = false; if (this.map) this._buildMap() })
-      window.addEventListener('offline', () => { this._useOfflineTiles = true; if (this.map) this._rebuildWithOffline() })
-    },
     /**
-     * 决定本次使用哪种底图坐标系配置。
-     * 默认在线 OSM（EPSG:3857）；检测到离线 / OSM 不可达时用离线瓦片（EPSG:4326）。
-     * 两套配置的 crs / 边界 / 缩放范围完全不同，必须在建图前确定。
+     * 左边缘侧滑返回（iOS 风格）：仅当手势从屏幕左边缘起手、向右水平滑动时触发，
+     * 避免与地图拖动、列表滚动冲突。统一走 goBack() 返回栈。
      */
-    _mapConfig() {
-      if (this._useOfflineTiles) {
-        return {
-          crs: L.CRS.EPSG4326,
-          tileUrl: '/tiles/{z}/{x}/{y}.jpg',
-          tileOpts: { minZoom: 7, maxZoom: 13, minNativeZoom: 8, tileSize: 256 },
-          bounds: L.latLngBounds([[20.49, 101.68], [24.01, 109.51]]),
-          minZoom: null, // 由 _minZoomForCoverage 动态算（4326 铺满约束）
-          maxZoom: 13,
-          center: [21.6, 106.8]
+    _initSwipeBack() {
+      this._swipe = null
+      this._swipeStartHandler = (e) => {
+        const x = e.clientX
+        const y = e.clientY
+        if (x == null || y == null) { this._swipe = null; return }
+        // 仅左边缘 32px 内起手才算侧滑返回
+        if (x > 32) { this._swipe = null; return }
+        this._swipe = { x, y, t: Date.now() }
+      }
+      this._swipeEndHandler = (e) => {
+        const s = this._swipe
+        this._swipe = null
+        this.swipeEdgeProgress = 0
+        if (!s) return
+        const x = e.clientX
+        const y = e.clientY
+        if (x == null || y == null) return
+        const dx = x - s.x
+        const dy = y - s.y
+        const dt = Date.now() - s.t
+        // 向右、水平主导、距离与速度足够 → 返回上一级
+        if (dx > 60 && Math.abs(dy) < 70 && dx > Math.abs(dy) * 1.4 && dt < 800) {
+          this.goBack()
         }
       }
-      // 在线 OSM：3857，无需硬边界与铺满约束（全球瓦片，任意缩放都有图）
+      // 跟手反馈：从左边缘向右水平拖动时点亮边缘指示条，进度拉满（≈60px）时松手即返回
+      this._swipeMoveHandler = (e) => {
+        const s = this._swipe
+        if (!s) return
+        const dx = (e.clientX || 0) - s.x
+        const dy = (e.clientY || 0) - s.y
+        if (dx > 2 && dx > Math.abs(dy) && Math.abs(dy) < 70) {
+          const p = Math.min(1, dx / 60)
+          if (p !== this.swipeEdgeProgress) this.swipeEdgeProgress = p
+        } else if (this.swipeEdgeProgress) {
+          this.swipeEdgeProgress = 0
+        }
+      }
+      this._swipeCancelHandler = () => { this._swipe = null; this.swipeEdgeProgress = 0 }
+      document.addEventListener('pointerdown', this._swipeStartHandler, { passive: true })
+      document.addEventListener('pointermove', this._swipeMoveHandler, { passive: true })
+      document.addEventListener('pointerup', this._swipeEndHandler, { passive: true })
+      document.addEventListener('pointercancel', this._swipeCancelHandler, { passive: true })
+    },
+    /**
+     * 统一返回栈：先关弹层，再退导航/预览，最后收首页抽屉/搜索框。
+     * 侧滑返回、以及后续任何"返回上一级"入口都应走这里。
+     */
+    goBack() {
+      if (this.showExitConfirm) { this.showExitConfirm = false; return }
+      if (this.hazardDetail) { this.hazardDetail = null; return }
+      if (this.showReroute) { this.showReroute = false; return }
+      if (this.showNavMenu) { this.showNavMenu = false; return }
+      if (this.rerouteOptions.length) { this.rerouteOptions = []; return }
+      if (this.navigating) { this.requestExit(); return }
+      if (this.previewing) { this.exitPreview(); return }
+      if (this.homeSearchOpen) { this.homeSearchOpen = false; return }
+      if (this.tab !== 'route') { this.tab = 'route'; return }
+    },
+    // ---------- 底图降级链：天地图(在线) → OSM(在线) → 本地离线矢量(MapLibre) ----------
+    /** 起始源下标：显式离线（navigator.onLine=false，如拔网线演示）直接落到本地矢量，省掉在线探测等待 */
+    _baseStartIdx() {
+      const offline = typeof navigator !== 'undefined' && navigator.onLine === false
+      return offline ? BASE_CHAIN.length - 1 : 0
+    },
+    _baseChainKey(idx) {
+      return BASE_CHAIN[Math.max(0, Math.min(idx, BASE_CHAIN.length - 1))]
+    },
+    /**
+     * 在给定地图上挂载当前源底图，并挂上降级探测。
+     * st = { idx, map, key, kind, tile, anno, mb, loaded, errored, settled, timer, onReady }
+     * 在线源：探测窗口内一张瓦片都没成功（tileerror 达阈值 / 超时）即降到下一源。
+     */
+    _mountBase(map, st) {
+      if (!map || !st) return
+      this._clearBase(map, st)
+      const key = this._baseChainKey(st.idx)
+      st.key = key
+      st.loaded = 0
+      st.errored = 0
+      st.settled = false
+
+      // 天地图：改由 MapLibre 经 maplibre-gl-leaflet 桥接层做 GPU 合成渲染。
+      // 相比旧的 Leaflet L.tileLayer 逐块 <img> 平移（WebView 内 CPU 解码、滑动掉帧），
+      // MapLibre 把瓦片作为纹理上屏、整屏一次 GPU 变换，滑动更接近原生。瓦片走后端同源代理
+      // /api/tianditu/... 解决天地图无 CORS 头 + 防盗链 Referer 两大拦路问题（见同名控制器）。
+      // 业务图层（路线流动/风险脉冲/口岸 divIcon）仍由 Leaflet 叠在桥接层之上，零改动。
+      // 探测：style 'load' 只代表样式就绪、瓦片未必上屏，故等首个 'idle' 且 ml.loaded() 为真、
+      // 且累计错误未超阈值才判「可用」收起遮罩；上游持续 404/超时（密钥失效/断网）即降级到 OSM。
+      if (key === 'tianditu' && typeof L.maplibreGL === 'function') {
+        const tdtDef = baseDef('tianditu')
+        st.kind = 'mb-raster'
+        try {
+          st.mb = L.maplibreGL({
+            style: tiandituBaseStyle,
+            attribution: (tdtDef && tdtDef.attribution) || '&copy; 天地图'
+          }).addTo(map)
+        } catch (e) {
+          console.warn('天地图 MapLibre 底图初始化失败，降级 OSM', e)
+          st.idx++
+          this._mountBase(map, st)
+          return
+        }
+        let ml = null
+        try { ml = st.mb.getMaplibreMap && st.mb.getMaplibreMap() } catch (e) { /* 忽略 */ }
+        if (ml) {
+          ml.on('error', () => { st.errored++ })
+          ml.on('load', () => {
+            const check = () => {
+              if (st.settled) return
+              if (st.errored >= 5) { this._fallbackBase(st); return }
+              try { if (ml.loaded()) this._settleBase(st) } catch (e) { /* 忽略 */ }
+            }
+            check()
+            ml.on('idle', check)
+          })
+        }
+        // 兜底探测窗口：6s 仍未 settled → 若已 loaded 且错误可控则收下，否则判定不可用降级
+        st.timer = setTimeout(() => {
+          if (st.settled) return
+          let ok = false
+          try { ok = !!(ml && ml.loaded() && st.errored < 5) } catch (e) { ok = false }
+          if (ok) this._settleBase(st)
+          else this._fallbackBase(st)
+        }, 6000)
+        this._onBaseSource(st)
+        return
+      }
+
+      // 最后一级：本地离线矢量瓦片（MapLibre WebGL）。无 tile 事件，用 load 事件 / 1.5s 兜底收起遮罩。
+      if (key === 'vector') {
+        st.kind = 'vector'
+        st.mb = L.maplibreGL({ style: localBaseStyle, attribution: '© OpenStreetMap contributors' }).addTo(map)
+        if (st === this._navBase) this._mbLayer = st.mb
+        try {
+          const ml = st.mb.getMaplibreMap && st.mb.getMaplibreMap()
+          if (ml && typeof ml.once === 'function') ml.once('load', () => this._settleBase(st))
+        } catch (e) { /* 忽略 */ }
+        st.timer = setTimeout(() => this._settleBase(st), 1500)
+        this._onBaseSource(st)
+        return
+      }
+
+      // 在线栅格源（天地图 / OSM）
+      const def = baseDef(key)
+      if (!def) { st.idx = BASE_CHAIN.length - 1; this._mountBase(map, st); return }
+      st.kind = 'raster'
+      const tileOpts = {
+        subdomains: def.subdomains,
+        attribution: def.attribution,
+        maxZoom: def.maxZoom || 18,
+        updateWhenIdle: false,
+        keepBuffer: 2,
+        crossOrigin: def.crossOrigin || false,
+        // 高分辨率渲染：手机是 2~3x 视网膜屏，Leaflet 默认按 1 倍瓦片铺会被拉伸发虚。
+        // detectRetina 在视网膜屏上自动请求高一级瓦片按半尺寸铺（影像/注记各自 +1 级 zoom），
+        // 道路与地名明显更锐利；桌面 Browser.retina=false 时是空操作。天地图 img_w 有到 z18
+        // 的高清瓦片供取用（注记 cia_w 同步 +1 级，标注与影像对齐）。
+        detectRetina: true
+      }
+      st.tile = L.tileLayer(def.url, tileOpts).addTo(map)
+      // 天地图注记层（cia_w，透明 PNG）：叠在影像上显示地名/边界，不参与降级探测
+      if (def.annoUrl) {
+        st.anno = L.tileLayer(def.annoUrl, { ...tileOpts, attribution: '', className: 'tdt-anno-layer' }).addTo(map)
+      }
+      st.tile.on('tileload', () => { st.loaded++; this._settleBase(st) })
+      st.tile.on('tileerror', () => {
+        st.errored++
+        // 一张都没成功且已失败多张 → 判定该在线源不可用，立即降级
+        if (!st.settled && st.loaded === 0 && st.errored >= 2) this._fallbackBase(st)
+      })
+      // 探测窗口：请求一直挂起（无 error 也无 load）时，4s 后仍无成功瓦片则降级
+      st.timer = setTimeout(() => { if (!st.settled && st.loaded === 0) this._fallbackBase(st) }, 4000)
+      this._onBaseSource(st)
+    },
+    /** 首张瓦片成功 / 矢量首帧：标记该源可用，停掉降级探测，收起遮罩 */
+    _settleBase(st) {
+      if (!st || st.settled) return
+      st.settled = true
+      if (st.timer) { clearTimeout(st.timer); st.timer = null }
+      if (typeof st.onReady === 'function') st.onReady()
+    },
+    /** 降级到链中下一个源；已是最后一级（矢量）则不再降 */
+    _fallbackBase(st) {
+      if (!st || st.settled) return
+      if (st.idx >= BASE_CHAIN.length - 1) return
+      const from = this._baseChainKey(st.idx)
+      st.idx++
+      console.warn(`底图[${from}]不可用，降级为[${this._baseChainKey(st.idx)}]`)
+      // 降级后把遮罩重新拉起，直到新源 ready，避免降级途中露出空白底
+      if (st === this._navBase) this._showMapVeil()
+      this._mountBase(st.map, st)
+    },
+    /** 源切换后同步地图 maxZoom：在线栅格 18/19，本地矢量封顶 14（更高由 MapLibre overzoom） */
+    _onBaseSource(st) {
+      if (!st || !st.map) return
+      const def = baseDef(st.key)
+      const mz = st.key === 'vector' ? 14 : (def && def.maxZoom ? def.maxZoom : 18)
+      try { if (st.map.options.maxZoom !== mz) st.map.setMaxZoom(mz) } catch (e) { /* 忽略 */ }
+    },
+    /** 清理某张地图上的底图图层与探测定时器（map.remove 会级联，这里主要停定时器/断引用） */
+    _clearBase(map, st) {
+      if (!st) return
+      if (st.timer) { clearTimeout(st.timer); st.timer = null }
+      if (st.tile) { try { map.removeLayer(st.tile) } catch (e) { /* 忽略 */ } st.tile = null }
+      if (st.anno) { try { map.removeLayer(st.anno) } catch (e) { /* 忽略 */ } st.anno = null }
+      if (st.mb) { try { map.removeLayer(st.mb) } catch (e) { /* 忽略 */ } st.mb = null }
+      if (st === this._navBase) this._mbLayer = null
+      st.kind = null
+      st.settled = false
+    },
+    /**
+     * 底图加载遮罩：首个可用底图 ready 时由 _navBase.onReady 收起；
+     * 已 ready（复用地图）立即收起，事件缺失时 8s 兜底收起，不会永久盖住路线。
+     */
+    _showMapVeil() {
+      this.mapVeil = true
+      if (this._veilTimer) { clearTimeout(this._veilTimer); this._veilTimer = null }
+      if (this._mapHasVisibleTiles()) { this.mapVeil = false; return }
+      this._veilTimer = setTimeout(() => { this.mapVeil = false }, 8000)
+    },
+    /**
+     * 进入导航的瞬间：视角会做一次大缩放/平移（fitRoute→zoomToNav），在线底图需要
+     * 重新拉一批新瓦片，铺满前 Leaflet 容器会露出灰白底 —— 这就是“开始导航后白屏”的观感。
+     * 这里在切视角前“有条件地”重新拉起遮罩：先给 250ms 宽限，快的网络首批瓦片已到→
+     * 全程不闪遮罩；确实慢才显示“地图加载中”，直到当前视野铺满（TileLayer load）或 3s 兜底收起。
+     * 仅对在线栅格源生效；矢量兜底是 WebGL 自绘、本就即时，无需遮罩。
+     */
+    _veilUntilViewPaint() {
+      const st = this._navBase
+      if (!st || st.kind !== 'raster' || !st.tile) return
+      let done = false
+      const hide = () => {
+        done = true
+        this.mapVeil = false
+        if (this._veilTimer) { clearTimeout(this._veilTimer); this._veilTimer = null }
+      }
+      // 宽限期内已有瓦片成功→视为不慢，直接取消弹遮罩，避免快网下每进一次导航都闪一下
+      try { st.tile.once('tileload', () => { if (!this.mapVeil) done = true }) } catch (e) { /* 忽略 */ }
+      setTimeout(() => {
+        if (done || !this._navBase || this._navBase !== st) return
+        this.mapVeil = true
+        try { st.tile.once('load', hide) } catch (e) { /* 忽略 */ }
+        this._veilTimer = setTimeout(hide, 3000)
+      }, 250)
+    },
+    /**
+     * 底图配置（EPSG:3857）：默认在线天地图，maxZoom 由 _onBaseSource 按当前源实时校正
+     *（在线栅格 18/19，本地矢量 14）。边界锁在中越走廊：无论哪种底图，视野都聚焦业务运营区。
+     */
+    _mapConfig() {
       return {
         crs: L.CRS.EPSG3857,
-        tileUrl: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-        tileOpts: { minZoom: 6, maxZoom: 19, tileSize: 256, attribution: '© OpenStreetMap contributors' },
-        bounds: null,
-        minZoom: 6,
-        maxZoom: 19,
+        bounds: L.latLngBounds([[20.49, 101.68], [24.01, 109.51]]),
+        minZoom: 7,   // 运行时由 _minZoomForCoverage 收紧成分数级
+        maxZoom: 18,  // 在线底图上限；降级到本地矢量时由 _onBaseSource 收到 14
         center: [21.6, 106.8]
       }
     },
     /**
-     * 让底图「铺满屏幕」所需的最小缩放级别。
-     * EPSG4326 下每度像素 = 512 * 2^zoom / 360（缩放 0 级为两块 256px 瓦片覆盖全球），
-     * 只要视口换算成经纬度后不超过瓦片覆盖范围，屏幕上就不会出现灰白空白。
+     * 让底图「铺满屏幕」所需的最小缩放级别（EPSG:3857）。
+     * z 级世界像素 = 256·2^z；经度线性：屏幕宽需占满覆盖经度跨度，
+     * 纬度按墨卡托 Y 跨度换算；解 256·2^z ≥ max(w·360/lngSpan, h·360/mercSpanY)。
      */
     _minZoomForCoverage() {
       if (!this._mapBounds) return 7
@@ -1264,20 +1882,20 @@ export default {
       const size = this.map ? this.map.getSize() : (el ? L.point(el.clientWidth, el.clientHeight) : null)
       if (!size || !size.x || !size.y) return 7
       const lngSpan = this._mapBounds.getEast() - this._mapBounds.getWest()
-      const latSpan = this._mapBounds.getNorth() - this._mapBounds.getSouth()
-      if (lngSpan <= 0 || latSpan <= 0) return 7
-      // 每度像素需 >= max(视口宽 / 经度跨度, 视口高 / 纬度跨度)
-      const needPxPerDeg = Math.max(size.x / lngSpan, size.y / latSpan)
+      const mercSpanY = Math.abs(mercY(this._mapBounds.getNorth()) - mercY(this._mapBounds.getSouth()))
+      if (lngSpan <= 0 || mercSpanY <= 0) return 7
+      // 视口换算成「世界像素」需求：宽/高各自除以覆盖跨度（360° 对应世界一周）
+      const needWorldPx = Math.max(size.x * 360 / lngSpan, size.y * 360 / mercSpanY)
       // 保留小数：分数级缩放下最小级别正好等于「刚好铺满」，多出的小数留给路线适配
-      const z = Math.log2((needPxPerDeg * 360) / 512) + 0.003 // +0.003 兜掉浮点误差，避免边缘露一条灰缝
-      return Math.min(13, Math.max(7, z))
+      const z = Math.log2(needWorldPx / 256) + 0.003 // +0.003 兜掉浮点误差，避免边缘露一条灰缝
+      return Math.min(14, Math.max(7, z))
     },
     /** 锁死最小缩放级别：缩小到会出现空白之前就停住，保证整张地图始终固定在屏幕上 */
     _applyCoverageZoom() {
       this._applyMapMinZoom()
     },
     /**
-     * 计算「让整条路线完整落在可视区」所需的缩放级别。
+     * 计算「让整条路线完整落在可视区」所需的缩放级别（EPSG:3857）。
      * 只统计顶部状态栏以下、底部留白以上的可视区（左右各留 22px）。
      */
     _routeFitZoom() {
@@ -1288,12 +1906,12 @@ export default {
       if (availW <= 40 || availH <= 40) return null
       const b = L.latLngBounds(this.route.pathCoords)
       const lngSpan = b.getEast() - b.getWest()
-      const latSpan = b.getNorth() - b.getSouth()
-      if (lngSpan <= 0 || latSpan <= 0) return null
-      // 每度像素 <= min(可用宽/经度跨度, 可用高/纬度跨度)，再换算成缩放级别
-      const needPxPerDeg = Math.min(availW / lngSpan, availH / latSpan)
-      const z = Math.log2((needPxPerDeg * 360) / 512)
-      return Math.max(7, Math.min(13, z)) // 离线瓦片最低 z7，不再往下
+      const mercSpanY = Math.abs(mercY(b.getNorth()) - mercY(b.getSouth()))
+      if (lngSpan <= 0 || mercSpanY <= 0) return null
+      // 可视区换算成「世界像素」上限：256·2^z ≤ min(可用宽·360/经度跨度, 可用高·360/墨卡托跨度)
+      const maxWorldPx = Math.min(availW * 360 / lngSpan, availH * 360 / mercSpanY)
+      const z = Math.log2(maxWorldPx / 256)
+      return Math.max(7, Math.min(14, z)) // 矢量瓦片覆盖 z7~z14，不再往下
     },
     /**
      * 统一设置地图最小缩放级别：
@@ -1303,17 +1921,6 @@ export default {
      */
     _applyMapMinZoom() {
       if (!this.map) return
-      // 在线 OSM（3857）无离线瓦片覆盖约束：minZoom 已由建图时 cfg.minZoom 设定，此处不再收紧
-      if (!this._mapBounds) {
-        if (this.previewing) {
-          const rz = this._routeFitZoom()
-          if (rz != null && this.map.options.minZoom !== Math.min(6, rz)) {
-            // 预览时允许缩到能看全路线（不低于全球底图下限 6）
-            this.map.setMinZoom(Math.max(6, Math.min(6, rz)))
-          }
-        }
-        return
-      }
       let floor = this._minZoomForCoverage()
       if (this.previewing) {
         const rz = this._routeFitZoom()
@@ -1325,6 +1932,9 @@ export default {
     drawRoute() {
       if (!this.map || !this.route.pathCoords) return
       const z = (this.map.getZoom && this.map.getZoom()) || 8
+      // 记住本次绘制用的 zoom：moveend 兜底重绘（见 _buildMap 里 redrawOnZoom）据此
+      // 判断几何是否已过时，zoom 未变就跳过，避免每次平移都重建整条路线。
+      this._routeDrawnZoom = z
       // 按当前 zoom 把路径几何重新塑形：远景加密（避免直线穿山）、近景抽稀（性能）
       const cur = reshapeForZoom(this.route.pathCoords || [], z, this.map)
       // 未绕行时基准线与当前线重合，baseLine 会被清空 —— 那就没必要塑形。
@@ -1360,17 +1970,8 @@ export default {
       // 因此用更宽的半透明红色脉冲光晕，让风险段在地图上一眼可辨
       this.riskLine.setStyle({ color: '#e53935', weight: baseWidth + 9, opacity: 0.45, dashArray: null })
       this.riskLine.setLatLngs(riskDraw)
-      // Leaflet 的 setStyle 不处理 className，闪烁类名需直接作用到 SVG 元素上
-      const routeEl = this.routeLine.getElement && this.routeLine.getElement()
-      if (routeEl) {
-        if (wholeRisk) L.DomUtil.addClass(routeEl, 'risk-blink')
-        else L.DomUtil.removeClass(routeEl, 'risk-blink')
-      }
-      const riskEl = this.riskLine.getElement && this.riskLine.getElement()
-      if (riskEl) {
-        if (riskDraw.length) L.DomUtil.addClass(riskEl, 'risk-blink')
-        else L.DomUtil.removeClass(riskEl, 'risk-blink')
-      }
+      // 风险闪烁：preferCanvas 后折线无 SVG 元素可挂 risk-blink 类名，改 JS opacity 脉冲
+      this._setRiskBlink(!!wholeRisk, riskDraw.length > 0)
 
       // 前进箭头 + 流光带（外发光 + 流光 + 核心线 + 箭头 + 起终点脉冲）
       // 特效层在 markerPane（600）之上，必须按段着色，否则单色特效会盖住红线
@@ -1378,7 +1979,9 @@ export default {
         const segs = []
         if (!wholeRisk) groups.forEach(g => segs.push({ latlngs: g.pts, color: g.risk ? '#e94560' : '#2563eb' }))
         if (wholeRisk || !segs.length) segs.push({ latlngs: cur, color: '#e94560' })
-        if (!this._routeFlow) this._routeFlow = createRouteFlow(this.map, { color: '#2563eb' })
+        // 移动端降配：fps:15 限箭头 JS 循环帧；lite 关闭 drop-shadow 滤镜与流光/脉冲 CSS 动画
+        //（CSS 动画不受 fps 约束，是滑动掉帧主因）；maxArrows:8 减半动画箭头数。大屏不传这些，保持全特效。
+        if (!this._routeFlow) this._routeFlow = createRouteFlow(this.map, { color: '#2563eb', fps: 15, lite: true, maxArrows: 8 })
         this._routeFlow.setSegments(segs)
       } else if (this._routeFlow) {
         this._routeFlow.setSegments([])
@@ -1386,6 +1989,39 @@ export default {
 
       // 风险段额外加发光标记（采样打点，避免密集几何生成上千个 marker）
       this._updateRiskMarkers(riskDraw)
+    },
+    /**
+     * risk-blink 的 JS 脉冲版：地图开 preferCanvas 后 routeLine/riskLine 的
+     * getElement() 返回 null，原 CSS 类名（.risk-blink，0.8s ease-in-out）挂不上去。
+     * 改为 400ms 定时器交替 setStyle(opacity)，视觉与原 CSS 等效。
+     * route=整条高亮闪（预览高风险兜底），risk=红色光晕段闪，两者独立开关。
+     */
+    _setRiskBlink(routeBlink, riskBlink) {
+      this._riskBlinkState = { route: !!routeBlink, risk: !!riskBlink }
+      const need = routeBlink || riskBlink
+      if (need && !this._riskBlinkTimer) {
+        this._riskBlinkPhase = false
+        this._applyRiskBlink()
+        this._riskBlinkTimer = setInterval(() => {
+          this._riskBlinkPhase = !this._riskBlinkPhase
+          this._applyRiskBlink()
+        }, 400)
+      } else if (!need && this._riskBlinkTimer) {
+        clearInterval(this._riskBlinkTimer)
+        this._riskBlinkTimer = null
+        this._riskBlinkPhase = false
+        this._applyRiskBlink()
+      }
+    },
+    /** 按当前相位写两条线的透明度；关灯时回到 drawRoute 设定的基线值（route 1 / risk 0.45） */
+    _applyRiskBlink() {
+      if (!this.routeLine || !this.riskLine) return
+      const s = this._riskBlinkState || { route: false, risk: false }
+      const on = !this._riskBlinkPhase
+      if (s.route) this.routeLine.setStyle({ opacity: on ? 0.95 : 0.35 })
+      else this.routeLine.setStyle({ opacity: 1 })
+      if (s.risk) this.riskLine.setStyle({ opacity: on ? 0.45 : 0.15 })
+      else this.riskLine.setStyle({ opacity: 0.45 })
     },
     /** 当前路径上命中风险的边 ID 集合（导航用 riskSegments，预览用候选自带 riskEdgeIds） */
     _riskEdgeSet() {
@@ -1785,7 +2421,7 @@ export default {
         try { if (l instanceof L.Path && l.redraw) l.redraw() } catch (e) { /* 忽略 */ }
       })
     },
-    /** 导航视角缩放级别：直接拉到当前底图最大级（在线 OSM z19 / 离线瓦片 z13），公路细节清晰可见 */
+    /** 导航视角缩放级别：直接拉到当前底图最大级（矢量瓦片 z14，更高等级由 overzoom 放大），公路细节清晰可见 */
     _navMaxZoom() {
       return this.map ? this.map.getMaxZoom() : this.navZoom
     },
@@ -1878,8 +2514,14 @@ export default {
     // 退出全屏导航，回到首页：停掉定位、守护、定时刷新与语音，避免后台残留
     exitNavigation() {
       this.navigating = false
+      this.navigationStartedAt = 0
       this.previewing = false
       this.previewCollapsed = false
+      // 调度任务变更编排相关状态一并复位
+      this.showDispatchConfirm = false
+      this.dispatchConfirmCollapsed = false
+      this._dispatchPreviewPlanId = null
+      this._dispatchHandling = false
       this.navFollowing = true
       this.navOffView = false
       this.showNavMenu = false
@@ -1895,12 +2537,13 @@ export default {
       if (this.riskTimer) { clearInterval(this.riskTimer); this.riskTimer = null }
       if (this._navZoomTimer) { clearTimeout(this._navZoomTimer); this._navZoomTimer = null }
       this._navZoomReady = false
-      // 清空语音队列并打断当前播报
-      this._cancelVoice()
+      // 清空语音队列并打断当前播报（司机主动退出时允许解除最高优先级锁）
+      this._cancelVoice(true)
       this._voiceQueue.length = 0
       this._voiceCooldown = 0
       this._lastVoiceText = ''
       this._lastVoiceAt = 0
+      this._lastDepartureAt = 0
       // 重置灾害播报去重：下一次行程遇到同类灾害仍要正常播报
       this._hazardVoiceKey = ''
       this._hazardVoiceAt = 0
@@ -1909,7 +2552,8 @@ export default {
       axios.post('/api/agent/unregister', null, {
         params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId }
       }).catch(() => {})
-      if (this.map) this.$nextTick(() => this.map.invalidateSize())
+      // 导航屏随后会被 v-if 移除：同步销毁 Leaflet，避免下次确认调度任务时复用旧容器白屏
+      this._destroyMap()
     },
     // 主按钮动作：先搜索候选并直接进入全屏大地图预览，司机在预览里点选路线后再点「开始导航」
     async btnAction() {
@@ -1937,8 +2581,8 @@ export default {
       this.previewCollapsed = false
       this.showNavMenu = false
       this.pushMsg = ''
-      // 退出预览后恢复「铺满屏幕」的最小缩放，避免留下预览时放宽的级别
-      if (this.map) this.$nextTick(() => { this.map.invalidateSize(); this._applyCoverageZoom() })
+      // 预览屏随后会被 v-if 移除：旧 Leaflet 一并销毁，重进预览/导航时重新建图
+      this._destroyMap()
     },
     // 首页候选点选：选中该条并直接进入地图预览
     openPreview(key) {
@@ -2013,6 +2657,8 @@ export default {
     },
     // 3) 按司机所选路线开始导航（choice 贯穿导航轮询，路线不再被系统推荐强制替换）
     async startNavigation() {
+      // 调度路线预览态下点「开始导航」= 确认接收调度指令，走确认流程（保留调度方案与导航开始播报）
+      if (this._dispatchPreviewPlanId || this.showDispatchConfirm) { return this.confirmTaskChange() }
       if (this.routeLoading || this.candidateLoading) return
       if (!this.candidates.length) {
         await this.searchRoutes()
@@ -2029,20 +2675,25 @@ export default {
         // 行程启动信号：调度大屏据此自动触发一次 AI 六维分析（常态方案对比），
         // 由调度员人工确认路线后再下发任务指令给司机
         axios.post('/api/trip/start', null, { params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId } }).catch(() => {})
+        // withAi:false：开始导航不再等 AI 预警文案（后端 AI 是秒级 LLM 调用，是“进导航加载很久”的主因），
+        // 只要几十毫秒的路线/天气/风险结果先秒进导航；AI 文案在下面后台异步回填。
         const plan = await axios.get('/api/route/plan-with-weather', {
-          params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, cargoType: 'cold', choice: this.selectedKey },
+          params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, cargoType: 'cold', choice: this.selectedKey, withAi: false },
           timeout: 30000
         })
         const resp = plan.data.route || plan.data
         this.route = resp
         this.online = true
-        this.warning = plan.data.aiWarning || plan.data.warning || ''
+        // withAi:false 下 aiWarning 为空：保留已有文案不清空，避免预警框闪一下空白；真正的 AI 文案后台补
+        this.warning = plan.data.aiWarning || plan.data.warning || this.warning || ''
         this.risks = plan.data.risks || this.risks
         if (resp.pathNodeIds && resp.pathNodeIds.length) {
           const via = this._viaFromNodes(resp.pathNodeIds)
           if (via) this.viaText = via
         }
         this.checkPush(resp)
+        this.navigationStartedAt = Date.now()
+        this._mapHardRecovered = false
         this.navigating = true
         this.previewing = false
         this.previewCollapsed = false
@@ -2050,12 +2701,14 @@ export default {
         this.navOffView = false
         this.showNavMenu = false
         await this.$nextTick()
-        // 预览阶段已用同一地图容器建好地图，这里不重建，避免闪屏
-        if (!this.map) this.initMap()
+        // 预览阶段已用同一地图容器建好地图；initMap 会识别并复用，旧容器则自动重建
+        this.initMap()
         // 由预览切到导航：恢复「铺满屏幕」的最小缩放（预览时可能为适配路线放宽过）
         this._applyCoverageZoom()
         // 开启 GPS 实时定位（演示环境 GPS 不可用时自动降级模拟行驶）
         this._startRealTimeGPS()
+        // 地图已创建后再播导航开始；语音链路任何异常都不能影响地图初始化
+        this._announceDepartureSafely()
         // 开场视角：直接落到模拟起点（不再"先全览再放大"，那个开场会让视角显得乱跳）
         this._navZoomReady = false
         this.$nextTick(() => {
@@ -2064,6 +2717,8 @@ export default {
           if (this.map) this.map.invalidateSize()
           // 进入导航时重置居中偏移，让本次只重新量测一次（之后导航中冻结，避免漂移）
           this._navCenterOffset = null
+          // 切视角前先“有条件地”拉起遮罩，避免在线瓦片重铺的空窗露成白屏（见 _veilUntilViewPaint）
+          this._veilUntilViewPaint()
           // 保留原来的「先全览 → 再放大到起点跟随」节奏；延迟从 1100ms 缩到 420ms，
           // 既有放大进入的观感，又不至于让人以为视角在乱跳。
           this.fitRoute(true)
@@ -2076,9 +2731,15 @@ export default {
         })
         // 导航开始后自动拉取途径城市天气
         this.loadWeatherForRoute().catch(() => {})
+        // AI 预警文案后台补：不进关键路径，返回后静默回填 this.warning（只更新屏幕文案、不打扰出发播报）
+        axios.get('/api/route/plan-with-weather', {
+          params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, cargoType: 'cold', choice: this.selectedKey, withAi: true },
+          timeout: 60000
+        }).then(p => {
+          const w = p.data && (p.data.aiWarning || p.data.warning)
+          if (w) this.warning = w
+        }).catch(() => {})
         this.showPush('success', '导航已开始', `路线：${this.routeTitle}，预计 ${resp.estimatedHours || '--'} 小时，Agent 已实时守护`)
-        // 出发语音播报：中文 + 越南语（只读一次，不重复）
-        this._announceDeparture()
         // 出发后转为"途中实时预测"：每 3 分钟重新预测一次灾害概率
         if (this.riskTimer) clearInterval(this.riskTimer)
         this.riskTimer = setInterval(() => { this.refreshForecast(false) }, 480000)
@@ -2090,6 +2751,8 @@ export default {
           const r = await axios.get('/data/demo-route.json')
           const resp = r.data.route || r.data
           this.route = { ...this.route, ...resp }
+          this.navigationStartedAt = Date.now()
+          this._mapHardRecovered = false
           this.navigating = true
           this.previewing = false
           this.previewCollapsed = false
@@ -2097,9 +2760,10 @@ export default {
           this.navOffView = false
           this.showNavMenu = false
           await this.$nextTick()
-          if (!this.map) this.initMap()
+          this.initMap()
           this._applyCoverageZoom()
           this._startRealTimeGPS()
+          this._announceDepartureSafely()
           this.showPush('success', '离线导航模式', `已加载演示路线，预计 ${resp.estimatedHours || '--'} 小时`)
           this.$nextTick(() => {
             if (this.map) this.map.invalidateSize()
@@ -2150,6 +2814,10 @@ export default {
     // 输入变动时清空旧候选与预览（导航中不清，保持实时守护）
     _resetCandidates() {
       if (this.navigating) return
+      // 调度方案切换期间（_switchNavForPlan）会修改 destinationId，
+      // 此时不应清空 route / 销毁地图，否则后续 _autoStartDispatchNav 拿不到路线数据，
+      // 导致进入导航后地图空白。
+      if (this._switchingPlan) return
       this.previewing = false
       this.previewCollapsed = false
       this.navFollowing = true
@@ -2158,6 +2826,8 @@ export default {
       this.selectedKey = 'recommended'
       this.viaText = ''
       this.route = {}
+      // 起终点变化会让预览容器一起消失，旧地图不能留到下一次复用
+      this._destroyMap()
     },
     // 途经摘要兜底：路径节点名映射取前 6 个（状态卡展示）
     _viaFromNodes(nodeIds) {
@@ -2339,8 +3009,13 @@ export default {
           || (data.dispatchedAt && prev.dispatchedAt !== data.dispatchedAt)
         this.taskChange = data
         if (isNew && !driverTarget.confirmed) {
-          // 新任务变更：震动 + 语音播报 + 弹出提醒，并切到任务 tab
-          this._notifyTaskChange(data)
+          if (this.navigating) {
+            // 司机正在导航中：走「播报灾害 → 预览调度路线 → 播报天气 → 弹确认接收」编排
+            this._handleDispatchDuringNav(data)
+          } else {
+            // 非导航：震动 + 语音播报 + 弹出提醒，并切到任务 tab
+            this._notifyTaskChange(data)
+          }
         }
       } catch (e) {
         console.error('load task change failed', e)
@@ -2454,21 +3129,138 @@ export default {
     /** 司机点击「确认接收」（第五幕）：确认即按调度方案自动进入导航 */
     async confirmTaskChange() {
       if (!this.taskChange || this.taskConfirming) return
+      // 在点击事件内预热：后续等待派单确认/路线计算后再播报时，浏览器仍允许语音输出
+      this._warmUpSpeech()
       this.taskConfirming = true
       try {
         await axios.post('/api/outreach/confirm', { targetId: this.taskChange.id })
         this.taskChange.confirmed = true
-        this.showPush('ok', '已确认', '任务变更已确认接收，正在自动切换到调度路线导航…')
         const planId = this.taskChange.planId
-        // 先按方案切换目的地并重算路线（B=港区 / A=公路绕行 / C=仅提示等待）
-        await this._switchNavForPlan(planId)
-        // 然后直接按调度路线进入导航（不再要求司机手动点"开始导航"）
-        if (planId !== 'C') this._autoStartDispatchNav(planId)
+        // 导航中弹出的确认接收抽屉：确认后立即收起
+        this.showDispatchConfirm = false
+        // 预览阶段已完成路线切换/重算（导航中收到调度）→ 无需再次重算，直接进导航
+        const previewed = this._dispatchPreviewPlanId && this._dispatchPreviewPlanId === planId
+        this._dispatchPreviewPlanId = null
+        this.showPush('ok', '已确认', '任务变更已确认接收，正在切换到调度路线导航…')
+        if (!previewed) {
+          // 从任务页确认：尚未切目的地，先按方案切换并重算路线（B=港区 / A=公路绕行 / C=仅提示等待）
+          await this._switchNavForPlan(planId)
+        }
+        // 然后直接按调度路线进入导航（不再要求司机手动点"开始导航"），并触发导航开始播报
+        // 必须 await：否则内部异常被吞、地图初始化失败时司机端停留在空白导航页
+        if (planId !== 'C') await this._autoStartDispatchNav(planId)
       } catch (e) {
         console.error('confirm task failed', e)
+        this.showPush('warn', '导航启动异常', '路线已确认但地图加载失败，请点击下方按钮重试。')
       } finally {
         this.taskConfirming = false
       }
+    },
+    /**
+     * 导航中收到调度大屏下发的任务变更时的完整编排：
+     * 1) 先播报当前路线的天气灾害（切路线前先抓住原因，重算会覆盖）；
+     * 2) 切到调度大屏要调度的路线并进入预览，让司机先看清楚；
+     * 3) 播报新路线对应的天气情况；
+     * 4) 播报「原路线因…，正在为您规划最新安全路线」；
+     * 5) 弹出「确认接收」抽屉，司机确认后由 confirmTaskChange 进入导航并触发导航开始播报。
+     */
+    async _handleDispatchDuringNav(msg) {
+      if (this._dispatchHandling) return
+      this._dispatchHandling = true
+      const planId = msg && msg.planId
+      // 切路线会重算 route/risks，灾害原因必须在切换前先取
+      const hazardReason = this.latestHazardReason() || '前方路段出现气象灾害风险'
+      const hazardWord = this.extractHazardKeyword(hazardReason)
+      try {
+        // 1) 震动 + 先播报天气灾害
+        if (navigator.vibrate) navigator.vibrate([200, 100, 200])
+        this.showPush('danger', '⚠ 调度任务变更', '前方气象灾害，调度中心已下发新路线，正在为您切换到预览…')
+        this.pushLog.unshift({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text: '导航中收到调度任务变更，进入路线预览' })
+        if (this.voiceOn) {
+          this._interruptAndSpeak([`气象灾害预警。${hazardWord}。调度中心已介入，正在为您重新规划安全路线，请注意屏幕。`])
+        }
+
+        // C=原地等待：无新路线可预览，保持当前导航，仅弹出确认接收抽屉
+        if (planId === 'C') {
+          this._dispatchPreviewPlanId = null
+          this.dispatchConfirmCollapsed = false
+          this.showDispatchConfirm = true
+          if (this.voiceOn) {
+            this.speakQueue([`原路线因${hazardReason}，调度中心建议就近停靠安全区域等待，保持冷链机组运行。请在屏幕上确认接收指令。`])
+          }
+          return
+        }
+
+        // 2) 计算调度路线并进入预览（复用 _switchNavForPlan：切目的地 + 重算路线）
+        await this._switchNavForPlan(planId)
+        this._dispatchPreviewPlanId = planId
+        this._enterDispatchPreview(planId)
+
+        // 3) 拉取新路线沿线天气后，播报天气情况 + 4) 原路线原因与规划提示
+        try { await this.loadWeatherForRoute() } catch (e) { /* 忽略：天气缺失不阻断播报 */ }
+        if (this.voiceOn) {
+          const weather = this._buildStatusZh(false)
+          this.speakQueue([
+            `已为您切换到调度推荐路线。${weather}`,
+            `原路线因${hazardReason}，正在为您规划最新安全路线，请在屏幕上预览后确认接收。`
+          ])
+        }
+
+        // 5) 弹出确认接收抽屉
+        this.dispatchConfirmCollapsed = false
+        this.showDispatchConfirm = true
+      } catch (e) {
+        console.error('handle dispatch during nav failed', e)
+        // 兜底：直接弹确认接收抽屉，司机仍可确认（confirmTaskChange 会重新走 _switchNavForPlan）
+        this._dispatchPreviewPlanId = null
+        this.dispatchConfirmCollapsed = false
+        this.showDispatchConfirm = true
+      } finally {
+        this._dispatchHandling = false
+      }
+    },
+    /**
+     * 进入「调度路线预览」：把 _switchNavForPlan 重算好的 this.route 作为唯一候选，
+     * 从跟随视角的导航态切到上下分栏的预览态（暂停 GPS/守护轮询，确认后由 _autoStartDispatchNav 重开）。
+     */
+    _enterDispatchPreview(planId) {
+      // 暂停上一程导航的 GPS/模拟行驶与守护轮询（确认接收后 _autoStartDispatchNav 会重新开启）
+      this._stopRealTimeGPS()
+      if (this.riskTimer) { clearInterval(this.riskTimer); this.riskTimer = null }
+      this._navZoomReady = false
+      if (this._navZoomTimer) { clearTimeout(this._navZoomTimer); this._navZoomTimer = null }
+      // 用调度路线构造单一候选，进入预览模式
+      this.selectedKey = 'recommended'
+      this.candidates = [{
+        key: 'recommended',
+        coords: this.route.pathCoords || [],
+        edgeIds: this.route.pathEdgeIds || [],
+        edgeSpans: this.route.pathEdgeSpans || [],
+        nodeIds: this.route.pathNodeIds || [],
+        label: planId === 'B' ? '公水联运（调度路线）' : '公路方案（调度路线）',
+        via: this.viaText,
+        hours: this.route.estimatedHours,
+        distanceKm: this.route.totalDistanceKm,
+        riskCount: this.pathRisks.length,
+        hazardProbability: -1
+      }]
+      this.navigating = false
+      this.previewing = true
+      this.previewCollapsed = false
+      this.showNavMenu = false
+      this.navigationStartedAt = 0
+      // 由全屏导航切到上下分栏预览：地图容器尺寸变化，需重量测后全览整条调度路线
+      this.$nextTick(() => {
+        if (this.map) {
+          this.map.invalidateSize()
+          this.drawRoute()
+          this.fitRoute(false)
+        }
+      })
+    },
+    /** 收起/关闭导航中弹出的确认接收抽屉（保留任务变更，可稍后从任务页确认） */
+    dismissDispatchConfirm() {
+      this.showDispatchConfirm = false
     },
     /**
      * 按调度方案联动导航（双向切换闭环）：
@@ -2490,6 +3282,12 @@ export default {
         return
       }
       const target = planId === 'B' ? 'LJ' : this._planSavedDestination
+      // 抑制 destinationId watcher 中的 _resetCandidates：
+      // 调度切方案会改目的地，但不应清空已有路线/销毁地图，
+      // 否则后续 _autoStartDispatchNav 因 route 为空直接 return，司机看不到地图。
+      // 注意：Vue 3 watcher 是异步队列刷新（pre-flush），不能在同步代码里立即重置 flag，
+      // 必须等到第一个 await 之后（watcher 已在微任务队列中执行完毕）再清除。
+      this._switchingPlan = true
       this.destinationId = target
       try {
         // 重新注册 Agent 活跃任务（目的地已变，守护目标同步切换）
@@ -2500,6 +3298,8 @@ export default {
           params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, cargoType: 'cold', withAi: false },
           timeout: 30000
         })
+        // await 返回后 Vue 已刷新 watcher 队列，此时安全解除抑制标志
+        this._switchingPlan = false
         const resp = plan.data.route || plan.data
         this.route = resp // watcher 自动重绘地图
         this.risks = plan.data.risks || this.risks
@@ -2519,6 +3319,7 @@ export default {
           this.pushLog.unshift({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text: '已切换公路绕行方案，路线已重算' })
         }
       } catch (e) {
+        this._switchingPlan = false
         console.error('plan nav switch failed', e)
         this.showPush('warn', '路线更新失败', '网络异常，请稍后手动重新规划。')
       }
@@ -2528,7 +3329,11 @@ export default {
      * 跳过候选路线搜索，直接进入跟随视角（全览 → 拉满缩放跟随车辆）。
      */
     async _autoStartDispatchNav(planId) {
-      if (!this.route || !this.route.pathCoords || !this.route.pathCoords.length) return
+      if (!this.route || !this.route.pathCoords || !this.route.pathCoords.length) {
+        console.warn('[dispatch-nav] route 无有效 pathCoords，无法进入导航', this.route)
+        this.showPush('warn', '路线数据异常', '未获取到有效路线坐标，请返回重新规划。')
+        return
+      }
       try {
         this._warmUpSpeech()
         // 选中推荐路线贯穿导航轮询（调度路线即推荐路线）
@@ -2540,6 +3345,8 @@ export default {
           edgeSpans: this.route.pathEdgeSpans || [],
           label: planId === 'B' ? '公水联运（调度路线）' : '公路方案（调度路线）'
         }]
+        this.navigationStartedAt = Date.now()
+        this._mapHardRecovered = false
         this.navigating = true
         this.previewing = false
         this.previewCollapsed = false
@@ -2547,9 +3354,23 @@ export default {
         this.navOffView = false
         this.showNavMenu = false
         await this.$nextTick()
-        if (!this.map) this.initMap()
+        // 调度入口直接换一颗全新的地图 DOM：旧 Leaflet ID/pane/HMR 残留都没有机会复用
+        this._destroyMap()
+        this._mapRenderKey++
+        await this.$nextTick()
+        // 关键修复：$nextTick 只保证 DOM 已 patch，但浏览器可能尚未完成 layout。
+        // 若此时 Leaflet 量测容器得到 0×0，瓦片不会加载 → 整屏空白。
+        // 用 requestAnimationFrame 等到下一帧绘制前，确保容器已有真实尺寸。
+        await new Promise(resolve => requestAnimationFrame(resolve))
+        // 二次保险：若 ref 仍拿不到（极端情况），再等一帧
+        if (!this.$refs.mapEl) {
+          await new Promise(resolve => requestAnimationFrame(resolve))
+        }
+        this._scheduleMapHealthChecks()
+        this.initMap()
         this._applyCoverageZoom()
         this._startRealTimeGPS()
+        this._announceDepartureSafely()
         this._navZoomReady = false
         this.$nextTick(() => {
           if (this.map) this.map.invalidateSize()
@@ -2567,7 +3388,6 @@ export default {
         this.loadWeatherForRoute().catch(() => {})
         this.showPush('success', '已按调度路线导航',
           planId === 'B' ? '目标：南宁港六景作业区（公水联运·平陆运河），Agent 已实时守护' : `路线：${this.routeTitle}，Agent 已实时守护`)
-        this._announceDeparture()
         if (this.riskTimer) clearInterval(this.riskTimer)
         this.riskTimer = setInterval(() => { this.refreshForecast(false) }, 480000)
         this.pushLog.unshift({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
@@ -2576,7 +3396,7 @@ export default {
         console.error('auto dispatch nav failed', e)
       }
     },
-    /** 播放任务通知（中文/越南语切换） */
+    /** 播放任务通知（中文/越南语切换） */  
     speakTask(lang) {
       if (!this.taskChange) return
       const text = lang === 'vi' ? (this.taskChange.messageVi || this.taskChange.message) : this.taskChange.message
@@ -2783,9 +3603,8 @@ export default {
       this._lastVoiceText = key
       this._lastVoiceAt = now
       // 抢占：取消当前播报与排队内容，马上播最新的这条。
-      // 记下取消的 Promise，起播前 await —— 保证「旧的停干净了」再开口，
-      // 否则原生 stop() 与新 speak() 竞态，新播报会被掐掉。
-      this._cancelPromise = this._cancelVoice()
+      // 非最高优先级播报连取消当前播报的权利都没有，确保导航开始播报不被任何预警抢走。
+      this._cancelPromise = this._cancelVoice(o.force)
       this._voiceQueue.length = 0
       this._voiceQueue.push(list)
       // 高优先级：锁住语音通道，直到本条念完（或超时兜底）
@@ -2817,29 +3636,36 @@ export default {
      * 避免通道被永久占死导致此后再无语音。
      */
     _lockVoice(ms) {
+      const seq = this._voiceSeq
       this._voiceLocked = true
+      this._criticalVoiceSeq = seq
       if (this._voiceLockTimer) clearTimeout(this._voiceLockTimer)
       this._voiceLockTimer = setTimeout(() => {
-        this._voiceLockTimer = null
-        this._voiceLocked = false
+        if (this._criticalVoiceSeq !== seq) return
+        this._unlockVoice(seq)
       }, ms)
     },
-    /** 解锁语音通道（播报链条正常念完时调用） */
-    _unlockVoice() {
+    /** 解锁语音通道（播报链条正常念完时调用；seq 防止旧链路误开新锁） */
+    _unlockVoice(seq = this._criticalVoiceSeq) {
+      if (this._criticalVoiceSeq && seq !== this._criticalVoiceSeq) return
       this._voiceLocked = false
+      this._criticalVoiceSeq = 0
       if (this._voiceLockTimer) { clearTimeout(this._voiceLockTimer); this._voiceLockTimer = null }
     },
 
     /**
      * 取消当前正在进行的播报：清掉计时器、作废旧播报链路、停掉 web speech 与原生 TTS。
+     * force=false 时不能取消最高优先级的导航开始播报；司机主动退出/卸载会显式传 true。
      * 递增 _voiceSeq 后，旧链路里所有 onend / onerror / 降级回调都会自行退出，不会续播旧内容。
-     *
-     * 返回 Promise：调用方要 await 它，确认"旧的真的停了"再起播新的。
-     * 原实现把原生 stop() 发出去就不管，与新的 speak() 竞态 —— 这是播报乱的主因。
      */
-    _cancelVoice() {
+    _cancelVoice(force = false) {
+      if (this._criticalVoiceSeq && !force) {
+        this._vdbg('拦截取消：导航开始播报最高优先级占用中')
+        return Promise.resolve(false)
+      }
       if (this._voiceTimer) { clearTimeout(this._voiceTimer); this._voiceTimer = null }
       this._voiceSeq += 1
+      this._unlockVoice(this._criticalVoiceSeq)
       const synth = window.speechSynthesis
       if (synth && (synth.speaking || synth.pending || synth.paused)) {
         try { synth.cancel() } catch (e) { /* 忽略 */ }
@@ -2925,10 +3751,11 @@ export default {
     },
     _doSpeak(texts, i, seq) {
       if (seq !== this._voiceSeq) return // 已被抢占，整条旧播报链路作废
+      this._voiceActiveSeq = seq
       if (i >= texts.length) {
         this._voiceCooldown = Date.now()
-        // 整条念完：放开语音通道（未上锁时是空操作），高优先级播报到此结束
-        this._unlockVoice()
+        // 整条念完：只释放本次最高优先级锁，旧播报回调不能误开新播报的锁
+        this._unlockVoice(this._criticalVoiceSeq)
         if (this._voiceQueue.length) {
           this._voiceTimer = setTimeout(() => {
             this._voiceTimer = null
@@ -2947,10 +3774,10 @@ export default {
       // 若按"有 synth 就走 Web"会被静默卡死，永远轮不到挂在 onerror 上的原生兜底。
       if (this._isNativeShell()) {
         this._vdbg('第' + (i + 1) + '/' + texts.length + '条 → 原生TTS：' + clean.slice(0, 18))
-        this._capacitorSpeak(clean, lang).then(ok => {
+        this._capacitorSpeak(clean, lang, seq).then(ok => {
           if (seq !== this._voiceSeq) return
           if (ok) next()
-          else this._speakWeb(clean, lang, next)   // 原生也不可用 → 退回 Web
+          else this._speakWeb(clean, lang, next, 0, seq)   // 原生也不可用 → 退回 Web
         })
         return
       }
@@ -2959,36 +3786,86 @@ export default {
         + ' speaking=' + (syn0 ? syn0.speaking : '-')
         + ' pending=' + (syn0 ? syn0.pending : '-')
         + ' voices=' + (syn0 && syn0.getVoices ? syn0.getVoices().length : '-'))
-      this._speakWeb(clean, lang, next)
+      this._speakWeb(clean, lang, next, 0, seq)
     },
     /** 是否运行在 Capacitor 原生容器内（普通浏览器里 isNativePlatform() 返回 false） */
     _isNativeShell() {
       const c = window.Capacitor
       return !!(c && typeof c.isNativePlatform === 'function' && c.isNativePlatform())
     },
-    /** Web Speech 播报一条；不可用或失败时退回原生 TTS */
-    async _speakWeb(clean, lang, next) {
+    /** Web Speech 播报一条；1.2 秒未确认出声会自动重试一次，再退回原生 TTS */
+    async _speakWeb(clean, lang, next, attempt = 0, voiceSeq = this._voiceSeq) {
       const synth = window.speechSynthesis
       if (!synth) {
         this._vdbg('无 speechSynthesis → 退回原生')
-        this._capacitorSpeak(clean, lang).then(ok => { if (ok) next() })
+        this._capacitorSpeak(clean, lang, voiceSeq).finally(() => { if (voiceSeq === this._voiceSeq) next() })
         return
       }
       // Chrome 的 getVoices() 是异步填充的，首次（或没有可用语音时）返回空数组 ——
       // 此时 speak() 找不到匹配语音会**静默无声且不报错**。先等语音列表就绪。
       await this._waitVoicesReady(1500)
       if (synth.paused) synth.resume()
+      let finished = false
+      let started = false
+      const finish = () => {
+        if (finished) return
+        finished = true
+        clearTimeout(startTimer)
+        clearTimeout(maxTimer)
+        next()
+      }
+      const fallbackNative = () => {
+        if (finished) return
+        finished = true
+        clearTimeout(startTimer)
+        clearTimeout(maxTimer)
+        this._capacitorSpeak(clean, lang, voiceSeq).finally(() => { if (voiceSeq === this._voiceSeq) next() })
+      }
+      // 只看 onstart：speak() 被浏览器静默吞掉时不会报错，必须主动看门。
+      // 但一旦确认已发声（onstart 已回 / synth 正在念）就绝不能再 cancel 重读：
+      // 原先 onstart 不清这个定时器，任何超过 1.2s 的话都会被掐掉从头重念 ——
+      // 「导航开始被读好几遍」的主因。
+      const startTimer = setTimeout(() => {
+        if (finished || started) return
+        if (synth.speaking || synth.pending) { started = true; return }
+        this._vdbg('Web 1.2s 未开始发声，尝试恢复')
+        finished = true
+        try { synth.cancel() } catch (e) { /* 忽略 */ }
+        if (attempt < 1) {
+          setTimeout(() => {
+            if (voiceSeq === this._voiceSeq) this._speakWeb(clean, lang, next, attempt + 1, voiceSeq)
+          }, 250)
+        } else {
+          this._capacitorSpeak(clean, lang, voiceSeq).finally(() => { if (voiceSeq === this._voiceSeq) next() })
+        }
+      }, 1200)
+      // 单条上限看门：onend 丢失（Chrome 长句 bug）时按估算时长+余量强制推进，避免整条队列卡死
+      const maxTimer = setTimeout(() => {
+        if (finished) return
+        this._vdbg('单条播报超时，强制推进下一条')
+        try { synth.cancel() } catch (e) { /* 忽略 */ }
+        finish()
+      }, this._estimateSpeechMs([clean]) + 6000)
       const u = new SpeechSynthesisUtterance(clean)
       u.lang = lang
       u.rate = 0.95
       u.volume = 1
-      // onstart 是关键诊断点：引擎被静默吞掉时它永不触发（Android WebView 的典型表现）
-      u.onstart = () => this._vdbg('Web 已开始发声')
-      u.onend = () => { this._vdbg('Web 播完'); next() }
-      // 被抢占时（cancel 触发的 canceled/interrupted）next() 内部会因 seq 不符自行作废
+      u.onstart = () => {
+        if (finished) return
+        started = true
+        clearTimeout(startTimer)
+        this._voiceLastStartAt = Date.now()
+        this._voiceLastStartSeq = voiceSeq
+        this._vdbg('Web 已开始发声')
+      }
+      u.onend = () => { this._vdbg('Web 播完'); finish() }
       u.onerror = (e) => {
-        this._vdbg('Web 出错：' + ((e && e.error) || '未知') + ' → 退回原生')
-        this._capacitorSpeak(clean, lang).then(ok => { if (ok) next() })
+        if (finished) return
+        const err = (e && e.error) || '未知'
+        this._vdbg('Web 出错：' + err + ' → 退回原生')
+        // cancel/interrupted 是本次被更高优先级播报抢占，不再触发旧链路兜底
+        if (err === 'canceled' || err === 'interrupted') { finish(); return }
+        fallbackNative()
       }
       synth.speak(u)
       this._vdbg('已调用 synth.speak()（voices=' + (synth.getVoices ? synth.getVoices().length : '-') + '）')
@@ -3013,11 +3890,13 @@ export default {
       })
     },
     /** Capacitor 原生 TTS（Android/iOS WebView 语音播报）。返回是否成功，供上层决定要不要退回 Web */
-    async _capacitorSpeak(text, lang) {
+    async _capacitorSpeak(text, lang, voiceSeq = this._voiceActiveSeq) {
       try {
         // 用缓存的模块实例（与 _stopNativeTts 同一个），保证 stop/speak 的调用顺序
         const m = await loadNativeTts()
         if (!m || !m.TextToSpeech) return false
+        this._voiceLastStartAt = Date.now()
+        this._voiceLastStartSeq = voiceSeq
         await m.TextToSpeech.speak({
           text,
           lang: lang === 'vi-VN' ? 'vi' : 'zh-CN',
@@ -3037,6 +3916,8 @@ export default {
      */
     _interruptAndSpeak(texts) {
       if (!this.voiceOn) return
+      // 导航开始播报期间，任何预警/任务播报都只保留界面提示，不能抢语音通道
+      if (this._criticalVoiceSeq) { this._vdbg('拦截预警播报：导航开始播报中'); return }
       this._lastVoiceText = ''
       this._lastVoiceAt = 0
       this.speakQueue(texts)
@@ -3050,8 +3931,11 @@ export default {
         if (synth.paused) synth.resume()
         // 如果已经在播放或待播放，不打断
         if (synth.speaking || synth.pending) return
-        const u = new SpeechSynthesisUtterance('')
+        // 空文本在部分浏览器不会真正启动引擎；用零音量短文本完成用户手势授权
+        const u = new SpeechSynthesisUtterance('好')
         u.volume = 0
+        u.rate = 2
+        u.onstart = () => { this._voiceLastStartAt = Date.now() }
         synth.speak(u)
       } catch (e) { /* ignore */ }
     },
@@ -3157,7 +4041,7 @@ export default {
      * 构建详细状态播报文本：延误时间 + 天气 + 通关 + 货损 + 风险摘要
      * 输出适合 TTS 播报的自然语言格式
      */
-    _buildStatusZh() {
+    _buildStatusZh(includeEta = true) {
       const r = this.route
       const parts = []
       // 运输方式：水运方案要点明「平陆运河」。状态播报同时用于出发播报和灾害播报，
@@ -3207,10 +4091,69 @@ export default {
         parts.push(`前方${segs.length}处风险路段：${reasons.join('、')}`)
       }
       // 预计到达 — 使用口语化日期格式
-      parts.push(`预计北京时间${this.etaArrivalZh}、越南时间${this.etaArrivalVN}到达`)
+      if (includeEta) {
+        parts.push(`预计北京时间${this.etaArrivalZh}、越南时间${this.etaArrivalVN}到达`)
+      }
       return parts.join('。')
     },
 
+    /**
+     * 预计耗时口语化（中文）：3.5 → "3小时30分钟"，0.75 → "45分钟"。
+     * 对齐国内导航播报习惯，不说"3.5小时"这种小数。
+     */
+    _fmtDurationZh(hours) {
+      const h = Number(hours)
+      if (!Number.isFinite(h) || h <= 0) return ''
+      let totalMin = Math.round(h * 60)
+      if (totalMin < 1) totalMin = 1
+      const hh = Math.floor(totalMin / 60)
+      const mm = totalMin % 60
+      if (hh <= 0) return `${mm}分钟`
+      if (mm <= 0) return `${hh}小时`
+      return `${hh}小时${mm}分钟`
+    },
+    /** 预计耗时口语化（越南语）：3.5 → "3 giờ 30 phút"，0.75 → "45 phút" */
+    _fmtDurationVi(hours) {
+      const h = Number(hours)
+      if (!Number.isFinite(h) || h <= 0) return ''
+      let totalMin = Math.round(h * 60)
+      if (totalMin < 1) totalMin = 1
+      const hh = Math.floor(totalMin / 60)
+      const mm = totalMin % 60
+      if (hh <= 0) return `${mm} phút`
+      if (mm <= 0) return `${hh} giờ`
+      return `${hh} giờ ${mm} phút`
+    },
+
+    /** 出发播报安全入口：语音链路失败只记录日志，绝不能阻断地图/GPS/导航初始化 */
+    _announceDepartureSafely() {
+      // 连点开始导航 / 调度确认与手动入口叠加时，出发播报会被触发多次；
+      // 这里兜底去重：15 秒内只允许一次出发播报
+      const now = Date.now()
+      if (this._lastDepartureAt && now - this._lastDepartureAt < 15000) {
+        this._vdbg('拦截：出发播报 15 秒内已播过')
+        return
+      }
+      this._lastDepartureAt = now
+      setTimeout(() => {
+        try {
+          this._announceDeparture()
+        } catch (e) {
+          console.error('导航开始播报失败', e)
+          // 详情播报失败时至少保证基础播报能出声，且不再影响导航主流程
+          try {
+            const km = Number(this.route.totalDistanceKm)
+            const dur = this._fmtDurationZh(this.route.estimatedHours)
+            const text = `导航开始，从${this.originName}到${this.destinationName}，全程约${Number.isFinite(km) ? Math.round(km * 10) / 10 : '--'}公里${dur ? '，预计需要' + dur : ''}`
+            const u = new SpeechSynthesisUtterance(normalizeForTTS(text, 'zh-CN'))
+            u.lang = 'zh-CN'
+            u.rate = 0.95
+            u.volume = 1
+            window.speechSynthesis && window.speechSynthesis.speak(u)
+          } catch (_) { /* 忽略 */ }
+        }
+      }, 0)
+    },
     /**
      * 出发语音播报：中文 + 越南语（中越双语），只读一次
      */
@@ -3218,44 +4161,64 @@ export default {
       const r = this.route
       const originVN = NODE_NAME_VN[this.resolvedOriginId] || this.resolvedOriginId
       const destVN = NODE_NAME_VN[this.resolvedDestinationId] || this.resolvedDestinationId
-      const estHours = r.estimatedHours || 0
-      // 全程里程：整数就显示整数，否则一位小数（原来只报耗时、没报里程）
-      const kmRaw = r.totalDistanceKm
-      const km = (kmRaw == null || isNaN(kmRaw)) ? null : Math.round(kmRaw * 10) / 10
-      const zhRun = km != null ? `全程约${km}公里，预计行驶${estHours}小时` : `预计行驶${estHours}小时`
-      const viRun = km != null ? `Toàn tuyến khoảng ${km} km, dự kiến hành trình ${estHours} giờ`
-                               : `Dự kiến hành trình ${estHours} giờ`
+      const hoursRaw = Number(r.estimatedHours)
+      const kmRaw = Number(r.totalDistanceKm)
+      const km = Number.isFinite(kmRaw) && kmRaw > 0 ? Math.round(kmRaw * 10) / 10 : null
+      // 耗时口语化：对齐国内导航播报习惯（"3小时30分钟"而非"3.5小时"）
+      const durZh = this._fmtDurationZh(hoursRaw)
+      const durVi = this._fmtDurationVi(hoursRaw)
+
+      // 开场白（国内导航风格）：一句话把「起讫点 + 全程里程 + 预计耗时 + 到达时间」讲清楚。
+      // 这是最高优先级、必须最先被完整听到的关键信息，放在最前面即使后续被打断也不丢核心内容。
+      const zhOpening = [
+        `导航开始，从${this.originName}到${this.destinationName}`,
+        km != null ? `全程约${km}公里` : '',
+        durZh ? `预计需要${durZh}` : '',
+        this.etaArrivalZh !== '--' ? `预计北京时间${this.etaArrivalZh}到达` : ''
+      ].filter(Boolean).join('，')
+      const viOpening = [
+        `Bắt đầu điều hướng từ ${originVN} đến ${destVN}`,
+        km != null ? `Toàn tuyến khoảng ${km} km` : '',
+        durVi ? `Dự kiến mất ${durVi}` : '',
+        this.etaArrivalViTTS !== '--' ? `Dự kiến đến vào ${this.etaArrivalViTTS} giờ Việt Nam` : ''
+      ].filter(Boolean).join(', ')
 
       // 中文播报（水运方案会插入"经平陆运河"那句；非水运时为空串，用 filter 去掉）
       const zhParts = [
-        `导航开始，从${this.originName}到${this.destinationName}`,
+        zhOpening,
         this.transportBriefZh,
-        zhRun,
-        this._buildStatusZh(),
+        this._buildStatusZh(false),
         'Agent 已开启实时守护，祝您一路平安'
       ].filter(Boolean)
       const zhText = zhParts.join('。')
 
       // 越南语播报
       const viParts = [
-        `Bắt đầu điều hướng từ ${originVN} đến ${destVN}`,
+        viOpening,
         this.transportBriefVi,
-        viRun,
-        this._buildStatusVi(),
-        'Hệ thống Agent đã kích hoạt giám sát thời gian thực. Chúc bạn thượng lộ bình an'
+        this._buildStatusVi(false),
+        'Hệ thống Agent đã kích hoạt chế độ giám sát liên tục. Chúc bạn thượng lộ bình an'
       ].filter(Boolean)
       const viText = viParts.join('. ')
 
       // 最高优先级：force 抢占当前一切播报；lock 让本条念完之前别的播报不许抢占它。
-      // 这是"导航开始 + 全程里程 + 预计耗时"这类关键信息，被灾害/轮询播报打断会听不全。
-      this._vdbg('announceDeparture：里程=' + km + 'km 耗时=' + estHours + 'h，准备入队')
+      // 这是"导航开始 + 全程里程 + 预计到达时间"这类关键信息，被灾害/轮询播报打断会听不全。
+      this._vdbg(`announceDeparture：里程=${km}km 耗时=${durZh || '--'} ETA=${this.etaArrivalZh}，准备入队`)
       this.speakQueue([zhText, viText], { force: true, lock: true })
+      const seq = this._voiceSeq
+      // 4.5 秒后仍没确认本次播报发声，自动重试一次；期间所有普通播报仍被最高优先级锁拦截。
+      setTimeout(() => {
+        if (!this.navigating || !this.voiceOn) return
+        if (seq !== this._voiceSeq || this._voiceLastStartSeq === seq) return
+        this._vdbg('出发播报未检测到出声，自动重试一次')
+        this.speakQueue([zhText, viText], { force: true, lock: true })
+      }, 4500)
     },
 
     /**
      * 构建越南语状态播报文本：延误 + 天气 + 通关 + 货损 + 风险 + 到达时间
      */
-    _buildStatusVi() {
+    _buildStatusVi(includeEta = true) {
       const r = this.route
       const parts = []
       // 运输方式（越南语）：与中文播报对应，点明 kênh đào Bình Lục（平陆运河）
@@ -3307,7 +4270,9 @@ export default {
         parts.push(`Phía trước có ${segs.length} đoạn đường rủi ro: ${reasons.join(', ')}`)
       }
       // 预计到达
-      parts.push(`Dự kiến đến vào ${this.etaArrivalViTTS} giờ Việt Nam`)
+      if (includeEta) {
+        parts.push(`Dự kiến đến vào ${this.etaArrivalViTTS} giờ Việt Nam`)
+      }
       return parts.join('. ')
     },
 
@@ -3574,50 +4539,93 @@ export default {
    注意：状态色（绿=通畅 / 橙=预警 / 红=绕行）保持语义不变，那是驾驶场景的安全信号，
    不能为了好看把"警示"变成"品牌色"。 */
 .phone {
+  /* 品牌蓝：结构/语义主色（选中描边、链接、状态等仍用它） */
+  --brand:#1663e6; --brand-deep:#0f4fc4; --brand-soft:#e8f0fe;
+  /* 棱彩主色（与调度大屏同一套色相：靛蓝/天蓝/青/紫/品红）：主按钮、hero、选中态、装饰流光 */
   --prism-1:#6366f1; --prism-2:#38bdf8; --prism-3:#22d3ee; --prism-4:#a855f7; --prism-5:#ec4899;
-  --prism-grad: linear-gradient(135deg, var(--prism-1) 0%, var(--prism-2) 36%, var(--prism-3) 54%, var(--prism-4) 78%, var(--prism-5) 100%);
+  --prism-grad: linear-gradient(120deg, #6366f1 0%, #38bdf8 28%, #22d3ee 50%, #a855f7 74%, #ec4899 100%);
   max-width: 420px; margin: 0 auto; min-height: 100vh;
-  background-color: #f2f5fb;
-  background-image:
-    radial-gradient(ellipse 62% 40% at 10% 4%, rgba(99,102,241,.22), transparent 68%),
-    radial-gradient(ellipse 58% 36% at 92% 12%, rgba(56,189,248,.20), transparent 68%),
-    radial-gradient(ellipse 64% 42% at 86% 84%, rgba(168,85,247,.18), transparent 68%),
-    radial-gradient(ellipse 58% 38% at 8% 92%, rgba(34,211,238,.17), transparent 68%);
+  background-color: #f3f5f8;
   font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1a1a2e; position: relative; box-shadow: 0 0 40px rgba(0,0,0,.08); }
 .phone.nav-mode { max-width: 100%; }
 .home-page { min-height: 100vh; display: flex; flex-direction: column; }
+/* ===== 高德风格首页：全屏地图 + 悬浮搜索/宫格/去X卡/胶囊 Tab/底部抽屉 ===== */
+.home-page.amap { position: relative; min-height: 100vh; overflow: hidden; background: #e8ecf3; }
+.home-map { position: absolute; inset: 0; z-index: 0; }
+.hm-ctrl { position: absolute; right: 12px; top: 96px; z-index: 5; display: flex; flex-direction: column; gap: 8px; }
+.hm-ctrl-btn { width: 44px; height: 44px; border: none; border-radius: 12px; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.15); font-size: 20px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.hm-modechip { position: absolute; left: 12px; top: 12px; z-index: 5; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,.92); box-shadow: 0 2px 10px rgba(0,0,0,.12); font-size: 12px; }
+.hm-modechip .mode-name { font-weight: 600; }
+.hm-modechip .strip-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
+.hm-modechip .mode-act { border: none; border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.hm-modechip .mode-act.accept { background: #2563eb; color: #fff; }
+.hm-modechip .mode-act.done { background: #e8f5e9; color: #2e7d32; }
+.hm-modechip .mode-act-exit { color: #94a3b8; cursor: pointer; }
+.hm-modechip .mode-hint { color: #64748b; }
+.hm-search { position: absolute; left: 12px; right: 12px; z-index: 6; }
+.hm-search:not(.open) { bottom: 250px; }
+.hm-search.open { bottom: 76px; }
+.hm-search-bar { display: flex; align-items: center; gap: 10px; background: #fff; border-radius: 999px; padding: 14px 18px; box-shadow: 0 4px 18px rgba(0,0,0,.15); cursor: pointer; }
+.hm-search-bar .hm-ph { flex: 1; color: #94a3b8; font-size: 15px; }
+.hm-search-bar .hm-ico { font-size: 18px; }
+.hm-search-panel { background: #fff; border-radius: 16px; padding: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.18); max-height: 60vh; overflow-y: auto; }
+.hm-search-actions { display: flex; gap: 8px; margin-top: 10px; }
+.hm-search-actions .start-btn { flex: 1; }
+.hm-close { border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 10px; padding: 0 14px; cursor: pointer; }
+.hm-grid { position: absolute; left: 12px; right: 12px; bottom: 150px; z-index: 5; display: flex; justify-content: space-between; gap: 6px; }
+.hm-grid-item { flex: 1; border: none; background: transparent; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
+.hm-grid-ico { width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #fff; box-shadow: 0 3px 10px rgba(0,0,0,.18); }
+.hm-grid-label { font-size: 12px; color: #1e293b; text-shadow: 0 1px 2px rgba(255,255,255,.6); }
+.hm-gocard { position: absolute; left: 12px; right: 12px; bottom: 84px; z-index: 5; display: flex; align-items: center; gap: 12px; background: #fff; border-radius: 16px; padding: 12px 14px; box-shadow: 0 4px 18px rgba(0,0,0,.15); }
+.hm-go-ico { width: 40px; height: 40px; border-radius: 10px; background: #e3f2fd; display: flex; align-items: center; justify-content: center; font-size: 20px; }
+.hm-go-info { flex: 1; }
+.hm-go-title { font-size: 15px; font-weight: 600; color: #1e293b; }
+.hm-go-meta { font-size: 12px; color: #64748b; margin-top: 2px; }
+.hm-go-bar { height: 3px; border-radius: 2px; background: #22c55e; margin-top: 6px; }
+.hm-go-btn { border: none; background: #2563eb; color: #fff; border-radius: 999px; padding: 10px 22px; font-size: 15px; cursor: pointer; }
+.hm-tabbar { position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 6; display: flex; background: #fff; border: 1px solid #eceff3; border-radius: 14px; padding: 4px; box-shadow: 0 2px 10px rgba(16,24,40,.08); }
+.hm-tab { flex: 1; position: relative; border: none; background: transparent; border-radius: 10px; padding: 7px 0 6px; display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; }
+.hm-tab.active { background: var(--brand-soft); }
+.hm-tab-ico { font-size: 18px; line-height: 1; filter: grayscale(1); opacity: .6; transition: filter .15s, opacity .15s; }
+.hm-tab.active .hm-tab-ico { filter: none; opacity: 1; }
+.hm-tab-label { font-size: 11px; color: #667085; }
+.hm-tab.active .hm-tab-label { color: var(--brand); font-weight: 600; }
+.hm-tab-dot { position: absolute; top: 6px; right: 22%; width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }
+.hm-sheet { position: absolute; left: 0; right: 0; bottom: 70px; z-index: 8; background: #fff; border-radius: 16px 16px 0 0; border-top: 1px solid #e7eaf0; box-shadow: 0 -8px 24px rgba(16,24,40,.10); max-height: 62vh; display: flex; flex-direction: column; }
+.hm-sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 10px; font-size: 15px; font-weight: 600; color: #111827; border-bottom: 1px solid #f0f2f5; }
+.hm-sheet-close { border: none; background: transparent; color: #98a2b3; width: 28px; height: 28px; border-radius: 8px; cursor: pointer; font-size: 14px; transition: background .15s, color .15s; }
+.hm-sheet-close:hover { background: #f2f4f7; color: #475467; }
+.hm-sheet-body { overflow-y: auto; padding: 10px 12px 20px; background: #f7f8fa; }
 .home-hero { position: relative; overflow: hidden; background: var(--prism-grad); padding: 48px 24px 36px; text-align: center; }
-/* 棱彩流光：一道高光缓慢扫过 hero（手机上只保留这一处动画，避免 WebView 里持续重绘） */
-.home-hero::after { content: ''; position: absolute; inset: 0; pointer-events: none;
-  background: linear-gradient(115deg, transparent 32%, rgba(255,255,255,.30) 48%, transparent 64%);
-  background-size: 260% 100%; animation: hero-sheen 7s ease-in-out infinite; }
-@keyframes hero-sheen { 0%, 12% { background-position: 135% 0; } 88%, 100% { background-position: -35% 0; } }
 .home-logo h1 { color: #fff; font-size: 24px; font-weight: 800; margin: 0; letter-spacing: 1px; }
 .home-sub { color: rgba(255,255,255,.75); font-size: 13px; margin-top: 6px; }
 .logo-icon { font-size: 48px; display: block; margin-bottom: 12px; }
 .home-form { flex: 1; padding: 0 16px; margin-top: -20px; position: relative; z-index: 2; }
 .form-card { background: #fff; border-radius: 16px; padding: 20px 16px; box-shadow: 0 4px 24px rgba(0,0,0,.08); }
-.form-row { margin-bottom: 12px; }
-.form-label { font-size: 12px; color: #999; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; display: block; }
-.form-input-wrap { display: flex; align-items: center; gap: 10px; background: #f5f7fa; border-radius: 12px; padding: 4px 14px; border: 2px solid transparent; transition: border-color .2s; }
-.form-input-wrap:focus-within { border-color: var(--prism-1); background: #fff; }
-.input-icon { width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; color: #fff; flex-shrink: 0; }
-.input-icon.from { background: #34d399; }
-.input-icon.to { background: #e53935; }
-.form-input-wrap input { flex: 1; border: none; background: transparent; font-size: 15px; color: #1a1a2e; outline: none; padding: 10px 0; }
-.form-input-wrap input::placeholder { color: #bbb; }
-.form-swap { display: flex; justify-content: center; margin: -6px 0; }
-.form-swap span { width: 32px; height: 32px; border-radius: 50%; background: #fff; border: 2px solid #e8ecf1; display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--prism-1); cursor: pointer; transition: all .2s; box-shadow: 0 2px 8px rgba(0,0,0,.06); }
-.form-swap span:active { transform: scale(.9); background: #e3f2fd; }
+/* 起终点一体输入盒：左侧站点轨道 + 分隔线 + 右侧交换按钮，替代盒式双输入框 */
+.od-box { display: flex; align-items: stretch; gap: 10px; background: #f5f7fa; border-radius: 12px; padding: 6px 12px; }
+.od-rail { display: flex; flex-direction: column; align-items: center; padding: 14px 0; }
+.od-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.od-dot.from { background: #22a35a; }
+.od-dot.to { background: #e53935; }
+.od-line { width: 0; flex: 1; margin: 3px 0; border-left: 2px dotted #c7d0dd; }
+.od-fields { flex: 1; min-width: 0; }
+.od-fields input { width: 100%; border: none; background: transparent; font-size: 15px; color: #1a1a2e; outline: none; padding: 11px 0; }
+.od-fields input::placeholder { color: #a7b2c2; }
+.od-divider { height: 1px; background: #e3e8ef; }
+.od-swap { align-self: center; flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%; background: #fff; border: 1px solid #e3e8ef; color: var(--brand); font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(16,24,40,.08); transition: transform .25s; }
+.od-swap:active { transform: rotate(180deg); }
 .quick-picks { margin: 16px 0; }
 .quick-label { font-size: 11px; color: #999; font-weight: 600; display: block; margin-bottom: 8px; }
 .quick-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .quick-chip { padding: 6px 12px; border-radius: 20px; border: 1px solid #e3f2fd; background: #f5f9ff; color: var(--prism-1); font-size: 12px; cursor: pointer; transition: all .2s; font-weight: 500; }
 .quick-chip:hover { background: #e3f2fd; border-color: #bbdefb; }
 .quick-chip:active { transform: scale(.96); }
-.start-btn { width: 100%; margin-top: 4px; padding: 16px; background: var(--prism-grad); border: none; border-radius: 14px; color: #fff; font-size: 16px; font-weight: 700; cursor: pointer; transition: all .2s; box-shadow: 0 6px 20px rgba(99,102,241,.34); display: flex; align-items: center; justify-content: center; gap: 8px; }
+.start-btn { width: 100%; margin-top: 4px; padding: 15px; background: var(--prism-grad); background-size: 220% 100%; border: none; border-radius: 12px; color: #fff; font-size: 16px; font-weight: 600; cursor: pointer; transition: filter .15s, transform .1s; box-shadow: 0 4px 16px rgba(99,102,241,.38); display: flex; align-items: center; justify-content: center; gap: 8px; animation: start-prism-flow 7s ease-in-out infinite; }
+.start-btn:active:not(:disabled) { filter: brightness(.9); }
 .start-btn:active { transform: scale(.98); }
-.start-btn:disabled { opacity: .5; cursor: not-allowed; }
+.start-btn:disabled { opacity: .5; cursor: not-allowed; animation: none; }
+@keyframes start-prism-flow { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
 .cand-section { margin-top: 12px; }
 .cand-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding: 0 4px; }
 .cand-header span:first-child { font-size: 13px; font-weight: 700; color: #1a1a2e; }
@@ -3627,7 +4635,7 @@ export default {
 .cand-item.sel { border-color: var(--prism-1); background: #f0f6ff; box-shadow: 0 0 0 3px rgba(99,102,241,.08); }
 .cand-left { display: flex; align-items: flex-start; gap: 10px; flex: 1; min-width: 0; }
 .cand-radio { width: 18px; height: 18px; border-radius: 50%; border: 2px solid #c8d6e5; flex-shrink: 0; margin-top: 2px; transition: all .2s; }
-.cand-radio.on { border-color: var(--prism-1); background: var(--prism-grad); box-shadow: inset 0 0 0 3px #fff; }
+.cand-radio.on { border-color: var(--brand); background: var(--brand); box-shadow: inset 0 0 0 3px #fff; }
 .cand-info { flex: 1; min-width: 0; }
 .cand-title { font-size: 14px; font-weight: 700; color: #1a1a2e; }
 .cand-via { font-size: 11px; color: #999; margin-top: 2px; }
@@ -3651,7 +4659,7 @@ export default {
   border: none; border-radius: 8px; padding: 3px 10px;
   font-size: 11px; font-weight: 700; cursor: pointer;
 }
-.mode-act.accept { background: linear-gradient(135deg, var(--prism-1), var(--prism-4)); color: #fff; }
+.mode-act.accept { background: var(--brand); color: #fff; }
 .mode-act.accept:disabled { opacity: .6; cursor: default; }
 .mode-act.done { background: #e4f6ea; color: #16a34a; cursor: default; }
 .mode-act-exit { font-size: 11px; color: #8a95a8; cursor: pointer; text-decoration: underline; }
@@ -3676,14 +4684,19 @@ export default {
 .link { color: var(--prism-1); cursor: pointer; font-weight: 600; }
 .home-nav { display: flex; gap: 4px; background: #fff; border-radius: 12px; padding: 4px; box-shadow: 0 1px 6px rgba(0,0,0,.04); }
 .home-nav span { flex: 1; text-align: center; padding: 8px; font-size: 12px; color: #999; cursor: pointer; border-radius: 10px; font-weight: 600; transition: all .2s; }
-.home-nav span.active { background: linear-gradient(135deg, rgba(99,102,241,.18), rgba(56,189,248,.16) 45%, rgba(168,85,247,.18)); color: var(--prism-1); }
+.home-nav span.active { background: var(--brand-soft); color: var(--brand); }
 .tab-content { margin-top: 12px; padding-bottom: 80px; }
-.card { background: #fff; border-radius: 14px; padding: 14px; margin-bottom: 10px; box-shadow: 0 1px 6px rgba(0,0,0,.04); }
-.card-head { display: flex; justify-content: space-between; align-items: center; font-size: 14px; font-weight: 700; margin-bottom: 8px; color: #1a1a2e; }
+.card { background: #fff; border: 1px solid #e7eaf0; border-radius: 12px; padding: 14px; margin-bottom: 10px; box-shadow: 0 1px 2px rgba(16,24,40,.04); }
+.card-head { display: flex; justify-content: space-between; align-items: center; font-size: 14px; font-weight: 600; margin-bottom: 10px; color: #111827; }
+/* 卡片标题左侧品牌小竖条：取代 emoji 图标，统一视觉锚点 */
+.card-head > span:first-child { display: inline-flex; align-items: center; }
+.card-head > span:first-child::before { content: ''; width: 3px; height: 13px; border-radius: 2px; background: var(--brand); margin-right: 7px; }
 .count { font-size: 11px; font-weight: 700; padding: 2px 10px; border-radius: 20px; color: #fff; background: #e53935; }
-.refresh { font-size: 11px; padding: 4px 12px; border-radius: 14px; background: #e3f2fd; color: var(--prism-1); border: none; cursor: pointer; font-weight: 600; transition: all .2s; }
-.refresh:hover { background: #bbdefb; }
+.refresh { font-size: 12px; padding: 5px 12px; border-radius: 8px; background: #fff; color: var(--brand); border: 1px solid #cdd9ee; cursor: pointer; font-weight: 500; transition: background .15s, border-color .15s; }
+.refresh:hover { background: var(--brand-soft); border-color: var(--brand); }
 .refresh:disabled { opacity: .5; }
+/* 语音开关：开启态用绿色 tint，区别于普通操作按钮 */
+.refresh.on { background: #e7f6ec; border-color: #b5e3c8; color: #16a34a; }
 .empty { font-size: 12px; color: #999; text-align: center; padding: 16px 0; }
 .risk-list { display: flex; flex-direction: column; gap: 6px; }
 .risk-item { padding: 10px; border-radius: 10px; cursor: pointer; transition: all .2s; border-left: 3px solid #f59e0b; background: #fafafa; }
@@ -3703,17 +4716,41 @@ export default {
 .customs-line { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 13px; color: #333; }
 .ch-time { background: #e8f5e9; color: #16a34a; padding: 1px 8px; border-radius: 10px; font-weight: 700; font-size: 12px; }
 .ch-adjust { font-size: 10px; color: #c2410c; font-weight: 600; }
-.me-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.me-label { font-size: 12px; color: #999; width: 60px; flex-shrink: 0; font-weight: 600; }
-.me-input { flex: 1; padding: 8px 12px; border-radius: 8px; border: 1px solid #e8ecf1; font-size: 13px; color: #333; background: #fafbfc; }
-.me-input:focus { outline: none; border-color: var(--prism-1); }
-.save-btn { width: 100%; padding: 10px; border-radius: 10px; border: none; background: linear-gradient(135deg, var(--prism-1), var(--prism-4)); color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
+/* ===== 「我的」资料页：资料头卡 + 分组列表（无边框行内编辑），避免盒式表单的模板感 ===== */
+.me-hero { display: flex; align-items: center; gap: 12px; background: #fff; border: 1px solid #e7eaf0; border-radius: 12px; padding: 14px; margin-bottom: 10px; }
+.me-avatar { width: 46px; height: 46px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 700; color: #fff; background: linear-gradient(135deg, var(--brand), var(--brand-deep)); }
+.me-hero-info { flex: 1; min-width: 0; }
+.me-hero-name { font-size: 16px; font-weight: 700; color: #111827; }
+.me-hero-sub { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+.me-plate { font-size: 11px; font-weight: 700; letter-spacing: .5px; color: var(--brand); background: var(--brand-soft); border-radius: 4px; padding: 1px 6px; }
+.me-truck { font-size: 11px; color: #667085; background: #f2f4f7; border-radius: 4px; padding: 1px 6px; }
+.me-mode-tag { flex-shrink: 0; font-size: 10px; font-weight: 700; color: #c2410c; background: #fff3e0; border-radius: 999px; padding: 3px 8px; }
+.me-group { background: #fff; border: 1px solid #e7eaf0; border-radius: 12px; padding: 0 14px; margin-bottom: 12px; }
+.me-row { display: flex; align-items: center; gap: 10px; min-height: 46px; }
+.me-row + .me-row { border-top: 1px solid #f0f2f5; }
+.me-label { font-size: 13px; color: #667085; width: 64px; flex-shrink: 0; font-weight: 500; }
+.me-input { flex: 1; min-width: 0; padding: 8px 0; border: none; background: transparent; font-size: 14px; color: #111827; text-align: right; transition: color .15s; }
+.me-input::placeholder { color: #c3ccd9; }
+.me-input:focus { outline: none; color: var(--brand); }
+.me-input:disabled { color: #98a2b3; -webkit-text-fill-color: #98a2b3; }
+.me-select { appearance: none; -webkit-appearance: none; padding-right: 16px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%2398a2b3' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right center; }
+.me-switch { position: relative; width: 44px; height: 26px; margin-left: auto; flex-shrink: 0; border: none; border-radius: 999px; background: #d5dbe6; cursor: pointer; transition: background .2s; }
+.me-switch.on { background: #16a34a; }
+.me-knob { position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(16,24,40,.25); transition: transform .2s; }
+.me-switch.on .me-knob { transform: translateX(18px); }
+.save-btn { width: 100%; padding: 12px; border-radius: 12px; border: none; background: var(--brand); color: #fff; font-size: 15px; font-weight: 600; letter-spacing: 2px; cursor: pointer; box-shadow: 0 4px 12px rgba(22,99,230,.25); transition: background .15s, transform .12s; }
+.save-btn:active { background: var(--brand-deep); transform: scale(.98); }
 .nav-screen { position: fixed; inset: 0; z-index: 100; background-color: #eef2fa; background-image: radial-gradient(ellipse 72% 42% at 18% 0%, rgba(99,102,241,.16), transparent 68%), radial-gradient(ellipse 72% 42% at 86% 100%, rgba(168,85,247,.14), transparent 68%); overscroll-behavior: none; display: flex; flex-direction: column; }
 /* 地图区域：占据上方剩余空间。地图自身设 z-index:0 形成独立层叠上下文，把 Leaflet 内部图层
    （tilePane 等 pane 的 z-index 高达 200~700）锁在里面，否则它们会盖住顶部状态栏(z-index:10)
    和底部面板(z-index:12)——面板“被底图盖住”就是这个原因 */
 .nav-map-wrap { position: relative; flex: 1 1 auto; min-height: 0; }
 .nav-map { position: absolute; inset: 0; z-index: 0; touch-action: none; }
+/* 底图加载遮罩：瓦片没到位前盖住空白地图区，给出明确加载反馈（不拦截地图手势） */
+.map-veil { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #eef2fa; pointer-events: none; }
+.map-veil-spin { width: 26px; height: 26px; border-radius: 50%; border: 3px solid rgba(22,99,230,.2); border-top-color: #1663e6; animation: veil-spin .8s linear infinite; }
+@keyframes veil-spin { to { transform: rotate(360deg); } }
+.map-veil-text { font-size: 12px; color: #667085; }
 /* 自由视角下的一键回中按钮：吸附在底部浮层正上方，浮层高低变化也不会压住路线 */
 .recenter-btn { position: absolute; right: 12px; bottom: calc(100% + 4px); z-index: 3; display: flex; align-items: center; gap: 6px; padding: 9px 14px; border: none; border-radius: 999px; background: rgba(99,102,241,.94); color: #fff; font-size: 12px; font-weight: 700; cursor: pointer; box-shadow: 0 6px 18px rgba(12,26,45,.3); backdrop-filter: blur(8px); transition: transform .15s; animation: slide-up .25s ease; }
 .recenter-btn:active { transform: scale(.95); }
@@ -3799,7 +4836,7 @@ export default {
   100% { left: 100%; width: 28%; opacity: .85; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .eta-sheen, .eta-bar-fill, .badge-dot, .pulse-dot::after, .eta-card { animation: none !important; }
+  .eta-sheen, .eta-bar-fill, .badge-dot, .pulse-dot::after, .eta-card, .start-btn { animation: none !important; }
 }
 .nav-actions { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end; flex-wrap: wrap; }
 /* 路线预览（浮在地图底图之上的选路面板，路线留白由 fitRoute 计算，避免被面板遮挡） */
@@ -3807,8 +4844,6 @@ export default {
 .preview-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; flex-shrink: 0; }
 .preview-head-left { flex: 1; min-width: 0; }
 .preview-title { display: flex; align-items: center; font-size: 15px; font-weight: 800; color: #1a1a2e; }
-.pv-ico { margin-right: 6px; font-size: 15px; animation: ico-float 2.6s ease-in-out infinite; }
-@keyframes ico-float { 0%, 100% { transform: translateY(0) rotate(-6deg); } 50% { transform: translateY(-3px) rotate(6deg); } }
 .preview-sub { font-size: 11px; color: #888; margin-top: 3px; }
 .preview-toggle { flex-shrink: 0; padding: 5px 10px; border: none; border-radius: 12px; background: rgba(99,102,241,.1); color: var(--prism-1); font-size: 11px; font-weight: 700; white-space: nowrap; cursor: pointer; transition: all .2s; }
 .preview-toggle:hover { background: rgba(99,102,241,.18); }
@@ -3867,7 +4902,7 @@ export default {
 .preview-start::after { content: ''; position: absolute; top: 0; bottom: 0; width: 46%; background: linear-gradient(100deg, transparent, rgba(255,255,255,.42), transparent); animation: start-shine 2.6s linear infinite; }
 @keyframes start-shine { from { left: -60%; } to { left: 120%; } }
 @media (prefers-reduced-motion: reduce) {
-  .pv-item, .pv-item.sel, .safest-flag, .prob-pill.high.glow, .preview-card, .preview-start::after, .pv-ico { animation: none !important; }
+  .pv-item, .pv-item.sel, .safest-flag, .prob-pill.high.glow, .preview-card, .preview-start::after { animation: none !important; }
 }
 .nav-btn { width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,.9); border: none; box-shadow: 0 2px 10px rgba(0,0,0,.08); display: flex; align-items: center; justify-content: center; font-size: 18px; cursor: pointer; transition: all .2s; backdrop-filter: blur(10px); }
 .nav-btn:active { transform: scale(.92); background: #f0f2f5; }
@@ -3898,6 +4933,15 @@ export default {
 .kb-overlay { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,.4); display: flex; align-items: flex-end; justify-content: center; }
 .kb-panel { background: #fff; border-radius: 16px 16px 0 0; padding: 20px; width: 100%; max-width: 420px; max-height: 60vh; overflow-y: auto; animation: kb-up .32s cubic-bezier(.2,.9,.3,1.1) both; }
 @keyframes kb-up { from { transform: translateY(28px); opacity: .6; } to { transform: translateY(0); opacity: 1; } }
+/* 调度任务变更：导航中弹出的确认接收抽屉（贴底，可收起露出上方路线预览） */
+.dispatch-overlay { position: fixed; inset: 0; z-index: 210; display: flex; align-items: flex-end; justify-content: center; pointer-events: none; background: rgba(6,18,34,.22); transition: background .3s; }
+.dispatch-overlay.collapsed { background: rgba(6,18,34,.04); }
+.dispatch-sheet { pointer-events: auto; background: #fff; border-radius: 16px 16px 0 0; padding: 14px 16px calc(14px + env(safe-area-inset-bottom, 0px)); width: 100%; max-width: 420px; max-height: 74vh; overflow-y: auto; box-shadow: 0 -12px 34px rgba(6,18,34,.28); animation: kb-up .32s cubic-bezier(.2,.9,.3,1.1) both; }
+.dc-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.dc-title { font-size: 15px; font-weight: 800; color: #b91c1c; }
+.dc-toggle { flex: 0 0 auto; border: 1px solid #e2e8f0; background: #f8fafc; color: #334155; border-radius: 999px; padding: 5px 12px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.dc-plan { display: flex; gap: 8px; margin-bottom: 8px; }
+.dc-hint { margin-top: 8px; font-size: 11px; color: #94a3b8; text-align: center; line-height: 1.5; }
 .hazard-detail-panel .kb-head { align-items: center; padding-bottom: 10px; border-bottom: 1px solid rgba(99,102,241,.14); }
 .hazard-detail-panel .kb-head > span:first-child { background: linear-gradient(90deg, var(--prism-1), var(--prism-3), var(--prism-4)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 .kb-head { font-size: 14px; font-weight: 700; margin-bottom: 12px; display: flex; justify-content: space-between; }
@@ -4027,6 +5071,20 @@ export default {
 .touch-fill { height: 100%; background: linear-gradient(90deg, #34d399, #66bb6a); border-radius: 4px; transition: width 0.5s; }
 .touch-text { font-size: 11px; color: #7c8ca6; margin-top: 6px; }
 </style><style>
+/* Leaflet 全局防护：调度确认进入导航时，确保地图层不被任何主题样式隐藏 */
+.phone.nav-mode .nav-map.leaflet-container {
+  position: absolute !important;
+  inset: 0 !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  background: #e8f1fb !important;
+  z-index: 1;
+}
+.phone.nav-mode .nav-map .leaflet-pane,
+.phone.nav-mode .nav-map .leaflet-tile,
+.phone.nav-mode .nav-map .leaflet-overlay-pane svg {
+  visibility: visible !important;
+}
 @keyframes risk-blink { 0%,100% { opacity: 0.7; } 50% { opacity: 1; } }
 .risk-blink { animation: risk-blink 0.8s ease-in-out infinite; }
 .port-tip { background: rgba(0,0,0,0.8) !important; border: none !important; color: #fff !important; font-size: 12px !important; font-weight: 700 !important; padding: 4px 8px !important; border-radius: 4px !important; }
@@ -4055,79 +5113,65 @@ export default {
    ============================================================ */
 .phone:not(.nav-mode) {
   background:
-    radial-gradient(ellipse 120% 60% at 50% -10%, rgba(79,109,245,.14), transparent 60%),
+    radial-gradient(ellipse 120% 60% at 50% -10%, rgba(22,99,230,.14), transparent 60%),
     radial-gradient(ellipse 80% 40% at 90% 110%, rgba(124,92,255,.10), transparent 55%),
     linear-gradient(180deg, #f3f6fc 0%, #e9eef9 50%, #eef3fb 100%);
   color: #33415c;
 }
 .phone:not(.nav-mode) .home-hero {
-  background:
-    radial-gradient(ellipse 90% 120% at 50% 0%, rgba(79,109,245,.22), transparent 65%),
-    linear-gradient(160deg, #4f6df5 0%, #6b8afd 55%, #7c5cff 100%);
-  border-bottom: 1px solid rgba(79,109,245,.22);
-  box-shadow: 0 12px 40px rgba(20,80,200,.18);
+  background: var(--prism-grad);
+  border-bottom: 1px solid rgba(15,79,196,.18);
+  box-shadow: 0 6px 20px rgba(99,102,241,.22);
 }
 .phone:not(.nav-mode) .home-logo h1 {
   color: #ffffff;
   text-shadow: 0 2px 16px rgba(30,40,90,.35), 0 0 40px rgba(255,255,255,.25);
   letter-spacing: 2px;
 }
-.phone:not(.nav-mode) .home-logo .logo-icon {
-  display: inline-block;
-  filter: drop-shadow(0 0 14px rgba(255,255,255,.55));
-  animation: hero-float 3.2s ease-in-out infinite;
-}
-@keyframes hero-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+.phone:not(.nav-mode) .home-logo .logo-icon { display: inline-block; }
 .phone:not(.nav-mode) .home-sub { color: #dbe4ff; text-shadow: 0 1px 8px rgba(30,40,90,.3); }
 
 /* 表单卡 / 通用卡片 → 浅色玻璃拟态 + 微光描边 */
 .phone:not(.nav-mode) .form-card,
 .phone:not(.nav-mode) .card {
-  background: linear-gradient(165deg, rgba(255,255,255,.72), rgba(255,255,255,.82));
-  border: 1px solid rgba(105,125,175,.18);
-  box-shadow:
-    0 8px 32px rgba(50,70,120,.16),
-    inset 0 1px 0 rgba(140,160,220,.08);
-  backdrop-filter: blur(14px);
-  border-radius: 16px;
-  transition: border-color .25s, box-shadow .25s, transform .12s;
-}
-.phone:not(.nav-mode) .card:hover {
-  border-color: rgba(105,125,175,.32);
-  box-shadow:
-    0 10px 36px rgba(50,70,120,.15),
-    0 0 24px rgba(70,120,255,.10),
-    inset 0 1px 0 rgba(140,160,220,.12);
+  background: #fff;
+  border: 1px solid #e7eaf0;
+  box-shadow: 0 1px 2px rgba(16,24,40,.04);
+  border-radius: 12px;
 }
 .phone:not(.nav-mode) .card-head { color: #1f2d4d; }
-.phone:not(.nav-mode) .form-label,
 .phone:not(.nav-mode) .me-label,
 .phone:not(.nav-mode) .cand-header { color: #64748f; }
 
-/* 输入框 */
-.phone:not(.nav-mode) .form-input-wrap { background: #f4f6fc; border-color: #dbe3f2; }
-.phone:not(.nav-mode) .form-input-wrap:focus-within { border-color: #4f6df5; background: #fff; }
-.phone:not(.nav-mode) .form-input-wrap input { color: #1f2d4d; }
-.phone:not(.nav-mode) .form-input-wrap input::placeholder { color: #9aa7bd; }
-.phone:not(.nav-mode) .me-input { background: #f4f6fc; border-color: #dbe3f2; color: #1f2d4d; }
+/* 起终点输入盒 */
+.phone:not(.nav-mode) .od-box { background: #fff; border: 1px solid #e7eaf0; }
+.phone:not(.nav-mode) .od-fields input { color: #1f2d4d; }
+.phone:not(.nav-mode) .od-fields input::placeholder { color: #9aa7bd; }
+.phone:not(.nav-mode) .me-input { background: transparent; color: #111827; }
+.phone:not(.nav-mode) .me-select { background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%2398a2b3' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right center; }
+.phone:not(.nav-mode) .me-hero,
+.phone:not(.nav-mode) .me-group { background: #fff; border-color: #e7eaf0; }
+.phone:not(.nav-mode) .me-hero-name { color: #1f2d4d; }
+.phone:not(.nav-mode) .me-truck { background: #eef1f8; color: #64748f; }
+.phone:not(.nav-mode) .me-row + .me-row { border-top-color: #eef1f8; }
 
 /* 快捷路线 chip / 知识 chip */
 .phone:not(.nav-mode) .quick-chip,
-.phone:not(.nav-mode) .chip { background: #ffffff; border-color: #dbe3f2; color: #4f6df5; }
+.phone:not(.nav-mode) .chip { background: #ffffff; border-color: #dbe3f2; color: var(--brand); }
 .phone:not(.nav-mode) .quick-chip:hover,
-.phone:not(.nav-mode) .chip:hover { background: #f6f8fd; border-color: #4f6df5; }
+.phone:not(.nav-mode) .chip:hover { background: #f6f8fd; border-color: var(--brand); }
 
-/* 主按钮保持高亮渐变（深色下更醒目） */
-.phone:not(.nav-mode) .start-btn { background: linear-gradient(135deg, #4f6df5, #6b8afd); box-shadow: 0 4px 16px rgba(79,109,245,.45); }
+/* 主按钮：棱彩渐变（与导航/预览态一致，不再被首页主题刷成纯色） */
+.phone:not(.nav-mode) .start-btn { background: var(--prism-grad); background-size: 220% 100%; box-shadow: 0 4px 16px rgba(99,102,241,.38); }
 
 /* 候选路线卡 */
 .phone:not(.nav-mode) .cand-item { background: #ffffff; border-color: #eef1f8; }
-.phone:not(.nav-mode) .cand-item.sel { border-color: #4f6df5; background: #f6f8fd; box-shadow: 0 0 0 3px rgba(79,109,245,.15); }
+.phone:not(.nav-mode) .cand-item.sel { border-color: var(--brand); background: #f6f8fd; box-shadow: 0 0 0 3px rgba(22,99,230,.15); }
 .phone:not(.nav-mode) .cand-title { color: #1f2d4d; }
 .phone:not(.nav-mode) .cand-via { color: #64748f; }
 .phone:not(.nav-mode) .meta-tag { background: #eef1f8; color: #64748f; }
 .phone:not(.nav-mode) .meta-tag.warn { background: rgba(225,29,72,.15); color: #e11d48; }
-.phone:not(.nav-mode) .cand-radio.on { border-color: #4f6df5; background: #4f6df5; }
+.phone:not(.nav-mode) .cand-radio.on { border-color: var(--brand); background: var(--brand); }
 
 /* 底部信息条 & 导航 */
 .phone:not(.nav-mode) .info-bar { color: #64748f; }
@@ -4135,13 +5179,14 @@ export default {
 .phone:not(.nav-mode) .cargo-tag { background: #eef1f8; color: #64748f; }
 .phone:not(.nav-mode) .home-nav { background: #ffffff; border: 1px solid #eef1f8; }
 .phone:not(.nav-mode) .home-nav span { color: #64748f; }
-.phone:not(.nav-mode) .home-nav span.active { background: rgba(79,109,245,.15); color: #4f6df5; }
+.phone:not(.nav-mode) .home-nav span.active { background: var(--brand-soft); color: var(--brand); }
 .phone:not(.nav-mode) .home-nav .has-task { color: #e11d48; }
 
 /* 风险/预警/知识 卡内容 */
 .phone:not(.nav-mode) .empty { color: #9aa7bd; }
-.phone:not(.nav-mode) .refresh { background: rgba(79,109,245,.15); color: #4f6df5; }
-.phone:not(.nav-mode) .refresh:hover { background: rgba(79,109,245,.28); }
+.phone:not(.nav-mode) .refresh { background: #fff; border-color: #cdd9ee; color: var(--brand); }
+.phone:not(.nav-mode) .refresh:hover { background: var(--brand-soft); }
+.phone:not(.nav-mode) .refresh.on { background: #e7f6ec; border-color: #b5e3c8; color: #16a34a; }
 .phone:not(.nav-mode) .warning-box { background: rgba(217,119,6,.12); border-color: rgba(217,119,6,.4); color: #b45309; }
 .phone:not(.nav-mode) .risk-item { background: #f6f8fd; border-left-color: #d97706; }
 .phone:not(.nav-mode) .risk-item:hover { background: #eef1f8; }
@@ -4153,7 +5198,7 @@ export default {
 .phone:not(.nav-mode) .kb-title { color: #1f2d4d; }
 .phone:not(.nav-mode) .kb-content { color: #64748f; }
 .phone:not(.nav-mode) .count { background: #e11d48; }
-.phone:not(.nav-mode) .save-btn { background: #4f6df5; }
+.phone:not(.nav-mode) .save-btn { background: var(--brand); }
 
 /* 任务变更卡（深色版） */
 .phone:not(.nav-mode) .task-card { border-left-color: #ea7a2e; }
@@ -4161,26 +5206,26 @@ export default {
 .phone:not(.nav-mode) .task-state.ok { color: #16a34a; }
 .phone:not(.nav-mode) .task-state.pending { color: #e11d48; }
 .phone:not(.nav-mode) .task-channel { background: #eef1f8; color: #64748f; }
-.phone:not(.nav-mode) .task-plan { background: rgba(79,109,245,.15); color: #4f6df5; }
+.phone:not(.nav-mode) .task-plan { background: rgba(22,99,230,.15); color: var(--brand); }
 .phone:not(.nav-mode) .lang-btn { background: #ffffff; border-color: #dbe3f2; color: #64748f; }
-.phone:not(.nav-mode) .lang-btn.on { border-color: #4f6df5; color: #4f6df5; background: rgba(79,109,245,.15); }
+.phone:not(.nav-mode) .lang-btn.on { border-color: var(--brand); color: var(--brand); background: rgba(22,99,230,.15); }
 .phone:not(.nav-mode) .speak-btn { background: #ffffff; border-color: #dbe3f2; color: #64748f; }
 .phone:not(.nav-mode) .task-msg { background: #f4f6fc; color: #1f2d4d; border: 1px solid #e2e8f5; }
 .phone:not(.nav-mode) .rights-box { background: linear-gradient(135deg, rgba(22,163,74,.14), rgba(22,163,74,.06)); border-color: rgba(22,163,74,.4); }
 .phone:not(.nav-mode) .rights-title { color: #16a34a; }
 .phone:not(.nav-mode) .rights-item { color: #15803d; }
-.phone:not(.nav-mode) .confirm-task-btn { background: linear-gradient(135deg, #1fa84a, #34d399); box-shadow: 0 4px 12px rgba(22,163,74,.4); }
+.phone:not(.nav-mode) .confirm-task-btn { background: #16a34a; box-shadow: 0 2px 8px rgba(22,163,74,.28); }
 .phone:not(.nav-mode) .confirm-task-btn.done { background: #eef1f8; color: #16a34a; }
 .phone:not(.nav-mode) .task-hint { color: #9aa7bd; }
 .phone:not(.nav-mode) .plan-item { background: #f6f8fd; border-color: #eef1f8; }
 .phone:not(.nav-mode) .plan-item.rec { border-color: #22a35a; background: rgba(22,163,74,.08); }
-.phone:not(.nav-mode) .plan-badge { background: rgba(79,109,245,.15); color: #4f6df5; }
+.phone:not(.nav-mode) .plan-badge { background: rgba(22,99,230,.15); color: var(--brand); }
 .phone:not(.nav-mode) .plan-name { color: #1f2d4d; }
 .phone:not(.nav-mode) .plan-meta { color: #64748f; }
 .phone:not(.nav-mode) .plan-meta .warn { color: #e11d48; }
 .phone:not(.nav-mode) .plan-meta .ok { color: #16a34a; }
 .phone:not(.nav-mode) .plan-risk { color: #e11d48; }
-.phone:not(.nav-mode) .plan-rec { background: rgba(124,92,255,.12); color: #7c5cff; }
+.phone:not(.nav-mode) .plan-rec { background: rgba(124,92,255,.12); color: var(--brand-deep); }
 .phone:not(.nav-mode) .touch-bar { background: #eef1f8; }
 .phone:not(.nav-mode) .touch-fill { background: linear-gradient(90deg, #1fa84a, #22a35a); }
 .phone:not(.nav-mode) .touch-text { color: #64748f; }
@@ -4190,39 +5235,16 @@ export default {
 
 /* ---------- 发光特效 + 点击反馈（深色区全局） ---------- */
 /* 主按钮：霓虹辉光 + 按压下沉 */
-.phone:not(.nav-mode) .start-btn {
-  background: linear-gradient(135deg, #4f6df5, #6b8afd 55%, #7c5cff);
-  box-shadow:
-    0 6px 22px rgba(79,109,245,.45),
-    0 0 32px rgba(109,138,255,.28),
-    inset 0 1px 0 rgba(255,255,255,.22);
-  transition: transform .12s, box-shadow .25s, filter .2s;
-}
-.phone:not(.nav-mode) .start-btn:hover:not(:disabled) {
-  filter: brightness(1.08);
-  box-shadow:
-    0 8px 26px rgba(79,109,245,.55),
-    0 0 44px rgba(109,138,255,.4),
-    inset 0 1px 0 rgba(255,255,255,.28);
-}
 .phone:not(.nav-mode) .start-btn:active:not(:disabled) {
-  transform: scale(.965) translateY(1px);
-  box-shadow: 0 2px 10px rgba(79,109,245,.35), 0 0 18px rgba(109,138,255,.2);
+  transform: scale(.98);
+  filter: brightness(.9);
+  box-shadow: 0 1px 6px rgba(99,102,241,.35);
 }
 
 /* 确认接收按钮：翠绿辉光 */
-.phone:not(.nav-mode) .confirm-task-btn {
-  background: linear-gradient(135deg, #1fa84a, #34d399);
-  box-shadow:
-    0 6px 20px rgba(46,204,113,.4),
-    0 0 30px rgba(52,211,153,.28),
-    inset 0 1px 0 rgba(255,255,255,.22);
-  transition: transform .12s, box-shadow .25s, filter .2s;
-}
 .phone:not(.nav-mode) .confirm-task-btn:active:not(:disabled) {
-  transform: scale(.96) translateY(1px);
-  filter: brightness(.94);
-  box-shadow: 0 2px 8px rgba(46,204,113,.3);
+  transform: scale(.98);
+  background: #15803d;
 }
 
 /* 可点卡片/列表项：按压缩放 + 亮起 */
@@ -4244,18 +5266,12 @@ export default {
 .phone:not(.nav-mode) .lang-btn:active,
 .phone:not(.nav-mode) .speak-btn:active,
 .phone:not(.nav-mode) .refresh:active {
-  transform: scale(.96);
-  filter: brightness(1.25);
+  transform: scale(.98);
 }
 
 /* 底部导航 tab：按压点亮 + 选中辉光 */
 .phone:not(.nav-mode) .home-nav span { transition: transform .12s, background .2s, color .2s, box-shadow .25s; }
 .phone:not(.nav-mode) .home-nav span:active { transform: scale(.9); }
-.phone:not(.nav-mode) .home-nav span.active {
-  background: rgba(79,109,245,.16);
-  color: #4f6df5;
-  box-shadow: 0 0 16px rgba(79,109,245,.22), inset 0 1px 0 rgba(140,160,220,.15);
-}
 
 /* 涟漪波纹（JS 注入 .ripple-host > .ripple-ink） */
 .ripple-host { position: relative; overflow: hidden; }
@@ -4272,12 +5288,34 @@ export default {
   margin: 0 0 10px 2px; padding: 7px 14px 7px 10px;
   border-radius: 999px; border: 1px solid rgba(105,125,175,.25);
   background: linear-gradient(165deg, rgba(255,255,255,.7), rgba(255,255,255,.75));
-  color: #4f6df5; font-size: 13px; font-weight: 600; cursor: pointer;
+  color: var(--brand); font-size: 13px; font-weight: 600; cursor: pointer;
   box-shadow: 0 4px 14px rgba(50,70,120,.14), inset 0 1px 0 rgba(140,160,220,.1);
   backdrop-filter: blur(10px);
   transition: transform .12s, box-shadow .25s, color .2s;
 }
 .drv-back-btn .back-arrow { font-size: 15px; line-height: 1; }
-.drv-back-btn:hover { color: #3556d4; box-shadow: 0 6px 18px rgba(0,0,0,.4), 0 0 18px rgba(79,109,245,.2); }
+.drv-back-btn:hover { color: #3556d4; box-shadow: 0 6px 18px rgba(0,0,0,.4), 0 0 18px rgba(22,99,230,.2); }
 .drv-back-btn:active { transform: scale(.93); }
+
+/* 左边缘侧滑返回指示条：拖动时点亮，位移/透明度由模板按跟手进度内联绑定。
+   fixed 贴视口左边缘，z-index 高于导航屏(100)与弹层，pointer-events:none 不拦截点击。 */
+.swipe-edge {
+  position: fixed; left: 0; top: 0; bottom: 0; width: 40px; z-index: 2147483646;
+  display: flex; align-items: center; pointer-events: none;
+  opacity: 0; transition: opacity .2s ease;
+}
+.swipe-edge.on { opacity: 1; transition: none; }
+.swipe-edge-glow {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 100%;
+  background: linear-gradient(90deg, rgba(99,102,241,.30), rgba(99,102,241,0));
+  transform: scaleX(0); transform-origin: left center;
+}
+.swipe-edge-chev {
+  position: relative; margin-left: 3px;
+  width: 22px; height: 46px; border-radius: 999px;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 20px; font-weight: 700; line-height: 1;
+  background: rgba(99,102,241,.9); box-shadow: 0 2px 12px rgba(50,70,120,.35);
+  transform: translateX(-16px) scale(.7); opacity: .35;
+}
 </style>

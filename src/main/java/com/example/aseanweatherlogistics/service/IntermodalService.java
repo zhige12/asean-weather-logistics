@@ -107,7 +107,33 @@ public class IntermodalService {
         m.put("roadRefHours", round1(roadBaselineHours));
         m.put("roadRefCostYuan", round0(roadCost));
         m.put("canalTollNote", "平陆运河过闸费当前免征");
+        // ---- 多式联运“一口价”（计划书 §4.4）----
+        // 货主面对单一打包总价，无需分别对接公路/港口/船公司；按承运方拆分只为展示“一口价”背后的多方构成。
+        double roadParty = 0, portParty = 0, waterParty = 0;
+        for (Leg leg : LEGS) {
+            switch (leg.mode()) {
+                case "公路" -> roadParty += leg.costYuan();
+                case "换装" -> portParty += leg.costYuan();
+                default -> waterParty += leg.costYuan(); // 运河 + 海运
+            }
+        }
+        List<Map<String, Object>> flatPriceParties = new ArrayList<>();
+        flatPriceParties.add(party("公路承运车队", "南宁短驳 + 越南短驳", roadParty));
+        flatPriceParties.add(party("港口滚装作业", "六景作业区整车滚装+加固", portParty));
+        flatPriceParties.add(party("船公司", "平陆运河过闸 + 北部湾海运", waterParty));
+        m.put("flatPriceYuan", round0(intermodalCost));
+        m.put("flatPriceParties", flatPriceParties);
+        m.put("flatPriceNote", "多式联运“一口价”：公路短驳 + 港口滚装 + 运河过闸 + 海运舱位打包结算，"
+                + "货主对接单一价格与单一合同，无需分别对接公路/港口/船公司（过闸费免征已含）。");
         return m;
+    }
+
+    private static Map<String, Object> party(String name, String item, double costYuan) {
+        Map<String, Object> p = new LinkedHashMap<>();
+        p.put("party", name);
+        p.put("item", item);
+        p.put("costYuan", round0(costYuan));
+        return p;
     }
 
     private static double round1(double v) {

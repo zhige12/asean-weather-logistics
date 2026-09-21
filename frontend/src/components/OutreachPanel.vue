@@ -10,6 +10,13 @@
       从预警生成到确认反馈的闭环：未确认的自动升级触达方式（语音外呼）
     </div>
 
+    <!-- 分级叫应等级横幅（黄/橙/红）：由后端根据沙盘风险状态研判，驱动通道与升级策略 -->
+    <div v-if="status.total" class="alert-banner" :class="'lv-' + (status.alertLevel || 'NORMAL')">
+      <span class="alert-dot"></span>
+      <b class="alert-name">{{ status.alertLevelName || "常规通知" }}</b>
+      <span class="alert-meta">通道 {{ status.alertChannel || "App推送" }} · 确认 {{ status.confirmMode || "点击确认" }} · 升级 {{ status.escalationPolicy || "—" }}</span>
+    </div>
+
     <div v-if="!status.total" class="muted empty-hint">
       在上方「AI 决策分析」中选择方案并点击「确认切换方案」，任务变更指令将下发至各角色。
     </div>
@@ -69,7 +76,7 @@
         <div v-for="t in status.targets" :key="t.id" class="status-row" :class="{ escalated: t.escalated && !t.confirmed }">
           <span class="st-name">{{ t.name }}</span>
           <span>{{ t.delivered ? "✅" : "—" }}</span>
-          <span :class="{ pending: !t.confirmed }">{{ t.confirmed ? "✅" : t.escalated ? "📞 二次呼叫" : "⏳" }}</span>
+          <span :class="{ pending: !t.confirmed }">{{ t.confirmed ? "✅" : isReported(t.id) ? "📤 已上报" : t.escalated ? "📞 二次呼叫" : "⏳" }}</span>
           <span class="st-channel">{{ t.channel }}</span>
         </div>
       </div>
@@ -141,6 +148,11 @@ function canConfirm(role) {
   return role === "DRIVER" || role === "SHIPOWNER";
 }
 
+// 红色级叫应：超时未确认已自动上报调度端的目标
+function isReported(id) {
+  return Array.isArray(props.status.reported) && props.status.reported.includes(id);
+}
+
 async function confirm(id) {
   try {
     await axios.post("/api/outreach/confirm", { targetId: id });
@@ -209,6 +221,51 @@ onUnmounted(() => clearInterval(timer));
 .outreach-hint {
   font-size: 11px;
   margin-bottom: 8px;
+}
+.alert-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  margin-bottom: 10px;
+  border-left: 4px solid #64748f;
+  background: rgba(100, 116, 139, 0.1);
+}
+.alert-banner .alert-name {
+  font-size: 13px;
+  color: var(--text-h, #1c2a44);
+}
+.alert-banner .alert-meta {
+  font-size: 11px;
+  color: #5b6b85;
+}
+.alert-banner .alert-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #64748f;
+  flex-shrink: 0;
+}
+.alert-banner.lv-YELLOW {
+  border-left-color: #eab308;
+  background: rgba(234, 179, 8, 0.12);
+}
+.alert-banner.lv-YELLOW .alert-dot { background: #eab308; }
+.alert-banner.lv-ORANGE {
+  border-left-color: #f97316;
+  background: rgba(249, 115, 22, 0.14);
+}
+.alert-banner.lv-ORANGE .alert-dot { background: #f97316; }
+.alert-banner.lv-RED {
+  border-left-color: #e11d48;
+  background: rgba(225, 29, 72, 0.14);
+}
+.alert-banner.lv-RED .alert-dot {
+  background: #e11d48;
+  animation: blink 1s infinite alternate;
 }
 .empty-hint {
   font-size: 12px;

@@ -25,9 +25,14 @@
 import L from 'leaflet';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import '@maplibre/maplibre-gl-leaflet';
+import localBaseStyle from '../data/local-base-style';
 import { createRouteFlow } from '../utils/routeFlow.js';
 import { reshapeForZoom } from '../utils/pathReshape.js';
 import { splitRouteByRisk, riskEdgeSet } from '../utils/routeSegments.js';
+// 天地图密钥与在线底图源定义统一到 utils/tileSources.js（大屏与司机端共用，单一事实来源）
+import { TIANDITU_TK } from '../utils/tileSources.js';
+// Leaflet Canvas 渲染器销毁竞态防护（控制台偶发 Canvas._clear 读空 _ctx 报 reading 'save'），一次性 patch，两端共用
+import '../utils/leafletCanvasGuard.js';
 
 export default {
   name: 'MapView',
@@ -96,38 +101,50 @@ export default {
       hazardLayers: [],
       selectedLayer: null,
       tileErrors: 0,
-      // 默认底图：数组第一个在线源（高德已按需求移除，顺位落到 OSM）。
-      // 不默认用「D盘离线」：它走 /tiles/{z}/{x}/{y}.jpg，而当前 tools/data/tiles 下只有 .pbf，
-      // 且 loadTiles 的 local 分支提前 return、不挂 tileerror 自愈 —— 选错会永久白屏。
-      tileSourceIdx: 1,
-      tileSourceName: 'OSM',
+      // 默认底图：天地图在线影像（img_w）+ 注记（cia_w），WMTS 栅格，合规、边界安全。
+      // 在线服务，拔网线即失效——离线演示请用 cycleTileSource 切到「矢量(GPU)」本地瓦片。
+      // 矢量瓦片在 tools/data/tiles（z0-14），后端 /tiles/** 托管，由 MapLibre WebGL GPU 渲染。
+      tileSourceIdx: 0,
+      tileSourceName: '天地图',
       localMbLayer: null,
+      // 天地图注记层（cia_w），叠在影像底图之上，只画地名/边界
+      tileAnnoLayer: null,
       // 底图源。每项可带 match：用于从瓦片 URL 反推源（见 guessSourceIdx），
       // 以前那里写着硬编码域名判断，增删源时会与数组错位。
       tileSources: [
         {
-          name: 'D盘离线',
-          url: '/tiles/{z}/{x}/{y}.jpg',
-          subdomains: null,
-          match: '/tiles/',
-          attribution: '&copy; OpenStreetMap contributors',
-          local: true,
-          maxZoom: 13,
-          minZoom: 7
+          // 天地图在线 WMTS 栅格：影像底图 img_w + 影像注记 cia_w。
+          // DataServer 端点是标准 XYZ 风格，L.tileLayer 直接可用；tk 从环境变量注入。
+          // 不设 crossOrigin：天地图未必回 CORS 头，加了反而会让 <img> 加载失败。
+          name: '天地图',
+          url: `https://t{s}.tianditu.gov.cn/DataServer?T=img_w&x={x}&y={y}&l={z}&tk=${TIANDITU_TK}`,
+          annoUrl: `https://t{s}.tianditu.gov.cn/DataServer?T=cia_w&x={x}&y={y}&l={z}&tk=${TIANDITU_TK}`,
+          subdomains: '01234567',
+          match: 'tianditu.gov.cn',
+          attribution: '&copy; 天地图',
+          maxZoom: 18,
+          minZoom: 3
         },
         {
           name: 'OSM',
           url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
           subdomains: 'abc',
           match: 'openstreetmap.org',
-          attribution: '&copy; OpenStreetMap contributors'
+          attribution: '&copy; OpenStreetMap contributors',
+          crossOrigin: true
         },
         {
-          name: 'Carto',
-          url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-          subdomains: 'abcd',
-          match: 'cartocdn.com',
-          attribution: '&copy; OpenStreetMap &copy; CARTO'
+          // 本地矢量瓦片 + MapLibre WebGL 渲染：GPU 合成、完全离线（拔网线兜底）。
+          // 滑动/缩放由 GPU 合成，不再逐张解码 jpg/png。
+          name: '矢量(GPU)',
+          url: '/tiles/{z}/{x}/{y}.pbf',
+          subdomains: null,
+          match: '/tiles/',
+          attribution: '&copy; OpenStreetMap contributors',
+          local: true,
+          vector: true,
+          maxZoom: 14,
+          minZoom: 7
         }
       ],
       pickMarkerOrigin: null,
@@ -147,7 +164,7 @@ export default {
   mounted() {
     this.initMap();
     this.loadTiles(this.tileSourceIdx);
-    if (this.tileSourceIdx !== 0) this.startTileWatcher(); // D 盘离线栅格底图无需瓦片巡检
+    if (!this.tileSources[this.tileSourceIdx].vector) this.startTileWatcher(); // 矢量底图由 MapLibre 自管理，无需瓦片巡检
     this.map.on('click', e => {
       if (this.pickMode) this.$emit('map-click', { lat: e.latlng.lat, lon: e.latlng.lng });
     });
@@ -157,6 +174,7 @@ export default {
     if (this._zoomRedrawTimer) { clearTimeout(this._zoomRedrawTimer); this._zoomRedrawTimer = null; }
     if (this._routeFlow) { this._routeFlow.destroy(); this._routeFlow = null; }
     if (this.localMbLayer) { try { this.map.removeLayer(this.localMbLayer); } catch (e) {} this.localMbLayer = null; }
+    if (this.tileAnnoLayer) { try { this.map.removeLayer(this.tileAnnoLayer); } catch (e) {} this.tileAnnoLayer = null; }
     if (this.alternateLayers) {
       this.alternateLayers.forEach(l => { try { this.map.removeLayer(l); } catch (e) {} });
       this.alternateLayers = [];
@@ -167,14 +185,18 @@ export default {
     initMap() {
       const s = this.tileSources[this.tileSourceIdx] || this.tileSources[0];
       const isLocal = !!s.local;
-      const crs = isLocal ? L.CRS.EPSG4326 : L.CRS.EPSG3857;
+      // 矢量瓦片（pbf）是 EPSG:3857，与在线天地图/OSM 同系，不再需要 4326 特殊分支；
+      // maxZoom 由各源声明：矢量封顶 14（原生 z14，再上靠 MapLibre overzoom），天地图/OSM 到 18。
       const options = {
         preferCanvas: true,
-        zoomAnimation: false,
+        // MapLibre GL 5 + maplibre-gl-leaflet 桥接下 zoomAnimation 必须为 true：关掉缩放
+        // 动画会让 WebGL canvas 全程空白（矢量底图一片白），见 DEV_LOG「地图缩放空白」
+        // 条目——false 是被实测更差的配置，别再改回去。栅格源用 true 也是 Leaflet 默认。
+        zoomAnimation: true,
 	        fadeAnimation: false,
-        minZoom: isLocal ? 7 : 2,
-        maxZoom: isLocal ? 13 : 18,
-        crs
+        minZoom: s.minZoom || 2,
+        maxZoom: s.maxZoom || 18,
+        crs: L.CRS.EPSG3857
       };
       if (this.map) {
         this.map.off('click');
@@ -200,6 +222,10 @@ export default {
       this.tileSourceName = this.tileSources[this.tileSourceIdx].name;
       this.initMap();
       this.loadTiles(this.tileSourceIdx);
+      // 默认源是矢量（不需要巡检），切到在线栅格源时才把自愈巡检挂上；
+      // 切回矢量则停掉，避免定时器空转
+      if (!this.tileSources[this.tileSourceIdx].vector) this.startTileWatcher();
+      else clearInterval(this._tileWatcher);
       if (this.network) this.drawNetwork(true);
       if (this.route && this.route.length) this.drawRoute(this.route);
       if (this.baseline && this.baseline.length) this.drawBaseline(this.baseline);
@@ -251,20 +277,23 @@ export default {
         .replace('{r}', '');
       return base + (base.includes('?') ? '&' : '?') + 'r=' + (extra || Date.now());
     },
-    // 备用候选 URL：除当前源外的其它**在线**源，按数组顺序。
-    // 排除 local 源——它走 EPSG:4326 栅格，混进 3857 地图会整片错位。
+    // 备用候选 URL：除当前源外的其它**在线栅格**源，按数组顺序。
+    // 排除 local/vector 源——矢量瓦片不是图片，不能当栅格候选重试。
     buildCandidateUrls(z, x, y, currentIdx) {
       return this.tileSources
         .map((_, i) => i)
-        .filter(i => i !== currentIdx && !this.tileSources[i].local)
+        .filter(i => i !== currentIdx && !this.tileSources[i].local && !this.tileSources[i].vector)
         .map(i => this.buildSourceUrl(i, z, x, y))
         .filter(Boolean);
     },
-    // 从瓦片 src 解析 z/x/y（兼容 OSM/Carto 的路径式与查询式 URL）
+    // 从瓦片 src 解析 z/x/y（兼容 OSM 路径式、天地图 DataServer 查询式 URL）
     parseTileCoords(src) {
       let m = src.match(/\/(\d+)\/(\d+)\/(\d+)(@2x)?\.png/i);
       if (m) return { z: +m[1], x: +m[2], y: +m[3] };
       m = src.match(/[?&]x=(\d+)&y=(\d+)&z=(\d+)/);
+      if (m) return { z: +m[3], x: +m[1], y: +m[2] };
+      // 天地图 DataServer 端点用 l= 表示 zoom（?T=img_w&x=..&y=..&l=..）
+      m = src.match(/[?&]x=(\d+)&y=(\d+)&l=(\d+)/);
       if (m) return { z: +m[3], x: +m[1], y: +m[2] };
       return null;
     },
@@ -275,39 +304,44 @@ export default {
       tile.style.display = 'none';
       tile.dataset.allFailed = '1';
     },
-    // 瓦片源：按 tileSources 数组顺序（D盘离线 / OSM / Carto）。
-    // 白块自愈策略：单瓦片按 同源随机重试 → 多候选跨源(仅在线源) → 全部失败则隐藏灰块。
+    // 瓦片源：按 tileSources 数组顺序（天地图 / OSM / 矢量(GPU)）。
+    // 矢量源直接交给 L.maplibreGL（WebGL 渲染）；在线栅格源挂白块自愈策略：
+    // 单瓦片按 同源随机重试 → 多候选跨源(仅在线栅格源) → 全部失败则隐藏灰块。
     // 连续失败过多则整体切源。
     loadTiles(idx) {
       if (idx >= this.tileSources.length) return;
       const s = this.tileSources[idx];
       if (this.localMbLayer) { try { this.map.removeLayer(this.localMbLayer); } catch (e) {} this.localMbLayer = null; }
       if (this.tileLayer) { this.map.removeLayer(this.tileLayer); this.tileLayer = null; }
+      if (this.tileAnnoLayer) { try { this.map.removeLayer(this.tileAnnoLayer); } catch (e) {} this.tileAnnoLayer = null; }
       this.tileErrors = 0;
 
-      // D 盘离线 OSM 栅格瓦片：直接走 Leaflet tileLayer，适合 jpg 格式的本地底图。
-      if (s.local) {
-        this.tileLayer = L.tileLayer(s.url, {
-          attribution: s.attribution,
-          maxZoom: s.maxZoom || 18,
-          minZoom: s.minZoom || 0,
-          tileSize: 256,
-          zoomOffset: 0,
-          updateWhenIdle: false,
-          keepBuffer: 2,
-          crossOrigin: true
+      // 本地矢量瓦片：MapLibre WebGL 渲染（GPU 合成、支持 overzoom），完全离线。
+      // 以前这里是 D 盘 jpg 栅格分支（EPSG:4326），选错会永久白屏且不挂自愈；
+      // 现在矢量层由 MapLibre 自己管理加载/重试，无 tileerror 自愈需求。
+      if (s.vector) {
+        this.localMbLayer = L.maplibreGL({
+          style: localBaseStyle,
+          pane: 'tilePane',
+          attribution: s.attribution
         }).addTo(this.map);
         return;
       }
 
-      this.tileLayer = L.tileLayer(s.url, {
+      const tileOpts = {
         subdomains: s.subdomains,
         attribution: s.attribution,
-        maxZoom: 18,
+        maxZoom: s.maxZoom || 18,
         updateWhenIdle: false,
         keepBuffer: 2,
-        crossOrigin: true
-      }).addTo(this.map);
+        crossOrigin: s.crossOrigin || false
+      };
+      this.tileLayer = L.tileLayer(s.url, tileOpts).addTo(this.map);
+      // 天地图注记层（cia_w）：叠在影像之上显示地名/边界。不挂 tileerror 跨源自愈
+      //（注记换成 OSM 底图无意义且会盖在影像上），破损块由 sweepTiles 静默隐藏。
+      if (s.annoUrl) {
+        this.tileAnnoLayer = L.tileLayer(s.annoUrl, { ...tileOpts, attribution: '', className: 'tdt-anno-layer' }).addTo(this.map);
+      }
       this.tileLayer.on('tileerror', (e) => {
         const tile = e.tile;
         if (!tile) return;
@@ -348,7 +382,8 @@ export default {
     // 否则残留的 retried/fallback 会让新瓦片永远不被巡检，导致缩放后出现方块残影。
     sweepTiles(force) {
       if (!this.map || !this.tileLayer) return;
-      if (this.tileSourceIdx === 0) return; // 本地矢量底图无瓦片自愈需求
+      const curSrc = this.tileSources[this.tileSourceIdx];
+      if (curSrc && curSrc.vector) return; // 矢量底图（MapLibre）无瓦片自愈需求
       const now = Date.now();
       const zoom = this.map.getZoom();
       const panes = this.map.getPanes();
@@ -378,6 +413,9 @@ export default {
         const pending = !img.complete && age > (force ? 400 : 2000);
         const broken = img.complete && img.naturalWidth === 0 && age > (force ? 100 : 1500);
         if (pending || broken) {
+          // 天地图注记层（cia_w）不做跨源自愈：换成 OSM 底图会盖在影像上，视觉错乱。
+          // 只对「确实损坏」的注记块隐藏，仍在加载(pending)的留给它自己完成。
+          if (img.src.includes('cia_w')) { if (broken) this.hideBrokenTile(img); return; }
           const currentIdx = this.guessSourceIdx(img.src);
           const candidates = this.buildCandidateUrls(c.z, c.x, c.y, currentIdx);
           const fi = Number(img.dataset.fallbackIdx || 0);
@@ -480,7 +518,10 @@ export default {
 
       // ---- 一次性把全路网装进视野（封顶 z8，避免加载后再自动缩放“变来变去”） ----
       if (allLatLngs.length && !preserveView) {
-        try { this.map.fitBounds(allLatLngs, { padding: [40, 40], maxZoom: 8 }); } catch (e) {}
+        // animate:false：初始 fitBounds 若开缩放动画，其 _onZoomTransitionEnd 回调是异步延后触发的，
+        // 一旦这中间地图被重建/卸载（dev 下 HMR 重挂等），回调读到已销毁的 _mapPane 会抛
+        // "Cannot read properties of undefined (reading '_leaflet_pos')"，且外层 try/catch 兜不到。初始定位无需动画。
+        try { this.map.fitBounds(allLatLngs, { padding: [40, 40], maxZoom: 8, animate: false }); } catch (e) {}
       }
       this.styleSelected();
     },
@@ -766,6 +807,9 @@ export default {
 .leaflet-tile-pane { background:#dcebf2; }
 /* 加载失败或尚未加载的瓦片 img 本身也兜底成浅蓝，避免浏览器默认灰白破损图 */
 .leaflet-tile-pane img.leaflet-tile { background:#dcebf2 !important; }
+/* 天地图注记层（cia_w）是透明 PNG（只有地名/边界），不能被上面的占位背景填成不透明浅蓝，
+   否则会盖住影像底图；这里按图层容器 class 精确覆盖回透明。 */
+.tdt-anno-layer img.leaflet-tile { background:transparent !important; }
 .hazard-cross {
   display:inline-flex;
   width:18px;

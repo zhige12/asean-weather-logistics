@@ -160,6 +160,19 @@
             <div v-if="p.legs" class="plan-legs">
               <span v-for="(leg, i) in p.legs" :key="i" class="leg-chip">{{ leg.mode }} {{ leg.from }}→{{ leg.to }}</span>
             </div>
+            <!-- 多式联运“一口价”（§4.4）：货主面对单一打包总价，无需分别对接三方 -->
+            <div v-if="p.flatPriceYuan != null" class="flat-price">
+              <div class="fp-head">
+                🏷️ 多式联运“一口价”
+                <span class="fp-total">¥{{ fmtNum(p.flatPriceYuan) }}</span>
+              </div>
+              <div class="fp-parties">
+                <span v-for="(pt, i) in p.flatPriceParties" :key="i" class="fp-chip" :title="pt.item">
+                  {{ pt.party }} ¥{{ fmtNum(pt.costYuan) }}
+                </span>
+              </div>
+              <div class="fp-note">{{ p.flatPriceNote }}</div>
+            </div>
           </div>
         </div>
         <div class="recommend-box">💡 {{ result.recommendation }}</div>
@@ -597,6 +610,43 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
   color: #64748f;
   padding: 2px 6px;
   border-radius: 6px;
+}
+.flat-price {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(22, 163, 74, 0.08);
+  border: 1px dashed rgba(22, 163, 74, 0.4);
+}
+.fp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 700;
+  color: #16a34a;
+}
+.fp-total {
+  font-size: 15px;
+}
+.fp-parties {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.fp-chip {
+  font-size: 10px;
+  background: rgba(22, 163, 74, 0.14);
+  color: #15803d;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.fp-note {
+  font-size: 10px;
+  color: #5b6b85;
+  margin-top: 6px;
+  line-height: 1.5;
 }
 .recommend-box {
   margin-top: 8px;

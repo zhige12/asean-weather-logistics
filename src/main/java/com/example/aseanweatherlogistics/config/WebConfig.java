@@ -29,18 +29,25 @@ public class WebConfig implements WebMvcConfigurer {
                 .allowedHeaders("*");
     }
 
-    // 本地 OSM 底图：优先使用 D 盘的离线 OSM 文件夹（栅格瓦片），若目录不存在则回退到项目内默认 tiles。
+    // 本地 OSM 底图：/tiles/** 同时托管两套瓦片目录，Spring 会按顺序逐位置解析请求文件：
+    // - D 盘离线 OSM 栅格（*.jpg，EPSG:4326）；
+    // - 项目内矢量瓦片 tools/data/tiles（*.pbf，OpenMapTiles schema，供 MapLibre GPU 渲染）。
+    // 扩展名不同互不冲突：jpg 请求命中 D 盘、pbf 请求命中项目内目录；
+    // 以前是「D 盘存在就只注册 D 盘」二选一，导致 pbf 永远 404。
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry) {
         String configured = System.getProperty("osm.tiles.path");
         Path tilesPath = configured != null && !configured.isBlank()
                 ? Paths.get(configured)
                 : Paths.get("D:\\", "OpenStreeMap", "EOX Maps - OpenStreetMap background layer by EOX - 4326");
+        Path projectTiles = Paths.get(System.getProperty("user.dir"), "tools", "data", "tiles");
 
-        if (!Files.exists(tilesPath)) {
-            tilesPath = Paths.get(System.getProperty("user.dir"), "tools", "data", "tiles");
+        // 瓦片内容不可变（z/x/y 唯一），长缓存减少手机 WebView 重复拉取
+        var registration = registry.addResourceHandler("/tiles/**")
+                .setCachePeriod(30 * 24 * 3600);
+        if (Files.exists(tilesPath)) {
+            registration.addResourceLocations(tilesPath.toUri().toString());
         }
-
-        registry.addResourceHandler("/tiles/**").addResourceLocations(tilesPath.toUri().toString());
+        registration.addResourceLocations(projectTiles.toUri().toString());
     }
 }
