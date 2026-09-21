@@ -23,9 +23,6 @@
 
 <script>
 import L from 'leaflet';
-import 'maplibre-gl/dist/maplibre-gl.css';
-import '@maplibre/maplibre-gl-leaflet';
-import localBaseStyle from '../data/local-base-style';
 import { createRouteFlow } from '../utils/routeFlow.js';
 import { reshapeForZoom } from '../utils/pathReshape.js';
 import { splitRouteByRisk, riskEdgeSet } from '../utils/routeSegments.js';
@@ -102,11 +99,11 @@ export default {
       selectedLayer: null,
       tileErrors: 0,
       // 默认底图：天地图在线影像（img_w）+ 注记（cia_w），WMTS 栅格，合规、边界安全。
-      // 在线服务，拔网线即失效——离线演示请用 cycleTileSource 切到「矢量(GPU)」本地瓦片。
-      // 矢量瓦片在 tools/data/tiles（z0-14），后端 /tiles/** 托管，由 MapLibre WebGL GPU 渲染。
+      // 在线服务，拔网线即失效——离线演示请用 cycleTileSource 切到「离线(D盘)」本地瓦片。
+      // D 盘离线瓦片是 EPSG:4326 栅格（*.jpg，中越走廊 z7-13），后端 /tiles/** 托管；
+      // 与在线源的 3857 不同系，选中它时 initMap 会把整图重建为 4326（见 initMap / loadTiles）。
       tileSourceIdx: 0,
       tileSourceName: '天地图',
-      localMbLayer: null,
       // 天地图注记层（cia_w），叠在影像底图之上，只画地名/边界
       tileAnnoLayer: null,
       // 底图源。每项可带 match：用于从瓦片 URL 反推源（见 guessSourceIdx），
@@ -134,16 +131,16 @@ export default {
           crossOrigin: true
         },
         {
-          // 本地矢量瓦片 + MapLibre WebGL 渲染：GPU 合成、完全离线（拔网线兜底）。
-          // 滑动/缩放由 GPU 合成，不再逐张解码 jpg/png。
-          name: '矢量(GPU)',
-          url: '/tiles/{z}/{x}/{y}.pbf',
+          // D 盘离线栅格瓦片（EPSG:4326，*.jpg，中越走廊 z7-13）：后端 /tiles/** 托管，完全离线。
+          // 与在线天地图/OSM 的 3857 不同系，选中时 initMap 会整图重建为 4326（offline4326 标记）。
+          name: '离线(D盘)',
+          url: '/tiles/{z}/{x}/{y}.jpg',
           subdomains: null,
           match: '/tiles/',
-          attribution: '&copy; OpenStreetMap contributors',
+          attribution: '&copy; OpenStreetMap（离线）',
           local: true,
-          vector: true,
-          maxZoom: 14,
+          offline4326: true,
+          maxZoom: 13,
           minZoom: 7
         }
       ],
@@ -164,7 +161,7 @@ export default {
   mounted() {
     this.initMap();
     this.loadTiles(this.tileSourceIdx);
-    if (!this.tileSources[this.tileSourceIdx].vector) this.startTileWatcher(); // 矢量底图由 MapLibre 自管理，无需瓦片巡检
+    if (!this.tileSources[this.tileSourceIdx].local) this.startTileWatcher(); // D 盘离线为同源栅格，无需在线白块巡检
     this.map.on('click', e => {
       if (this.pickMode) this.$emit('map-click', { lat: e.latlng.lat, lon: e.latlng.lng });
     });
@@ -173,7 +170,6 @@ export default {
     clearInterval(this._tileWatcher);
     if (this._zoomRedrawTimer) { clearTimeout(this._zoomRedrawTimer); this._zoomRedrawTimer = null; }
     if (this._routeFlow) { this._routeFlow.destroy(); this._routeFlow = null; }
-    if (this.localMbLayer) { try { this.map.removeLayer(this.localMbLayer); } catch (e) {} this.localMbLayer = null; }
     if (this.tileAnnoLayer) { try { this.map.removeLayer(this.tileAnnoLayer); } catch (e) {} this.tileAnnoLayer = null; }
     if (this.alternateLayers) {
       this.alternateLayers.forEach(l => { try { this.map.removeLayer(l); } catch (e) {} });
@@ -185,19 +181,24 @@ export default {
     initMap() {
       const s = this.tileSources[this.tileSourceIdx] || this.tileSources[0];
       const isLocal = !!s.local;
-      // 矢量瓦片（pbf）是 EPSG:3857，与在线天地图/OSM 同系，不再需要 4326 特殊分支；
-      // maxZoom 由各源声明：矢量封顶 14（原生 z14，再上靠 MapLibre overzoom），天地图/OSM 到 18。
+      // D 盘离线瓦片是 EPSG:4326（*.jpg，只覆盖中越走廊 z7-13），与在线天地图/OSM 的 3857 不同系。
+      // 4326 栅格不能就地叠到 3857 图上（瓦片编号与投影都不同 → 错位、白屏），故选中该源时整图
+      // 以 EPSG:4326 重建，并把视野锁到瓦片覆盖的走廊、缩放锁到 z7-13（见下方 maxBounds）。
+      const is4326 = !!s.offline4326;
       const options = {
         preferCanvas: true,
-        // MapLibre GL 5 + maplibre-gl-leaflet 桥接下 zoomAnimation 必须为 true：关掉缩放
-        // 动画会让 WebGL canvas 全程空白（矢量底图一片白），见 DEV_LOG「地图缩放空白」
-        // 条目——false 是被实测更差的配置，别再改回去。栅格源用 true 也是 Leaflet 默认。
+        // 缩放动画保持开启（Leaflet 默认）：栅格底图缩放更平滑，关掉会显得生硬。
         zoomAnimation: true,
 	        fadeAnimation: false,
-        minZoom: s.minZoom || 2,
-        maxZoom: s.maxZoom || 18,
-        crs: L.CRS.EPSG3857
+        minZoom: is4326 ? 7 : (s.minZoom || 2),
+        maxZoom: is4326 ? 13 : (s.maxZoom || 18),
+        crs: is4326 ? L.CRS.EPSG4326 : L.CRS.EPSG3857
       };
+      if (is4326) {
+        // 锁死在中越走廊，避免拖出 D 盘瓦片覆盖范围后露白
+        options.maxBounds = L.latLngBounds([[20.49, 101.68], [24.01, 109.51]]);
+        options.maxBoundsViscosity = 1.0;
+      }
       if (this.map) {
         this.map.off('click');
         this.map.remove();
@@ -222,9 +223,9 @@ export default {
       this.tileSourceName = this.tileSources[this.tileSourceIdx].name;
       this.initMap();
       this.loadTiles(this.tileSourceIdx);
-      // 默认源是矢量（不需要巡检），切到在线栅格源时才把自愈巡检挂上；
-      // 切回矢量则停掉，避免定时器空转
-      if (!this.tileSources[this.tileSourceIdx].vector) this.startTileWatcher();
+      // 离线(D盘)为同源栅格（不需要在线白块巡检），切到在线栅格源时才把自愈巡检挂上；
+      // 切回离线(D盘)则停掉，避免定时器空转
+      if (!this.tileSources[this.tileSourceIdx].local) this.startTileWatcher();
       else clearInterval(this._tileWatcher);
       if (this.network) this.drawNetwork(true);
       if (this.route && this.route.length) this.drawRoute(this.route);
@@ -278,11 +279,11 @@ export default {
       return base + (base.includes('?') ? '&' : '?') + 'r=' + (extra || Date.now());
     },
     // 备用候选 URL：除当前源外的其它**在线栅格**源，按数组顺序。
-    // 排除 local/vector 源——矢量瓦片不是图片，不能当栅格候选重试。
+    // 排除 local 源——D 盘离线是 EPSG:4326 栅格，其瓦片编号与在线 3857 源不通用，不能当跨源候选。
     buildCandidateUrls(z, x, y, currentIdx) {
       return this.tileSources
         .map((_, i) => i)
-        .filter(i => i !== currentIdx && !this.tileSources[i].local && !this.tileSources[i].vector)
+        .filter(i => i !== currentIdx && !this.tileSources[i].local)
         .map(i => this.buildSourceUrl(i, z, x, y))
         .filter(Boolean);
     },
@@ -304,26 +305,30 @@ export default {
       tile.style.display = 'none';
       tile.dataset.allFailed = '1';
     },
-    // 瓦片源：按 tileSources 数组顺序（天地图 / OSM / 矢量(GPU)）。
-    // 矢量源直接交给 L.maplibreGL（WebGL 渲染）；在线栅格源挂白块自愈策略：
-    // 单瓦片按 同源随机重试 → 多候选跨源(仅在线栅格源) → 全部失败则隐藏灰块。
-    // 连续失败过多则整体切源。
+    // 瓦片源：按 tileSources 数组顺序（天地图 / OSM / 离线(D盘)）。
+    // 离线(D盘)源是同源 4326 栅格（地图已在 initMap 以 4326 重建），直接铺 jpg 层；
+    // 在线栅格源挂白块自愈策略：单瓦片按 同源随机重试 → 多候选跨源(仅在线栅格源) →
+    // 全部失败则隐藏灰块。连续失败过多则整体切源。
     loadTiles(idx) {
       if (idx >= this.tileSources.length) return;
       const s = this.tileSources[idx];
-      if (this.localMbLayer) { try { this.map.removeLayer(this.localMbLayer); } catch (e) {} this.localMbLayer = null; }
       if (this.tileLayer) { this.map.removeLayer(this.tileLayer); this.tileLayer = null; }
       if (this.tileAnnoLayer) { try { this.map.removeLayer(this.tileAnnoLayer); } catch (e) {} this.tileAnnoLayer = null; }
       this.tileErrors = 0;
 
-      // 本地矢量瓦片：MapLibre WebGL 渲染（GPU 合成、支持 overzoom），完全离线。
-      // 以前这里是 D 盘 jpg 栅格分支（EPSG:4326），选错会永久白屏且不挂自愈；
-      // 现在矢量层由 MapLibre 自己管理加载/重试，无 tileerror 自愈需求。
-      if (s.vector) {
-        this.localMbLayer = L.maplibreGL({
-          style: localBaseStyle,
-          pane: 'tilePane',
-          attribution: s.attribution
+      // D 盘离线栅格瓦片（EPSG:4326，z7-13）：地图已在 initMap 以 4326 重建并锁到走廊，
+      // 这里直接铺 jpg 层。同源瓦片必达，不挂跨源自愈（无其它离线候选）；
+      // 覆盖范围外或偶发破损块由 sweepTiles 静默隐藏即可。
+      if (s.offline4326) {
+        this.tileLayer = L.tileLayer(s.url, {
+          attribution: s.attribution,
+          minZoom: 7,
+          maxZoom: 13,
+          minNativeZoom: 7,
+          maxNativeZoom: 13,
+          tileSize: 256,
+          updateWhenIdle: false,
+          keepBuffer: 2
         }).addTo(this.map);
         return;
       }
@@ -383,7 +388,7 @@ export default {
     sweepTiles(force) {
       if (!this.map || !this.tileLayer) return;
       const curSrc = this.tileSources[this.tileSourceIdx];
-      if (curSrc && curSrc.vector) return; // 矢量底图（MapLibre）无瓦片自愈需求
+      if (curSrc && curSrc.local) return; // D 盘离线为同源 4326 栅格，跨源自愈会取到错误的在线瓦片，跳过
       const now = Date.now();
       const zoom = this.map.getZoom();
       const panes = this.map.getPanes();

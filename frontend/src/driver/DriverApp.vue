@@ -816,10 +816,12 @@ export default {
       // AI 方案建议（A/B/C 三方案对比，供司机理解调度决策依据）
       agentPlans: null,
       agentPlansLoading: false,
-      // 底图：默认在线天地图影像，按「天地图 → OSM → 本地离线矢量」自动降级。
-      // 在线源在探测窗口内无任一瓦片成功（断网/403）即降到下一个；navigator.onLine=false
-      // 时直接从本地矢量起，省掉在线等待。导航图与首页图各持一份降级状态，互不影响。
-      // _mbLayer 仍保留：矢量兜底激活时指向其 MapLibre 桥接层，供既有健康检查逻辑复用。
+      // 底图：默认在线天地图影像，按「天地图 → OSM → D 盘离线瓦片」自动降级。
+      // 在线源在探测窗口内无任一瓦片成功（断网/403）即降到下一个；降到末级 D 盘离线时，
+      // 因那套 jpg 是 EPSG:4326、与主图 3857 不同系，需整图重建（见 _enterOfflineD）。
+      // 网络恢复后自动切回在线天地图。导航图与首页图各持一份降级状态，互不影响。
+      // _useOfflineD=true 表示当前处于 D 盘离线（EPSG:4326）模式。
+      _useOfflineD: false,
       _mbLayer: null,
       _homeMbLayer: null,
       _navBase: null,
@@ -1673,8 +1675,9 @@ export default {
     // ---------- 底图降级链：天地图(在线) → OSM(在线) → 本地离线矢量(MapLibre) ----------
     /** 起始源下标：显式离线（navigator.onLine=false，如拔网线演示）直接落到本地矢量，省掉在线探测等待 */
     _baseStartIdx() {
-      const offline = typeof navigator !== 'undefined' && navigator.onLine === false
-      return offline ? BASE_CHAIN.length - 1 : 0
+      // 已进 D 盘离线模式，或浏览器显式离线 → 直接落到末级（D 盘），跳过在线探测
+      const navOffline = typeof navigator !== 'undefined' && navigator.onLine === false
+      return (this._useOfflineD || navOffline) ? BASE_CHAIN.length - 1 : 0
     },
     _baseChainKey(idx) {
       return BASE_CHAIN[Math.max(0, Math.min(idx, BASE_CHAIN.length - 1))]
@@ -1740,17 +1743,21 @@ export default {
         return
       }
 
-      // 最后一级：本地离线矢量瓦片（MapLibre WebGL）。无 tile 事件，用 load 事件 / 1.5s 兜底收起遮罩。
+      // 末级：D 盘离线瓦片（EPSG:4326）。主图是 3857，无法把 4326 栅格当一层直接叠（会错位），
+      // 故：若当前已是 4326 离线图 → 直接铺 D 盘 jpg 层；否则 → 触发整图重建切到 4326。
       if (key === 'vector') {
-        st.kind = 'vector'
-        st.mb = L.maplibreGL({ style: localBaseStyle, attribution: '© OpenStreetMap contributors' }).addTo(map)
-        if (st === this._navBase) this._mbLayer = st.mb
-        try {
-          const ml = st.mb.getMaplibreMap && st.mb.getMaplibreMap()
-          if (ml && typeof ml.once === 'function') ml.once('load', () => this._settleBase(st))
-        } catch (e) { /* 忽略 */ }
-        st.timer = setTimeout(() => this._settleBase(st), 1500)
-        this._onBaseSource(st)
+        if (map.options && map.options.crs === L.CRS.EPSG4326) {
+          const oc = this._mapConfig()
+          st.kind = 'raster'
+          st.tile = L.tileLayer(oc.tileUrl, oc.tileOpts).addTo(map)
+          st.tile.on('tileload', () => { st.loaded++; this._settleBase(st) })
+          st.tile.on('tileerror', () => { st.errored++ })
+          // 本地同源瓦片，必达；兜底 1.5s 无条件判可用，避免探测卡住遮罩
+          st.timer = setTimeout(() => this._settleBase(st), 1500)
+          this._onBaseSource(st)
+          return
+        }
+        this._enterOfflineD(st)
         return
       }
 
@@ -1804,11 +1811,41 @@ export default {
       if (st === this._navBase) this._showMapVeil()
       this._mountBase(st.map, st)
     },
+    /**
+     * 切到 D 盘离线瓦片：因那套 jpg 是 EPSG:4326、与主图 3857 不同系，无法就地叠层，
+     * 只能把对应地图整图重建为 4326 模式（_mapConfig 据 _useOfflineD 返回 4326 配置）。
+     * 网络恢复后自动切回在线天地图。仅在天地图 + OSM 都探测失败时才走到这里，正常在线不受影响。
+     */
+    _enterOfflineD(st) {
+      if (this._useOfflineD) return
+      this._useOfflineD = true
+      console.warn('在线底图（天地图/OSM）均不可用，重建为 D 盘离线瓦片（EPSG:4326）')
+      const isNav = st === this._navBase
+      const redraw = () => {
+        try { this.drawRoute() } catch (e) { console.error('离线路底重绘路线失败', e) }
+        if (this.navigating) this.zoomToNav()
+        else if (this.previewing) this.fitRoute(false)
+      }
+      const rebuild = () => {
+        if (isNav) { this._destroyMap(); this._buildMap(); redraw() }
+        else { this._destroyHomeMap(); this._buildHomeMap() }
+      }
+      rebuild()
+      // 网络恢复：清标志、重建回在线天地图，只挂一次
+      const onOnline = () => {
+        window.removeEventListener('online', onOnline)
+        if (!this._useOfflineD) return
+        this._useOfflineD = false
+        console.warn('网络恢复，切回在线天地图底图')
+        rebuild()
+      }
+      window.addEventListener('online', onOnline)
+    },
     /** 源切换后同步地图 maxZoom：在线栅格 18/19，本地矢量封顶 14（更高由 MapLibre overzoom） */
     _onBaseSource(st) {
       if (!st || !st.map) return
       const def = baseDef(st.key)
-      const mz = st.key === 'vector' ? 14 : (def && def.maxZoom ? def.maxZoom : 18)
+      const mz = st.key === 'vector' ? (this._useOfflineD ? 13 : 14) : (def && def.maxZoom ? def.maxZoom : 18)
       try { if (st.map.options.maxZoom !== mz) st.map.setMaxZoom(mz) } catch (e) { /* 忽略 */ }
     },
     /** 清理某张地图上的底图图层与探测定时器（map.remove 会级联，这里主要停定时器/断引用） */
@@ -1862,6 +1899,20 @@ export default {
      *（在线栅格 18/19，本地矢量 14）。边界锁在中越走廊：无论哪种底图，视野都聚焦业务运营区。
      */
     _mapConfig() {
+      // D 盘离线模式：那套 OSM 栅格是 EPSG:4326、只覆盖中越走廊 z7~z13，
+      // 必须用 4326 坐标系建图并把范围/缩放锁到瓦片覆盖内，否则会整图错位、露白。
+      if (this._useOfflineD) {
+        return {
+          crs: L.CRS.EPSG4326,
+          bounds: L.latLngBounds([[20.49, 101.68], [24.01, 109.51]]),
+          minZoom: 7,
+          maxZoom: 13,
+          center: [21.6, 106.8],
+          offlineD: true,
+          tileUrl: '/tiles/{z}/{x}/{y}.jpg',
+          tileOpts: { minZoom: 7, maxZoom: 13, minNativeZoom: 7, maxNativeZoom: 13, tileSize: 256, attribution: '© OpenStreetMap（离线）' }
+        }
+      }
       return {
         crs: L.CRS.EPSG3857,
         bounds: L.latLngBounds([[20.49, 101.68], [24.01, 109.51]]),
@@ -1877,6 +1928,17 @@ export default {
      */
     _minZoomForCoverage() {
       if (!this._mapBounds) return 7
+      // D 盘离线（4326）：等距圆柱每度像素 = 512·2^z/360，两轴同率，按走廊经纬跨度铺满求解
+      if (this._useOfflineD) {
+        const el4326 = this.$refs.mapEl
+        const size4326 = this.map ? this.map.getSize() : (el4326 ? L.point(el4326.clientWidth, el4326.clientHeight) : null)
+        if (!size4326 || !size4326.x || !size4326.y) return 7
+        const lngSpan4326 = this._mapBounds.getEast() - this._mapBounds.getWest()
+        const latSpan4326 = this._mapBounds.getNorth() - this._mapBounds.getSouth()
+        if (lngSpan4326 <= 0 || latSpan4326 <= 0) return 7
+        const need4326 = Math.max(size4326.x * 360 / lngSpan4326, size4326.y * 360 / latSpan4326)
+        return Math.min(13, Math.max(7, Math.log2(need4326 / 512) + 0.003))
+      }
       const el = this.$refs.mapEl
       // 地图已建好就用 Leaflet 的尺寸；还没建（初始化）就用容器实际像素尺寸
       const size = this.map ? this.map.getSize() : (el ? L.point(el.clientWidth, el.clientHeight) : null)
@@ -1904,6 +1966,15 @@ export default {
       const availW = size.x - 44
       const availH = size.y - this._topOverlayPadding() - this._bottomOverlayPadding()
       if (availW <= 40 || availH <= 40) return null
+      // D 盘离线（4326）：跨度用线性经纬度，别用 3857 的 mercY
+      if (this._useOfflineD) {
+        const bb = L.latLngBounds(this.route.pathCoords)
+        const sLng = bb.getEast() - bb.getWest()
+        const sLat = bb.getNorth() - bb.getSouth()
+        if (sLng <= 0 || sLat <= 0) return null
+        const need = Math.min(availW * 360 / sLng, availH * 360 / sLat)
+        return Math.max(7, Math.min(13, Math.log2(need / 512)))
+      }
       const b = L.latLngBounds(this.route.pathCoords)
       const lngSpan = b.getEast() - b.getWest()
       const mercSpanY = Math.abs(mercY(b.getNorth()) - mercY(b.getSouth()))
