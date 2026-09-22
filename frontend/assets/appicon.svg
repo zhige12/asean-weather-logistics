@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- 图钉：纵向棱镜彩虹 -->
+    <linearGradient id="pinGrad" gradientUnits="userSpaceOnUse" x1="360" y1="170" x2="670" y2="620">
+      <stop offset="0" stop-color="#ff2d55"/>
+      <stop offset="0.22" stop-color="#ff7a00"/>
+      <stop offset="0.42" stop-color="#f5c400"/>
+      <stop offset="0.62" stop-color="#16a34a"/>
+      <stop offset="0.82" stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+    <!-- 文字：横向棱镜彩虹（跨整个字块流动） -->
+    <linearGradient id="textGrad" gradientUnits="userSpaceOnUse" x1="300" y1="0" x2="724" y2="0">
+      <stop offset="0" stop-color="#ff2d55"/>
+      <stop offset="0.25" stop-color="#f5a600"/>
+      <stop offset="0.5" stop-color="#16a34a"/>
+      <stop offset="0.75" stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+    <clipPath id="round"><rect x="64" y="64" width="896" height="896" rx="210"/></clipPath>
+  </defs>
+  <!-- 白色底 -->
+  <rect x="64" y="64" width="896" height="896" rx="210" fill="#ffffff"/>
+  <g clip-path="url(#round)">
+    <!-- 定位图钉：缩小上移，给下方两行字腾空间 -->
+    <g transform="translate(102.4 40) scale(0.8)">
+      <path d="M512 168 C 418 168 342 244 342 338 C 342 442 470 556 512 636 C 554 556 682 442 682 338 C 682 244 606 168 512 168 Z"
+            fill="url(#pinGrad)"/>
+      <circle cx="512" cy="336" r="66" fill="#ffffff"/>
+    </g>
+    <!-- 志莉志宁：梯形/阶梯排布（上排志莉，志宁从“莉”正下方往右下错一格） -->
+    <g font-family="KaiTi, STKaiti, 'Microsoft YaHei', serif" font-weight="700" font-size="130" text-anchor="middle" fill="url(#textGrad)">
+      <text x="350" y="712">志</text>
+      <text x="512" y="712">莉</text>
+      <text x="512" y="862">志</text>
+      <text x="674" y="862">宁</text>
+    </g>
+  </g>
+</svg>

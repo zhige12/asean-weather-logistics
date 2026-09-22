@@ -34,6 +34,42 @@ window.addEventListener('unhandledrejection', (e) => showFatalError('promise', e
 
 app.mount('#app')
 
+/**
+ * 加载动画至少展示 MIN_BOOT_MS 再淡出移除（或点右上角「跳过」立即移除）。
+ * 加载层已从 #app 挪到外面，Vue 挂载不会再替换它，这里手动控制移除时机：
+ * performance.now() 以页面开始加载为 0，补足到 5s，本地/缓存命中时
+ * Vue 秒挂载也不会让「致力·致宁」一闪而过。
+ */
+const MIN_BOOT_MS = 5000
+let _bootDismissed = false
+function dismissBootVeil() {
+  if (_bootDismissed) return
+  _bootDismissed = true
+  const veil = document.getElementById('boot-veil')
+  if (!veil) return
+  veil.classList.add('boot-hide')
+  setTimeout(() => { if (veil.parentNode) veil.parentNode.removeChild(veil) }, 520)
+}
+const _bootElapsed = typeof performance !== 'undefined' && performance.now ? performance.now() : 0
+const _bootRemainMs = Math.max(0, MIN_BOOT_MS - _bootElapsed)
+setTimeout(dismissBootVeil, _bootRemainMs)
+
+// 跳过按钮：倒计时数字随剩余时间刷新，点击则提前淡出
+const _skipBtn = document.getElementById('boot-skip')
+if (_skipBtn) {
+  const _numEl = _skipBtn.querySelector('b')
+  if (_numEl) {
+    const _tick = () => {
+      const left = Math.max(0, Math.ceil((_bootRemainMs - (performance.now() - _bootElapsed)) / 1000))
+      _numEl.textContent = String(left)
+      return left > 0
+    }
+    _tick()
+    const _timer = setInterval(() => { if (!_tick()) clearInterval(_timer) }, 250)
+  }
+  _skipBtn.addEventListener('click', dismissBootVeil)
+}
+
 // 注册 Service Worker 以支持离线（拔网线）演示。
 // 仅在生产构建注册：开发环境的 HMR 模块与 SW 缓存会冲突；
 // 且 SW 需要安全上下文（HTTPS / localhost / capacitor://），手机以 http://IP 访问时不会注册，

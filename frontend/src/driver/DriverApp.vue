@@ -676,8 +676,8 @@ function mercY(latDeg) {
  */
 const BASE_DEGRADE_ERROR_BUDGET = 6
 
-// 底图短名（手动切换按钮显示用）：影像=天地图影像 / 底图4=天地图矢量 / 底图5=OSM / 离线=D 盘离线瓦片
-const BASE_SHORT_NAMES = { tianditu: '影像', tdtvec: '底图4', osm: '底图5', vector: '离线' }
+// 底图短名（手动切换按钮显示用）：卫星=天地图影像 / 底图4=天地图矢量 / 底图5=OSM / 离线=D 盘离线瓦片
+const BASE_SHORT_NAMES = { tianditu: '卫星', tdtvec: '底图4', osm: '底图5', vector: '离线' }
 
 // 口岸坐标（真实经纬度），供司机端地图标注
 const PORTS = [
@@ -857,8 +857,8 @@ export default {
       // 网络恢复后自动切回在线天地图。导航图与首页图各持一份降级状态，互不影响。
       // _useOfflineD=true 表示当前处于 D 盘离线（EPSG:4326）模式。
       _useOfflineD: false,
-      // 当前底图短名（手动切换按钮显示）：影像 / 矢量 / 离线
-      baseName: '影像',
+      // 当前底图短名（手动切换按钮显示）：卫星 / 矢量 / 离线
+      baseName: '卫星',
       _navBase: null,
       _homeBase: null,
       // risk-blink 的 JS 脉冲（preferCanvas 后折线无 SVG 元素可挂 CSS 类名）

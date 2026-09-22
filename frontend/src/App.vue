@@ -1,7 +1,7 @@
 <template>
   <div class="app-root" :class="{ 'panel-dragging': panelDragging }">
     <header class="app-header">
-      <h1>东盟跨境物流气象导航平台 · 调度大屏</h1>
+      <h1>东盟跨境物流气象导航平台 · 调度大屏（志哥正在拼命推进中......）</h1>
       <div class="header-right">
         <button class="btn small outline-light" @click="openDriver">司机端 ↗</button>
         <button class="btn small" @click="getStatus">OSM 状态</button>
