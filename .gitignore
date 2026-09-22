@@ -56,6 +56,8 @@ frontend/android/capacitor-cordova-android-plugins/
 *.tmp
 tools/_*.ps1
 tools/_*.txt
+tools/_*.mjs
+__pycache__/
 
 # ---------- 运行时缓存 ----------
 /decision-cache/

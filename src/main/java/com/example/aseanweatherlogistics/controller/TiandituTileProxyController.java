@@ -75,8 +75,11 @@ public class TiandituTileProxyController {
      * 同瓦去重（inflight）保证等待者不会重复烧配额。
      */
     private static final long PERMIT_WAIT_MS = 10_000L;
-    /** 内存热缓存条数上限（磁盘是主缓存，内存只挡热点）：单张 5~30KB，1024 张最坏约 30MB。 */
-    private static final int MEM_CACHE_MAX_ENTRIES = 1024;
+    /**
+     * 内存热缓存条数上限（磁盘是主缓存、不限张数；内存只挡热点、省磁盘 I/O）。
+     * 10 万条按单张 5~30KB 估算约 0.5~3GB，需确保 JVM -Xmx 留有余量（建议 ≥ 4G）。
+     */
+    private static final int MEM_CACHE_MAX_ENTRIES = 100_000;
     private static final int RETRY_AFTER_SECONDS = 20;
 
     private final HttpClient client = HttpClient.newBuilder()
@@ -87,7 +90,7 @@ public class TiandituTileProxyController {
     /** 回源并发闸门。 */
     private final Semaphore upstream = new Semaphore(MAX_UPSTREAM_INFLIGHT);
 
-    /** 内存热缓存（LRU）：accessOrder=true 的 LinkedHashMap 即 LRU，读多写少且量不大，同步包装即可。 */
+    /** 内存热缓存（LRU）：accessOrder=true 的 LinkedHashMap 即 LRU，超出条数从最久未用端淘汰。 */
     private final Map<String, CachedTile> memCache = Collections.synchronizedMap(
             new LinkedHashMap<>(256, 0.75f, true) {
                 @Override

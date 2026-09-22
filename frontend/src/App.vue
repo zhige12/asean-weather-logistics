@@ -43,6 +43,9 @@
           </div>
         </section>
 
+        <!-- 地名输入规划（高德式）：地理编码 → 路网吸附 → 同一条 Dijkstra+熔断主链路 -->
+        <RoutePlanner @planned="applyPlannedRoute" />
+
         <!-- 第四幕：公司派单（司机端收到后自动切物流任务模式） -->
         <TaskDispatchPanel ref="taskPanelRef" :task-status="taskStatus" @refresh="refreshTask" />
 
@@ -372,6 +375,7 @@ import TributaryPanel from './components/TributaryPanel.vue';
 import PlatformConfigurator from './components/PlatformConfigurator.vue';
 import GrowthPath from './components/GrowthPath.vue';
 import DecisionLogTimeline from './components/DecisionLogTimeline.vue';
+import RoutePlanner from './components/RoutePlanner.vue';
 
 // 左侧面板拖拽缩放边界：1=默认 360px；上限约 2.2 倍（≈790px，投影仪/后排也能看清）
 const PANEL_ZOOM_MIN = 0.85;
@@ -390,7 +394,7 @@ export default {
   components: {
     MapView, RiskStrip, ETAIndicator, BriefingPanel, CarbonCalc,
     DecisionSandbox, TaskDispatchPanel, AgentPanel, OutreachPanel, TributaryPanel,
-    PlatformConfigurator, GrowthPath, DecisionLogTimeline
+    PlatformConfigurator, GrowthPath, DecisionLogTimeline, RoutePlanner
   },
   data() {
     return {
@@ -846,6 +850,22 @@ export default {
       }
       this.watchRoute(this.originId, this.destinationId);
       this.planCrossBorder();
+    },
+    /**
+     * 地名规划（RoutePlanner）结果接入主绘制链：
+     * 后端 /api/route/plan 坐标模式返回的就是 RouteResponse 全字段（顶层平铺），
+     * 包成 {route} 复用 applyRouteResult（绿/红分段、基准线、ETA/碳排面板全联动），
+     * 同步起终点选中态与候选列表，行为与下拉选点规划完全一致。
+     */
+    applyPlannedRoute(p) {
+      if (!p || !p.pathCoords || p.pathCoords.length < 2) return;
+      this.originId = p.originId || this.originId;
+      this.destinationId = p.destinationId || this.destinationId;
+      this.draftOriginId = this.originId;
+      this.draftDestinationId = this.destinationId;
+      this.applyRouteResult({ route: p, risks: this.risks });
+      this.watchRoute(this.originId, this.destinationId);
+      this.loadCandidates();
     },
     /** 注册关注某条路线：风险注入后，该路线会随其它关注路线一起被 AI 重算并推送 */
     watchRoute(originId, destinationId) {

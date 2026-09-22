@@ -52,9 +52,10 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
-// 本机 32GB 内存 + 低延迟交互：给足堆并用 ZGC，避免 GC 停顿影响演示
+// 本机 32GB 内存 + 低延迟交互：给足堆并用 ZGC，避免 GC 停顿影响演示。
+// 天地图瓦片内存缓存已放大到 10 万条（最坏约 3GB），-Xmx 需容纳「缓存 + 应用对象 + ZGC 开销」，故给到 6g。
 tasks.named('bootRun') {
-    jvmArgs = ['-Xms1g', '-Xmx4g', '-XX:+UseZGC']
+    jvmArgs = ['-Xms2g', '-Xmx6g', '-XX:+UseZGC']
 }
 
 tasks.named('test') {

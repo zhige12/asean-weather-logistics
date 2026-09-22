@@ -47,7 +47,7 @@
             <button class="od-swap" title="交换起终点" @click="swapOD">⇅</button>
           </div>
           <datalist id="node-suggestions">
-            <option v-for="(name, id) in NODE_NAMES" :key="id" :value="name">{{ id }}</option>
+            <option v-for="p in placeSuggestions" :key="p.name" :value="p.name">{{ p.tag }}</option>
           </datalist>
           <div class="quick-picks">
             <span class="quick-label">常用路线</span>
@@ -392,7 +392,7 @@
         <template v-if="navigating">
         <div class="nav-info-card eta-card">
           <div class="eta-sheen"></div>
-          <div class="nav-info-main">/
+          <div class="nav-info-main">
             <div class="nav-eta">
               <span class="eta-num">{{ route.estimatedHours ? route.estimatedHours.toFixed(1) : '--' }}</span>
               <span class="eta-unit">小时</span>
@@ -636,6 +636,7 @@ import { BASE_CHAIN, baseDef, makeTileLayer, tileUrlFromDef } from '../utils/til
 // Leaflet Canvas 渲染器销毁竞态防护（_redraw 异步排队、销毁后 _ctx 已删仍回调 → reading 'save' 报错）
 import '../utils/leafletCanvasGuard.js'
 import { normalizeForTTS, detectLanguage, HAZARD_VN_MAP } from '../utils/ttsNormalizer.js'
+import { fetchPlaceList, resolvePlaceToNode, apiErrorMessage } from '../utils/geocoder.js'
 
 /**
  * EPSG:3857 墨卡托 Y（单位：度当量）：lat → 180/π · ln(tan(π/4 + φ/2))。
@@ -657,7 +658,7 @@ const BASE_SHORT_NAMES = { tianditu: '影像', tdtvec: '底图4', osm: '底图5'
 
 // 口岸坐标（真实经纬度），供司机端地图标注
 const PORTS = [
-  { id: 'E4', name: '友谊关', lat: 21.9717, lng: 106.7086 },
+  { id: 'E4', name: '友谊关', lat: 21.9778, lng: 106.7145 },
   { id: 'E9', name: '芒街', lat: 21.5217, lng: 107.9672 },
   { id: 'E36', name: '河口', lat: 22.5089, lng: 103.9403 }
 ]
@@ -745,6 +746,8 @@ export default {
       // 行程（司机可手动选择/输入起点终点）
       originId: 'NN',
       destinationId: 'HN',
+      // 后端地名库（/api/geocode/list）：下拉候选 + 冷门地名地理编码兜底，离线时为空数组
+      placeList: [],
       // 货物信息（计划书 4.2：车牌号 + 货物信息）
       cargo: { plate: '桂A·D12345', name: '火龙果', weight: 18, temp: '冷鲜 2~6°C', from: '南宁', to: '河内' },
       // 可编辑司机信息
@@ -886,6 +889,22 @@ export default {
     }
   },
   computed: {
+    // 起终点下拉候选：内置节点名 + 后端地名库（含平陆运河各节点/口岸，约 50 条），按名字去重
+    placeSuggestions() {
+      const seen = new Set()
+      const out = []
+      for (const [id, name] of Object.entries(NODE_NAMES)) {
+        if (seen.has(name)) continue
+        seen.add(name)
+        out.push({ name, tag: id })
+      }
+      for (const p of this.placeList) {
+        if (!p || !p.name || seen.has(p.name)) continue
+        seen.add(p.name)
+        out.push({ name: p.name, tag: p.tag || '' })
+      }
+      return out
+    },
     // 当前路线上的风险段（后端 riskSegments 下发的是全量风险，需按路径边过滤，
     // 保证「风险路段」列表与地图上标红的路段完全一致）
     pathRisks() { return this._risksOnRoute(this.route) },
@@ -1153,6 +1172,18 @@ export default {
     this._initSwipeBack()
     this.connectAgent()
     this.loadCustoms()
+    // 拉后端地名库（约 50 条，含平陆运河各节点/口岸）：
+    // 带 nodeId 的条目直接补进 NAME_TO_ID，让司机输中文名也能走既有的按节点算路流程；
+    // 未带 nodeId 的冷门地名由 _normalizeOD 走地理编码+吸附兜底。失败不影响既有内置节点。
+    fetchPlaceList().then(list => {
+      this.placeList = list || []
+      for (const p of this.placeList) {
+        if (p && p.name && p.nodeId) {
+          NAME_TO_ID[p.name] = p.nodeId
+          NAME_TO_ID[p.name.toLowerCase()] = p.nodeId
+        }
+      }
+    }).catch(() => {})
     // 越方司机默认越南语播报/展示
     if (this.driverRole === 'DRIVER_VN') this.taskLang = 'vi'
     // 刷新/断线重连后仍能回到物流任务模式（"拔网线照样跑"的一部分）
@@ -1500,6 +1531,7 @@ export default {
       this.riskLine = null
       this.portMarkers = []
       this._corridorLayer = null // 随 map.remove() 级联销毁，这里只断引用，新地图由 _drawCorridor 重建
+      this._odLayer = null      // 同上：起终点装饰层随地图销毁，drawRoute 重画
     },
     _clearMapHealthChecks() {
       ;(this._mapHealthTimers || []).forEach(t => clearTimeout(t))
@@ -2124,13 +2156,15 @@ export default {
           casing: g.risk ? RISK_CASE : SAFE_CASE
         }))
         if (wholeRisk || !segs.length) segs.push({ latlngs: cur, color: RISK, casing: RISK_CASE })
-        // 移动端降配：fps:15 限箭头 JS 循环帧；lite 关闭 drop-shadow 滤镜与流光/脉冲 CSS 动画
-        //（CSS 动画不受 fps 约束，是滑动掉帧主因）；maxArrows:8 减半动画箭头数。大屏不传这些，保持全特效。
-        // coreWidth 10 + casingBorder 6 ≈ 高德主线视觉粗度；白色 chevron 箭头沿路线前进。
+        // 移动端降配：staticArrows 箭头等距固定不推进（不起 rAF 循环，省 CPU）；
+        // lite 关闭 drop-shadow 滤镜与流光/脉冲 CSS 动画（CSS 动画不受 fps 约束，是滑动掉帧主因）。
+        // 大屏不传这些，保持全特效。coreWidth 10 + casingBorder 6 ≈ 高德主线视觉粗度。
+        // 静态箭头零逐帧开销：改为视口内等距铺放后，密度与缩放无关，放大跟随也不会空。
+        // spacingPx 收紧到 68（同屏更密）、maxArrows 放宽到 40（仅在整条路线尽缩尽览时兜底封顶）。
         if (!this._routeFlow) this._routeFlow = createRouteFlow(this.map, {
           color: SAFE, casing: SAFE_CASE,
           arrowShape: 'chevron', arrowColor: '#ffffff',
-          coreWidth: 10, fps: 15, lite: true, maxArrows: 8
+          coreWidth: 10, lite: true, spacingPx: 68, maxArrows: 40, staticArrows: true
         })
         this._routeFlow.setSegments(segs)
       } else if (this._routeFlow) {
@@ -2143,6 +2177,53 @@ export default {
       // 公水联运（方案B）：司机公路段到南宁港为止，但后续「运河→海运→越南公路」要提前规划画出来，
       // 让司机在图上看到货物之后的完整去向。仅方案B显示，不参与导航播报与进度计算。
       this._drawCorridor()
+
+      // 起终点装饰（高德风）：终点🚩旗帜标记 + 红色虚线位移直线连接起终点，
+      // 预览/导航都随路线重绘（绕行后终点不变，起点随新路线首点更新）
+      this._drawOdDecoration()
+    },
+    /**
+     * 起终点装饰层：路线首点画绿色「起」气泡，末点画红色「🚩终」旗帜 + 目的地名称；
+     * 起终点之间拉一条红色虚线（两点最短位移，不参与交互）。
+     * 位移线放独立 pane（zIndex 350，在 overlayPane 路线之下），不与绿/红路线抢像素；
+     * 标记用 divIcon 常驻标签同套路（不用 permanent Tooltip，避开 _updatePosition 空 _map 竞态）。
+     */
+    _drawOdDecoration() {
+      if (!this.map) return
+      if (this._odLayer) {
+        try { this.map.removeLayer(this._odLayer) } catch (e) { /* 忽略 */ }
+        this._odLayer = null
+      }
+      const pts = this.route.pathCoords || []
+      if (pts.length < 2) return
+      const start = pts[0]
+      const end = pts[pts.length - 1]
+      if (!this.map.getPane('odPane')) {
+        const pane = this.map.createPane('odPane')
+        pane.style.zIndex = 350
+      }
+      const layer = L.layerGroup()
+      L.polyline([start, end], {
+        pane: 'odPane', color: '#e53935', weight: 2.5, opacity: 0.9,
+        dashArray: '10 8', interactive: false
+      }).addTo(layer)
+      L.marker(start, {
+        icon: L.divIcon({
+          className: 'od-wrap', html: '<span class="od-bubble od-bubble-start">起</span>',
+          iconSize: [0, 0], iconAnchor: [0, 0]
+        }),
+        interactive: false, keyboard: false
+      }).addTo(layer)
+      L.marker(end, {
+        icon: L.divIcon({
+          className: 'od-wrap',
+          html: `<span class="od-end-dot"></span><span class="od-bubble od-bubble-end">🚩 终</span><span class="od-end-name">${this.destinationName || ''}</span>`,
+          iconSize: [0, 0], iconAnchor: [0, 0]
+        }),
+        interactive: false, keyboard: false
+      }).addTo(layer)
+      layer.addTo(this.map)
+      this._odLayer = layer
     },
     /** 拉取并缓存公水联运后续走廊几何（一次会话一次请求，失败静默不影响导航） */
     async _ensureCorridorData() {
@@ -2319,9 +2400,14 @@ export default {
         // "Cannot read properties of null (reading 'latLngToLayerPoint')"，
         // 进而中断 Leaflet 的 _resetView → moveend 不触发 → 渲染器 _zoom 变陈旧
         // → 路线线宽被放大成巨大色块（严重时白屏）。
-        html: '<div class="nav-tri-label">当前位置</div><div class="nav-tri-arrow"></div><div class="nav-tri-dot"></div>',
-        iconSize: [36, 42],
-        iconAnchor: [18, 21]
+        // 图标样式：淡蓝圆形头像（白色人形）+ 下方蓝色针尾，整体带白描边（参照高德定位 pin）。
+        html: '<div class="nav-tri-label">当前位置</div>' +
+          '<div class="gps-pin"><div class="gps-pin-head">' +
+          '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">' +
+          '<path fill="#fff" d="M12 12.2a4.1 4.1 0 1 0 0-8.2 4.1 4.1 0 0 0 0 8.2Zm0 1.9c-3.7 0-6.9 1.9-6.9 4.2V20h13.8v-1.7c0-2.3-3.2-4.2-6.9-4.2Z"/>' +
+          '</svg></div><div class="gps-pin-tail"></div></div>',
+        iconSize: [30, 40],
+        iconAnchor: [15, 34]
       })
       this._meMarker = L.marker([lat, lng], {
         icon,
@@ -2881,6 +2967,14 @@ export default {
     async searchRoutes() {
       if (this.candidateLoading || this.routeLoading) return
       this._warmUpSpeech() // 预热语音引擎，解除浏览器自动播放限制
+      // 先把起终点归一到路网节点 id：内置节点/地名库直接命中，冷门地名走地理编码+吸附。
+      // 超出覆盖范围（最近节点 > 5km）或查无此地名时给出明确提示，不再往下算路。
+      try {
+        await this._normalizeOD()
+      } catch (e) {
+        this.showPush('danger', '无法定位地点', apiErrorMessage(e, '请输入已覆盖区域的地名（广西—越南北部—平陆运河沿线）'))
+        return
+      }
       this.candidateLoading = true
       try {
         const r = await axios.get('/api/route/candidates', {
@@ -4811,6 +4905,25 @@ export default {
       const v = input.trim()
       return NAME_TO_ID[v] || NAME_TO_ID[v.toLowerCase()] || v
     },
+    /**
+     * 将用户输入的起终点归一到路网节点 id（就地回写 this.originId/destinationId）。
+     * - 已是内置节点 id / 中越文节点名 / 地名库带 nodeId 的条目 → _resolveNodeId 直接命中；
+     * - 其余（冷门地名、只在地名库里但无 nodeId 的口岸/枢纽）→ 地理编码 + 吸附拿 nodeId。
+     * 回写后所有依赖 resolvedOriginId/resolvedDestinationId 的下游调用（候选/算路/熔断/公水联运）全部一致。
+     * @throws 查无此地名或超出路网覆盖范围（由调用方转提示）
+     */
+    async _normalizeOD() {
+      const norm = async (val, label) => {
+        if (!val || !String(val).trim()) return val
+        const id = this._resolveNodeId(val)
+        if (NODE_NAMES[id]) return id // 已是已知节点（id 或内置中/越文名）
+        const r = await resolvePlaceToNode(String(val).trim(), label) // 地理编码 + 吸附
+        return r.nodeId
+      }
+      const [o, d] = await Promise.all([norm(this.originId, '起点'), norm(this.destinationId, '终点')])
+      if (o) this.originId = o
+      if (d) this.destinationId = d
+    },
     /** 保存司机信息到本地（比赛演示：仅内存保存） */
     saveDriverInfo() {
       this.cargo.from = this.originName
@@ -5092,11 +5205,11 @@ export default {
 .nav-info-card { background: rgba(255,255,255,.92); backdrop-filter: blur(16px); border-radius: 16px; padding: 14px 16px; box-shadow: 0 4px 20px rgba(0,0,0,.1); }
 .nav-info-main { display: flex; align-items: center; gap: 16px; }
 .nav-eta { display: flex; align-items: baseline; gap: 2px; }
-.eta-num { font-size: 32px; font-weight: 800; color: #1a1a2e; line-height: 1; }
-.eta-unit { font-size: 13px; color: #666; font-weight: 600; }
+.eta-num { font-size: 40px; font-weight: 800; color: #1a1a2e; line-height: 1; }
+.eta-unit { font-size: 15px; color: #666; font-weight: 600; }
 .nav-dist { display: flex; align-items: baseline; gap: 2px; }
-.dist-num { font-size: 20px; font-weight: 700; color: #555; }
-.dist-unit { font-size: 11px; color: #999; }
+.dist-num { font-size: 27px; font-weight: 700; color: #555; }
+.dist-unit { font-size: 14px; color: #999; }
 .nav-risk-badge { margin-left: auto; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; }
 .nav-risk-badge.ok { background: #e8f5e9; color: #16a34a; }
 .nav-risk-badge.warn { background: #fff3e0; color: #c2410c; }
@@ -5116,7 +5229,8 @@ export default {
 .eta-card .nav-risk-badge { display: inline-flex; align-items: center; box-shadow: 0 2px 10px rgba(0,0,0,.06); }
 .badge-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; margin-right: 6px; animation: dot-breathe 1.8s ease-in-out infinite; }
 @keyframes dot-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
-.eta-arrival { display: inline-flex; align-items: center; color: var(--prism-1); font-weight: 700; }
+.eta-arrival { display: inline-flex; align-items: center; color: var(--prism-1); font-weight: 800; font-size: 16px; }
+.eta-arrival .pulse-dot { width: 9px; height: 9px; }
 .pulse-dot { position: relative; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #16a34a; margin-right: 7px; }
 .pulse-dot::after { content: ''; position: absolute; inset: 0; border-radius: 50%; background: #16a34a; animation: pulse-ring 1.8s ease-out infinite; }
 @keyframes pulse-ring { 0% { transform: scale(1); opacity: .55; } 100% { transform: scale(2.6); opacity: 0; } }
@@ -5396,13 +5510,34 @@ export default {
 .corridor-label-text { position: absolute; left: 0; top: -24px; transform: translateX(-50%); white-space: nowrap;
   background: rgba(8,15,30,.82); color: #e2e8f0; font-size: 10.5px; font-weight: 700;
   padding: 2px 6px; border-radius: 6px; pointer-events: none; }
+/* 起终点装饰（高德风）：起点绿气泡 / 终点🚩红旗 + 名称 / 红色虚线位移直线（线体在 odPane，这里是标记） */
+.od-wrap { background: none !important; border: none !important; }
+.od-bubble { position: absolute; transform: translate(-50%, -50%); white-space: nowrap;
+  color: #fff; font-size: 12px; font-weight: 800; line-height: 1;
+  padding: 5px 7px; border-radius: 999px; border: 2px solid #fff;
+  box-shadow: 0 1px 6px rgba(0,0,0,.4); pointer-events: none; }
+.od-bubble-start { background: #22a35a; }
+.od-bubble-end { background: #e53935; top: -22px; font-size: 13px; }
+.od-end-dot { position: absolute; left: -5px; top: -5px; width: 10px; height: 10px; border-radius: 50%;
+  background: #e53935; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+.od-end-name { position: absolute; left: 0; top: 12px; transform: translateX(-50%); white-space: nowrap;
+  background: rgba(0,0,0,.78); color: #fff; font-size: 11.5px; font-weight: 700;
+  padding: 2px 7px; border-radius: 6px; pointer-events: none; }
 /* 「当前位置」标签：直接画在标记图标内（替代原来的 permanent Tooltip，避免其空 _map 抛异常） */
 .nav-tri-label { position: absolute; top: -20px; left: 50%; transform: translateX(-50%); white-space: nowrap;
   background: rgba(0,0,0,.78); color: #fff; font-size: 11px; font-weight: 700;
   padding: 2px 7px; border-radius: 6px; pointer-events: none; }
-.nav-tri-arrow { width: 0; height: 0; border-left: 16px solid transparent; border-right: 16px solid transparent; border-bottom: 32px solid var(--prism-2); filter: drop-shadow(0 2px 4px rgba(50,70,120,.14)); }
-.nav-tri-arrow::after { content: ''; position: absolute; top: 28px; left: -5px; width: 10px; height: 10px; background: var(--prism-2); border-radius: 50%; box-shadow: 0 0 6px rgba(30,136,229,.6); }
-.nav-tri-dot { width: 20px; height: 20px; background: radial-gradient(circle, #fff 30%, var(--prism-2) 70%); border-radius: 50%; margin: -10px auto 0; border: 3px solid var(--prism-2); box-shadow: 0 0 8px rgba(30,136,229,.5); animation: nav-pulse 1.5s ease-in-out infinite; }
+/* 当前车辆定位 pin：淡蓝圆形头像（白色人形）+ 下方蓝色针尾，整体带白描边。尺寸偏小。 */
+.gps-pin { position: absolute; left: 0; top: 0; width: 30px; height: 40px; }
+.gps-pin-head { position: absolute; top: 2px; left: 50%; transform: translateX(-50%);
+  width: 26px; height: 26px; border-radius: 50%; box-sizing: border-box;
+  background: radial-gradient(circle at 50% 36%, #7cc0f2 0%, #2f80d8 100%);
+  border: 2.5px solid #fff; box-shadow: 0 2px 6px rgba(30,80,150,.45);
+  display: flex; align-items: center; justify-content: center; }
+.gps-pin-head svg { display: block; margin-top: 3px; }
+.gps-pin-tail { position: absolute; top: 25px; left: 50%; transform: translateX(-50%);
+  width: 0; height: 0; border-left: 5.5px solid transparent; border-right: 5.5px solid transparent;
+  border-top: 10px solid #2f80d8; filter: drop-shadow(0 1px 1px rgba(30,80,150,.35)); }
 @keyframes nav-pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.15); opacity: .85; } }
 .gps-searching { animation: gps-blink 0.8s ease-in-out infinite; }
 @keyframes gps-blink { 0%,100% { opacity: 1; } 50% { opacity: .3; } }

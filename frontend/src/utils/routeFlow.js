@@ -108,7 +108,10 @@ export function createRouteFlow(map, options = {}) {
     // 箭头形状：'solid' 实心三角（默认）/ 'chevron' V 形前进箭头
     arrowShape: 'solid',
     // 箭头颜色：默认跟随段色；导航线传 '#fff' 用白色箭头
-    arrowColor: null
+    arrowColor: null,
+    // 静态箭头模式：箭头沿路线等距固定分布、不随帧推进（也不起 rAF 循环），
+    // 仅 zoomend 重排时重算位置/朝向。司机端导航线用这个省 CPU，大屏保持动态。
+    staticArrows: false
   }, options);
 
   // 流光/呼吸动画靠 SVG className 的 CSS keyframes 驱动，地图开 preferCanvas 后
@@ -137,10 +140,11 @@ export function createRouteFlow(map, options = {}) {
 
   function makeArrow() {
     const shape = opts.arrowShape === 'chevron' ? 'rf-chev' : 'rf-arrow';
+    // 轻量模式去 drop-shadow；静态模式去脉冲关键帧动画（位置已不动，闪烁没意义）
+    const anim = lite ? `${shape}-lite` : (opts.staticArrows ? '' : 'rf-arrow-pulse');
     const icon = L.divIcon({
       className: 'rf-arrow-outer',
-      // 轻量模式：去掉 rf-arrow-pulse（filter/opacity 关键帧动画），配合 .rf-arrow-lite 关闭 drop-shadow
-      html: lite ? `<div class="${shape} ${shape}-lite"></div>` : `<div class="${shape} rf-arrow-pulse"></div>`,
+      html: `<div class="${shape} ${anim}"></div>`,
       iconSize: [0, 0]
     });
     const marker = L.marker([0, 0], { icon, pane: opts.pane, interactive: false, keyboard: false });
@@ -275,8 +279,55 @@ export function createRouteFlow(map, options = {}) {
   function layout() {
     if (!tracks.length) return;
     measurePxPerM();
+    // 静态模式（司机端导航线）：只在实际可见视口内按固定屏幕间距铺箭头。
+    // 旧逻辑把箭头数量全局封顶后再沿整条路线等分，导航放大跟随时可见段
+    // 只分到极少甚至 0 个箭头（表现为「放大后箭头基本看不到」）。改成视口裁剪后，
+    // 密度与缩放级别无关，平移/缩放后重排，放大也不会空。
+    if (opts.staticArrows) {
+      layoutStaticArrows();
+      return;
+    }
     const wants = allocateArrows();
     tracks.forEach((t, i) => layoutTrack(t, wants[i]));
+  }
+
+  /**
+   * 静态箭头：在当前视口（外扩一点留平移余量）内按固定屏幕间距铺放，
+   * 逐点算朝向；marker 池按可见点数伸缩，密度与缩放无关、放大也不空。
+   */
+  function layoutStaticArrows() {
+    const bounds = map.getBounds().pad(0.25);
+    const spacingM = opts.spacingPx / pxPerM;
+    for (const t of tracks) {
+      const pool = t.arrows;
+      const spots = [];
+      if (spacingM > 0 && t.total > 0 && t.pts.length >= 2) {
+        for (let d = spacingM * 0.5; d < t.total; d += spacingM) {
+          const p = pointAt(t, d);
+          if (!bounds.contains(p)) continue;
+          const ahead = Math.min(t.total, d + Math.max(60, spacingM * 0.08));
+          spots.push([p, bearing(p, pointAt(t, ahead))]);
+        }
+      }
+      const need = Math.min(spots.length, opts.maxArrows);
+      while (pool.length > need) {
+        const a = pool.pop();
+        try { map.removeLayer(a.marker); } catch (e) {}
+      }
+      while (pool.length < need) {
+        const a = makeArrow();
+        a.marker.addTo(map);
+        pool.push(a);
+      }
+      for (let i = 0; i < need; i++) {
+        const a = pool[i];
+        if (!a.el) a.el = a.marker.getElement() && a.marker.getElement().firstChild;
+        if (!a.el) continue;
+        a.el.style.color = opts.arrowColor || t.color;
+        a.marker.setLatLng(spots[i][0]);
+        a.el.style.transform = `rotate(${(spots[i][1] - 90).toFixed(1)}deg)`;
+      }
+    }
   }
 
   function pointAt(t, d) {
@@ -375,6 +426,8 @@ export function createRouteFlow(map, options = {}) {
   }
 
   function start() {
+    // 静态箭头不需要 rAF 循环：位置只在 layout() 时写一次
+    if (opts.staticArrows) return;
     if (raf == null && !destroyed) {
       lastTs = 0;
       raf = requestAnimationFrame(frame);
@@ -454,6 +507,11 @@ export function createRouteFlow(map, options = {}) {
   map.on('moveend', onGestureEnd);
   map.on('zoomend', onGestureEnd);
 
+  // 静态箭头：导航跟随是程序化 setView（无 originalEvent），不会走 onGestureEnd 的 layout；
+  // 但视口沿路线平移后新进入视野的路段需要补铺箭头，故 moveend 也重排一次。
+  const onStaticMove = () => { if (opts.staticArrows && tracks.length) layoutStaticArrows(); };
+  map.on('moveend', onStaticMove);
+
   return {
     /** 兼容旧接口：整条路线单色 */
     setLatLngs(next) {
@@ -503,6 +561,7 @@ export function createRouteFlow(map, options = {}) {
       map.off('zoomstart', onGestureStart);
       map.off('moveend', onGestureEnd);
       map.off('zoomend', onGestureEnd);
+      map.off('moveend', onStaticMove);
       clearTracks();
       clearEndpoints();
     }

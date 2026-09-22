@@ -4,6 +4,7 @@ import com.example.aseanweatherlogistics.model.dto.RouteRequest;
 import com.example.aseanweatherlogistics.model.dto.RouteResponse;
 import com.example.aseanweatherlogistics.model.entity.RoadNode;
 import com.example.aseanweatherlogistics.model.entity.RoadEdge;
+import com.example.aseanweatherlogistics.service.GeocodeService;
 import com.example.aseanweatherlogistics.service.GraphHopperRouteService;
 import com.example.aseanweatherlogistics.service.RouteService;
 import com.example.aseanweatherlogistics.service.OsmDataLoader;
@@ -12,6 +13,7 @@ import com.example.aseanweatherlogistics.service.AIService;
 import com.example.aseanweatherlogistics.service.RouteAgentService;
 import com.example.aseanweatherlogistics.repository.RouteRepository;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -33,8 +35,9 @@ public class RouteController {
     private final AIService aiService;
     private final RouteRepository routeRepository;
     private final RouteAgentService routeAgentService;
+    private final GeocodeService geocodeService;
 
-    public RouteController(RouteService routeService, OsmDataLoader osmDataLoader, GraphHopperRouteService graphHopperRouteService, WeatherSimulator weatherSimulator, AIService aiService, RouteRepository routeRepository, RouteAgentService routeAgentService) {
+    public RouteController(RouteService routeService, OsmDataLoader osmDataLoader, GraphHopperRouteService graphHopperRouteService, WeatherSimulator weatherSimulator, AIService aiService, RouteRepository routeRepository, RouteAgentService routeAgentService, GeocodeService geocodeService) {
         this.routeService = routeService;
         this.osmDataLoader = osmDataLoader;
         this.graphHopperRouteService = graphHopperRouteService;
@@ -42,11 +45,93 @@ public class RouteController {
         this.aiService = aiService;
         this.routeRepository = routeRepository;
         this.routeAgentService = routeAgentService;
+        this.geocodeService = geocodeService;
     }
 
+    /**
+     * 路线规划（两种入参二选一）：
+     * 1) 节点模式：originId/destinationId（旧接口，前端调度流程在用）；
+     * 2) 坐标模式：startLat/startLng/endLat/endLng（地名输入框场景）——先吸附到最近路网节点
+     *    （超 5km 报 400「该区域暂未覆盖路网」），再走与节点模式完全相同的 Dijkstra + 气象熔断逻辑。
+     * 返回在 RouteResponse 全字段基础上追加 routeGeoJSON（LineString，[lng,lat]）与吸附信息。
+     */
     @PostMapping("/plan")
-    public RouteResponse plan(@RequestBody RouteRequest request) {
-        return routeService.planRoute(request);
+    public Map<String, Object> plan(@RequestBody RouteRequest request) {
+        String origin = request.getOriginId();
+        String dest = request.getDestinationId();
+        Map<String, Object> snap = null;
+        boolean coordMode = (origin == null || origin.isBlank() || dest == null || dest.isBlank())
+                && request.getStartLat() != null && request.getStartLng() != null
+                && request.getEndLat() != null && request.getEndLng() != null;
+        if (coordMode) {
+            snap = geocodeService.snapPair(request.getStartLat(), request.getStartLng(),
+                    request.getEndLat(), request.getEndLng());
+            @SuppressWarnings("unchecked")
+            Map<String, Object> s = (Map<String, Object>) snap.get("start");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> e = (Map<String, Object>) snap.get("end");
+            origin = (String) s.get("nodeId");
+            dest = (String) e.get("nodeId");
+        }
+        if (origin == null || origin.isBlank() || dest == null || dest.isBlank()) {
+            throw new IllegalArgumentException("需提供 originId+destinationId 或起终点坐标（startLat/startLng/endLat/endLng）");
+        }
+        RouteResponse resp = routeService.planRoute(new RouteRequest(origin, dest, request.getPeriod(), request.getCargoType()));
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("pathNodeIds", resp.getPathNodeIds());
+        out.put("pathEdgeIds", resp.getPathEdgeIds());
+        out.put("totalDistanceKm", resp.getTotalDistanceKm());
+        out.put("estimatedHours", resp.getEstimatedHours());
+        out.put("rerouted", resp.isRerouted());
+        out.put("riskSegments", resp.getRiskSegments());
+        out.put("baselinePathNodeIds", resp.getBaselinePathNodeIds());
+        out.put("baselineHours", resp.getBaselineHours());
+        out.put("currentHours", resp.getCurrentHours());
+        out.put("extraHours", resp.getExtraHours());
+        out.put("cargoLossYuan", resp.getCargoLossYuan());
+        out.put("pathCoords", resp.getPathCoords());
+        out.put("baselinePathCoords", resp.getBaselinePathCoords());
+        out.put("baselinePathEdgeIds", resp.getBaselinePathEdgeIds());
+        out.put("baselinePathEdgeSpans", resp.getBaselinePathEdgeSpans());
+        out.put("pathEdgeSpans", resp.getPathEdgeSpans());
+        out.put("estimatedArrival", resp.getEstimatedArrival());
+        out.put("delayReason", resp.getDelayReason());
+        out.put("carbonEmissionKg", resp.getCarbonEmissionKg());
+        out.put("riskProfile", resp.getRiskProfile());
+        out.put("routeGeoJSON", toGeoJSON(resp));
+        out.put("originId", origin);
+        out.put("destinationId", dest);
+        if (snap != null) {
+            out.put("snap", snap);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> s = (Map<String, Object>) snap.get("start");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> e = (Map<String, Object>) snap.get("end");
+            out.put("originName", s.get("nodeName"));
+            out.put("destinationName", e.get("nodeName"));
+        }
+        return out;
+    }
+
+    /** 路线 GeoJSON Feature（LineString，坐标序 [lng,lat] 符合 GeoJSON 规范） */
+    private Map<String, Object> toGeoJSON(RouteResponse resp) {
+        List<double[]> lngLat = new java.util.ArrayList<>();
+        if (resp.getPathCoords() != null) {
+            for (double[] c : resp.getPathCoords()) lngLat.add(new double[]{c[1], c[0]});
+        }
+        Map<String, Object> geometry = new LinkedHashMap<>();
+        geometry.put("type", "LineString");
+        geometry.put("coordinates", lngLat);
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("distanceKm", resp.getTotalDistanceKm());
+        properties.put("estimatedHours", resp.getEstimatedHours());
+        properties.put("rerouted", resp.isRerouted());
+        Map<String, Object> feature = new LinkedHashMap<>();
+        feature.put("type", "Feature");
+        feature.put("geometry", geometry);
+        feature.put("properties", properties);
+        return feature;
     }
 
     @GetMapping("/plan-real")
