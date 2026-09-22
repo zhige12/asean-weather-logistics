@@ -28,12 +28,25 @@
         <span v-else class="mode-hint">免费导航 · 天气与口岸提醒</span>
       </div>
 
-      <!-- 悬浮搜索框：收起单行 / 展开起终点输入 -->
-      <div class="hm-search" :class="{ open: homeSearchOpen }">
+      <!-- 悬浮搜索框：收起单行 / 展开起终点输入；宫格收缩时下沉到宫格原位置 -->
+      <div class="hm-search" :class="{ open: homeSearchOpen, lowered: homeCollapsed && !homeSearchOpen }">
         <div v-if="!homeSearchOpen" class="hm-search-bar" @click="homeSearchOpen = true">
-          <span class="hm-ico">🔍</span>
+          <!-- 放大镜：同样细线 SVG，与麦克风/宫格图标成套 -->
+          <span class="hm-ico hm-mic">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#64748b"
+                 stroke-width="1.6" stroke-linecap="round">
+              <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/>
+            </svg>
+          </span>
           <span class="hm-ph">查找地点、规划路线</span>
-          <span class="hm-ico">🎤</span>
+          <!-- 麦克风：emoji 换细线 SVG（与宫格图标同风格，stroke 1.6 中性灰） -->
+          <span class="hm-ico hm-mic">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#64748b"
+                 stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="3" width="6" height="11" rx="3"/>
+              <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/><path d="M8.5 21h7"/>
+            </svg>
+          </span>
         </div>
         <div v-else class="hm-search-panel">
           <!-- 起终点一体输入盒：左侧绿-虚线-红站点轨道 + 右侧交换按钮（高德/滴滴式），替代盒式双输入框 -->
@@ -92,8 +105,9 @@
         </div>
       </div>
 
-      <!-- 宫格快捷入口（物流功能） -->
-      <div v-show="!homeSearchOpen" class="hm-grid">
+      <!-- 宫格快捷入口（物流功能）：在其上上下滑动可整体收起，只留顶部搜索框 -->
+      <div v-show="!homeSearchOpen" class="hm-grid" :class="{ collapsed: homeCollapsed }"
+           @pointerdown="onGridSwipeStart" @pointermove="onGridSwipeMove" @pointerup="onGridSwipeEnd" @pointercancel="onGridSwipeEnd">
         <button v-for="g in homeGrid" :key="g.key" class="hm-grid-item" @click="onHomeGrid(g.key)">
           <span class="hm-grid-ico" :style="{ color: g.color }">
             <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"
@@ -103,8 +117,14 @@
         </button>
       </div>
 
+      <!-- 收缩把手：展开时宫格上方小箭头（点/下拉收起），收起时胶囊（点/上拉展开） -->
+      <button v-show="!homeSearchOpen && !homeCollapsed" class="hm-collapse-grip"
+              @click="tapCollapseGrip" @pointerdown="onGridSwipeStart" @pointermove="onGridSwipeMove" @pointerup="onGridSwipeEnd" @pointercancel="onGridSwipeEnd">⌄</button>
+      <button v-show="!homeSearchOpen && homeCollapsed" class="hm-expand-pill"
+              @click="tapExpandPill" @pointerdown="onGridSwipeStart" @pointermove="onGridSwipeMove" @pointerup="onGridSwipeEnd" @pointercancel="onGridSwipeEnd">⌃ 功能</button>
+
       <!-- 去X 导航卡片 -->
-      <div v-if="homeGoCard && !homeSearchOpen" class="hm-gocard">
+      <div v-if="homeGoCard && !homeSearchOpen" class="hm-gocard" :class="{ collapsed: homeCollapsed }">
         <span class="hm-go-ico">🚗</span>
         <div class="hm-go-info">
           <div class="hm-go-title">去{{ destinationName }}</div>
@@ -878,6 +898,8 @@ export default {
       showNavMenu: false,
       // 首页（高德风格）悬浮搜索框是否展开
       homeSearchOpen: false,
+      // 首页宫格/导航卡是否被下滑收起（只留搜索框，见 hm-collapse-grip / hm-expand-pill）
+      homeCollapsed: false,
       // 首页概览地图独立实例（与导航地图 this.map 互不干扰）
       _homeMap: null,
       // 退出导航二次确认弹层
@@ -1314,12 +1336,47 @@ export default {
     },
     /** 首页宫格点击：跳转到对应功能抽屉 / 展开搜索 */
     onHomeGrid(key) {
+      // 刚完成收缩滑动：touchend 后补发的 click 不算点击宫格
+      if (this._gsSwiped) return
       if (key === 'plans') {
         this.tab = 'task'
         this.loadAgentPlans()
         return
       }
       this.tab = key
+    },
+    // ---------- 首页宫格收缩（上下滑动 / 把手点按） ----------
+    // 用 Pointer Events 而非 Touch Events：触摸+鼠标统一，且配合
+    // .hm-grid/.hm-collapse-grip/.hm-expand-pill 的 touch-action:none，
+    // 阻止 WebView 把竖向滑动抢去当页面滚动（不抢就不会发 touchcancel 掩掉手势）
+    onGridSwipeStart(e) {
+      this._gsx = e.clientX
+      this._gsy = e.clientY
+      this._gsSwiped = false
+    },
+    onGridSwipeMove(e) {
+      if (this._gsy == null || this._gsSwiped) return
+      const dy = e.clientY - this._gsy
+      const dx = e.clientX - this._gsx
+      // 竖向位移超 30px 且明显大于横向 → 判定为收缩手势：下拉收起、上推展开
+      if (Math.abs(dy) > 30 && Math.abs(dy) > Math.abs(dx) * 1.3) {
+        this._gsSwiped = true
+        this.homeCollapsed = dy > 0
+      }
+    },
+    onGridSwipeEnd() {
+      this._gsy = null
+      if (!this._gsSwiped) return
+      // click 在 pointerup 之后补发，延一拍再清标记，避免滑动被误判成按钮点击
+      setTimeout(() => { this._gsSwiped = false }, 120)
+    },
+    tapCollapseGrip() {
+      if (this._gsSwiped) return
+      this.homeCollapsed = true
+    },
+    tapExpandPill() {
+      if (this._gsSwiped) return
+      this.homeCollapsed = false
     },
     // ---------- 地图（计划书 4.4） ----------
     /**
@@ -4981,20 +5038,29 @@ export default {
 .hm-modechip .mode-act.done { background: #e8f5e9; color: #2e7d32; }
 .hm-modechip .mode-act-exit { color: #94a3b8; cursor: pointer; }
 .hm-modechip .mode-hint { color: #64748b; }
-.hm-search { position: absolute; left: 12px; right: 12px; z-index: 6; }
+.hm-search { position: absolute; left: 12px; right: 12px; z-index: 6; transition: bottom .3s ease; }
 .hm-search:not(.open) { bottom: 250px; }
+/* 宫格收起后搜索框沉到贴近 Tab 栏，不留中段空白 */
+.hm-search:not(.open).lowered { bottom: 118px; }
 .hm-search.open { bottom: 76px; }
 .hm-search-bar { display: flex; align-items: center; gap: 10px; background: #fff; border-radius: 999px; padding: 14px 18px; box-shadow: 0 4px 18px rgba(0,0,0,.15); cursor: pointer; }
 .hm-search-bar .hm-ph { flex: 1; color: #94a3b8; font-size: 15px; }
 .hm-search-bar .hm-ico { font-size: 18px; }
+.hm-search-bar .hm-mic { display: flex; align-items: center; }
 .hm-search-panel { background: #fff; border-radius: 16px; padding: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.18); max-height: 60vh; overflow-y: auto; }
 .hm-search-actions { display: flex; gap: 8px; margin-top: 10px; }
 .hm-search-actions .start-btn { flex: 1; }
 .hm-close { border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 10px; padding: 0 14px; cursor: pointer; }
-.hm-grid { position: absolute; left: 12px; right: 12px; bottom: 150px; z-index: 5; display: flex; justify-content: space-between; gap: 6px; }
+.hm-grid { position: absolute; left: 12px; right: 12px; bottom: 150px; z-index: 5; display: flex; justify-content: space-between; gap: 6px; touch-action: none; }
 .hm-grid-item { flex: 1; border: none; background: transparent; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
 .hm-grid-ico { width: 46px; height: 46px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.93); border: 1px solid rgba(15,23,42,.07); box-shadow: 0 2px 8px rgba(15,23,42,.14); }
 .hm-grid-label { font-size: 11px; color: #3ec7ff; font-weight: 500; letter-spacing: .5px; text-shadow: 0 1px 4px rgba(0,20,50,.65); }
+/* 收缩态：宫格与导航卡下滑淡出，只留搜索框；把手/胶囊负责恢复 */
+.hm-grid, .hm-gocard { transition: transform .3s ease, opacity .25s ease; }
+.hm-grid.collapsed, .hm-gocard.collapsed { transform: translateY(150%); opacity: 0; pointer-events: none; }
+.hm-collapse-grip { position: absolute; left: 50%; transform: translateX(-50%); bottom: 226px; z-index: 5; width: 46px; height: 18px; padding: 0; border: none; border-radius: 9px; background: rgba(255,255,255,.85); color: #64748b; font-size: 12px; line-height: 1; cursor: pointer; box-shadow: 0 1px 4px rgba(15,23,42,.15); touch-action: none; }
+/* 收起态恢复胶囊：放在搜索框下方、Tab 栏上方 */
+.hm-expand-pill { position: absolute; left: 50%; transform: translateX(-50%); bottom: 80px; z-index: 5; border: none; border-radius: 14px; background: rgba(255,255,255,.92); color: #3ec7ff; font-size: 12px; font-weight: 500; padding: 6px 14px; cursor: pointer; box-shadow: 0 2px 8px rgba(15,23,42,.18); touch-action: none; }
 .hm-gocard { position: absolute; left: 12px; right: 12px; bottom: 84px; z-index: 5; display: flex; align-items: center; gap: 12px; background: #fff; border-radius: 16px; padding: 12px 14px; box-shadow: 0 4px 18px rgba(0,0,0,.15); }
 .hm-go-ico { width: 40px; height: 40px; border-radius: 10px; background: #e3f2fd; display: flex; align-items: center; justify-content: center; font-size: 20px; }
 .hm-go-info { flex: 1; }
