@@ -1,9 +1,9 @@
 // Leaflet 1.9 销毁/缩放竞态防护（一次性 monkeypatch，两端共用）。
 //
-// 本模块集中收敛「地图/图层被反复销毁重建」时 Leaflet 内部回调读到空引用的两类已知竞态：
+// 本模块集中收敛「地图/图层被反复销毁重建」时 Leaflet 内部回调读到空引用的几类已知竞态：
 //   1) Canvas 渲染器销毁后异步重绘读空 _ctx（reading 'save'）；
 //   2) 瓦片层(GridLayer)已脱离地图(_map=null)却仍收到缩放事件，读空 _map（reading 'project'）；
-//   3) MapLibre 桥接层已脱离地图(_glMap=null)却仍收到缩放/平移事件，读空 _glMap（reading 'jumpTo'）。
+//   3) 幽灵瓦片层/标记层的 _animateZoom 直接读 _map（reading '_latLngToNewLayerPoint'）。
 //
 // 现象：控制台偶发 TypeError: Cannot read properties of undefined (reading 'save')
 //       at Canvas._clear ← Canvas._redraw。
@@ -69,35 +69,44 @@ if (L && L.GridLayer && L.GridLayer.prototype && !L.GridLayer.prototype.__detach
 }
 
 // ---------------------------------------------------------------------------
-// 竞态 3：MapLibre 桥接层(@maplibre/maplibre-gl-leaflet)脱离地图后仍收缩放/平移事件
-//         → reading 'jumpTo' of null
+// 竞态 3：幽灵图层的 _animateZoom 直接读 this._map
+//         → reading '_latLngToNewLayerPoint' of null（缩放时黑屏崩屏）
 //
-// 现象：缩放地图（尤其滚轮/程序化 setZoom）时偶发
-//       TypeError: Cannot read properties of null (reading 'jumpTo')
-//       at MaplibreGL._pinchZoom ← Map.fire('zoom') ← Map._move ← _resetView ← setView。
+// 现象：缩放动画期间偶发 TypeError: Cannot read properties of null
+//       (reading '_latLngToNewLayerPoint') at GridLayer._animateZoom / Marker._animateZoom
+//       ← Map.fire('zoomanim') ← Map._animateZoom。
 //
-// 成因：L.MaplibreGL 通过 getEvents 订阅 move/zoomanim/zoom/zoomstart/zoomend/resize，
-//       其中 zoom→_pinchZoom 会调 this._glMap.jumpTo(...)。而 onRemove 会
-//       this._glMap.remove(); this._glMap = null。与竞态 2 同源：当桥接层在地图
-//       销毁/重建、底图降级链切换、loadTiles 重挂等时机被移除，退订未完全生效而
-//       _glMap 已置 null 时，该「幽灵桥接层」仍会收到 zoom 事件 → null.jumpTo 抛错。
-//       （插件原版 _pinchZoom/_animateZoom/_zoomEnd 均未对 _glMap 做空判断。）
+// 成因：与竞态 2 同源的幽灵图层，但崩点更早——_animateZoom 函数体开头就直接
+//       读 this._map._latLngToNewLayerPoint(...)，走不到已被守卫的 _setView。
+//       两类崩溃点都已在线上堆栈中确认：
+//         - GridLayer._animateZoom：幽灵瓦片层（缩放中途切底图/重建地图）；
+//         - Marker._animateZoom：幽灵 divIcon 标记（口岸标签/风险点，图层组被
+//           removeLayer 后退订未生效，仍收 zoomanim）。
+//       这个异常会从 Map.fire('zoomanim') 的监听器列表中间打断广播，导致后续监听器
+//       （含 Map 自身的 _animateZoom 收尾）收不到事件，地图卡在 leaflet-zoom-anim
+//       状态 —— 观感就是「缩放时突然黑屏」。
 //
-// 处理：给插件各缩放/平移回调顶部加幂等守卫——_map 或 _glMap 已不在则跳过，
-//       无可渲染的 GL 地图，不影响在图桥接层。插件在本模块之前 import（MapView/DriverApp
-//       均先 import '@maplibre/maplibre-gl-leaflet' 再 import 本文件），故 L.MaplibreGL 已注册。
-if (L && L.MaplibreGL && L.MaplibreGL.prototype && !L.MaplibreGL.prototype.__detachedEventGuarded) {
-  const mproto = L.MaplibreGL.prototype
-  // 需要守卫的方法：均为地图事件回调，且依赖 _map 与 _glMap 同时存在才有意义
-  const guardedMethods = ['_pinchZoom', '_animateZoom', '_zoomEnd', '_transitionEnd', '_update', '_transformGL', '_resize']
-  guardedMethods.forEach((name) => {
-    const orig = mproto[name]
-    if (typeof orig !== 'function') return
-    mproto[name] = function () {
-      // 已脱离地图或 GL 子地图已销毁：跳过，避免读空 _glMap/_map
-      if (!this._map || !this._glMap) return
-      return orig.apply(this, arguments)
+// 处理：两个原型的 _animateZoom 顶部加同样的幂等守卫；应用层另用 _afterZoomAnim
+//       把重建操作延迟到 zoomend，双保险。
+if (L && L.GridLayer && L.GridLayer.prototype && !L.GridLayer.prototype.__animateZoomGuarded) {
+  const gproto2 = L.GridLayer.prototype
+  const origAnimateZoom = gproto2._animateZoom
+  gproto2._animateZoom = function () {
+    if (!this._map) return
+    return origAnimateZoom.apply(this, arguments)
+  }
+  gproto2.__animateZoomGuarded = true
+}
+
+if (L && L.Marker && L.Marker.prototype && !L.Marker.prototype.__animateZoomGuarded) {
+  const mkproto = L.Marker.prototype
+  const origMarkerAnimateZoom = mkproto._animateZoom
+  if (typeof origMarkerAnimateZoom === 'function') {
+    mkproto._animateZoom = function () {
+      // 已脱离地图（_map 为 null）：跳过，避免读空 _map._latLngToNewLayerPoint
+      if (!this._map) return
+      return origMarkerAnimateZoom.apply(this, arguments)
     }
-  })
-  mproto.__detachedEventGuarded = true
+  }
+  mkproto.__animateZoomGuarded = true
 }

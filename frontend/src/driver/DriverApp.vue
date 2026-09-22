@@ -10,6 +10,7 @@
         <button class="hm-ctrl-btn" title="放大" @click="homeZoom(1)">＋</button>
         <button class="hm-ctrl-btn" title="缩小" @click="homeZoom(-1)">－</button>
         <button class="hm-ctrl-btn" title="回到网络中心" @click="homeLocate()">📍</button>
+        <button class="hm-ctrl-btn base-btn" title="切换底图" @click="cycleBase">{{ baseName }}</button>
       </div>
 
       <!-- 模式 / 路线状态浮标 -->
@@ -292,6 +293,9 @@
           <span><i class="lg lg-risk"></i>风险路段</span>
           <span><i class="lg lg-port"></i>口岸</span>
         </div>
+
+        <!-- 手动切换底图：天地图影像 → 底图4 矢量 → D 盘离线，循环 -->
+        <button class="base-switch-btn" title="切换底图" @click="cycleBase">🗺 {{ baseName }}</button>
 
         <!-- 顶部状态栏（预览 / 导航共用）-->
         <div ref="topStack" class="nav-topbar">
@@ -624,15 +628,11 @@
 import axios from 'axios'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import 'maplibre-gl/dist/maplibre-gl.css'
-import '@maplibre/maplibre-gl-leaflet'
-import localBaseStyle from '../data/local-base-style'
-import tiandituBaseStyle from '../data/tianditu-base-style'
 import { reshapeForZoom } from '../utils/pathReshape.js'
 import { Geolocation } from '@capacitor/geolocation'
 import { createRouteFlow } from '../utils/routeFlow.js'
 import { splitRouteByRisk, riskEdgeSet } from '../utils/routeSegments.js'
-import { BASE_CHAIN, baseDef } from '../utils/tileSources.js'
+import { BASE_CHAIN, baseDef, makeTileLayer } from '../utils/tileSources.js'
 // Leaflet Canvas 渲染器销毁竞态防护（_redraw 异步排队、销毁后 _ctx 已删仍回调 → reading 'save' 报错）
 import '../utils/leafletCanvasGuard.js'
 import { normalizeForTTS, detectLanguage, HAZARD_VN_MAP } from '../utils/ttsNormalizer.js'
@@ -645,6 +645,15 @@ function mercY(latDeg) {
   const phi = latDeg * Math.PI / 180
   return Math.log(Math.tan(Math.PI / 4 + phi / 2)) * 180 / Math.PI
 }
+
+/**
+ * 底图 settle 之后允许的新增瓦片错误数，超过即判定「底图半坏」。
+ * 一屏约 20~40 张瓦片 × 影像/注记两层，6 张取不到就已经是肉眼可见的模糊补位块了。
+ */
+const BASE_DEGRADE_ERROR_BUDGET = 6
+
+// 底图短名（手动切换按钮显示用）：影像=天地图影像 / 底图4=天地图矢量 / 底图5=OSM / 离线=D 盘离线瓦片
+const BASE_SHORT_NAMES = { tianditu: '影像', tdtvec: '底图4', osm: '底图5', vector: '离线' }
 
 // 口岸坐标（真实经纬度），供司机端地图标注
 const PORTS = [
@@ -816,14 +825,14 @@ export default {
       // AI 方案建议（A/B/C 三方案对比，供司机理解调度决策依据）
       agentPlans: null,
       agentPlansLoading: false,
-      // 底图：默认在线天地图影像，按「天地图 → OSM → D 盘离线瓦片」自动降级。
+      // 底图：默认在线天地图影像，按「天地图 → 底图4 矢量 → D 盘离线瓦片」自动降级，也可手动循环切换。
       // 在线源在探测窗口内无任一瓦片成功（断网/403）即降到下一个；降到末级 D 盘离线时，
       // 因那套 jpg 是 EPSG:4326、与主图 3857 不同系，需整图重建（见 _enterOfflineD）。
       // 网络恢复后自动切回在线天地图。导航图与首页图各持一份降级状态，互不影响。
       // _useOfflineD=true 表示当前处于 D 盘离线（EPSG:4326）模式。
       _useOfflineD: false,
-      _mbLayer: null,
-      _homeMbLayer: null,
+      // 当前底图短名（手动切换按钮显示）：影像 / 矢量 / 离线
+      baseName: '影像',
       _navBase: null,
       _homeBase: null,
       // risk-blink 的 JS 脉冲（preferCanvas 后折线无 SVG 元素可挂 CSS 类名）
@@ -1133,7 +1142,7 @@ export default {
       this.voiceDebugOn = new URLSearchParams(window.location.search).get('voicedebug') === '1'
     } catch (e) { /* 忽略 */ }
     if (this.voiceDebugOn) this._vdbg('诊断开启 · native=' + this._isNativeShell())
-    // 底图是本地 MapLibre 矢量瓦片（同源后端供给，离线可用），无需任何在线探测，
+    // 底图按自动降级链挂载（天地图影像 → 底图4 矢量 → D 盘离线瓦片），
     // 直接建图。
     this.$nextTick(() => {
       this.initMap()
@@ -1222,15 +1231,23 @@ export default {
           // 首页概览只铺底图；导航图里因长折线 Canvas 批量绘制才开 preferCanvas，
           // 这里同样打开保持一致（首页不画路线，无 className 特效依赖）
           preferCanvas: true,
-          minZoom: cfg.bounds ? 7 : cfg.minZoom,
+          minZoom: cfg.minZoom,
           maxZoom: cfg.maxZoom,
           zoomAnimation: false,
+          // 边界锁放开：与调度大屏一致自由拖拽；仅 4326 离线源保留走廊锁（瓦片只覆盖那里）
           ...(cfg.bounds ? { maxBounds: cfg.bounds, maxBoundsViscosity: 1.0 } : {}),
           bounceAtZoomLimits: false
         })
         this._homeMap = map
         map.setView(cfg.center, cfg.bounds ? 8 : 7)
-        // 首页底图与导航地图同一套降级链：天地图 → OSM → 本地离线矢量（MapLibre GPU）。
+        // 容器是 inset:0 + 100vh，软键盘弹出（搜起终点）、转屏都会改它的高度。
+        // 不重新量测的话 Leaflet 会按旧尺寸铺瓦，底图只盖住一部分视口。
+        // 导航地图（_buildMap）本来就有这个监听，首页此前漏了。
+        if (typeof ResizeObserver !== 'undefined') {
+          this._homeMapRO = new ResizeObserver(() => { if (this._homeMap) this._homeMap.invalidateSize() })
+          this._homeMapRO.observe(el)
+        }
+        // 首页底图与导航地图同一套降级链：天地图影像 → 底图4 矢量 → D 盘离线瓦片。
         this._homeBase = { idx: this._baseStartIdx(), map }
         this._mountBase(map, this._homeBase)
       } catch (e) {
@@ -1240,7 +1257,7 @@ export default {
     /** 销毁首页概览地图并清理容器残留 Leaflet 状态 */
     _destroyHomeMap() {
       if (this._homeBase) { if (this._homeBase.timer) clearTimeout(this._homeBase.timer); this._homeBase = null }
-      this._homeMbLayer = null
+      if (this._homeMapRO) { this._homeMapRO.disconnect(); this._homeMapRO = null }
       if (this._homeMap) {
         try { this._homeMap.remove() } catch (e) { /* 忽略 */ }
         this._homeMap = null
@@ -1265,9 +1282,7 @@ export default {
     },
     // ---------- 地图（计划书 4.4） ----------
     /**
-     * 底图固定为本地 MapLibre 矢量瓦片（EPSG:3857，GPU/WebGL 渲染）。
-     * 页面本身就由电脑后端经局域网供给，/tiles/** 与页面同源，瓦片必达，
-     * 不再有「在线 OSM 优先 / 探测 / D 盘 jpg 回退」那一套。
+     * 底图：天地图影像 → 底图4 天地图矢量 → D 盘离线瓦片，自动降级，可手动循环切换。
      *
      * 这里同时防止「旧 Leaflet 实例绑定到已被 Vue v-if 移除的容器」：
      * 退出导航/预览后 this.map 仍非空，调度确认再次进入导航时若不校验容器，
@@ -1312,16 +1327,15 @@ export default {
       this._resetMapContainer(el, true)
       // 地图重建后原特效层失效，置空由 drawRoute 重建
       if (this._routeFlow) { this._routeFlow.destroy(); this._routeFlow = null }
-      // 单一底图模式：本地矢量瓦片（EPSG:3857），crs/边界/缩放约束全部由 _mapConfig 提供。
+      // crs/边界/缩放约束全部由 _mapConfig 提供（D 盘离线模式时为 4326）。
       const cfg = this._mapConfig()
       this._mapBounds = cfg.bounds
-      // 「铺满屏幕」的最小缩放锁：矢量瓦片只覆盖中越走廊，缩太小会露出瓦片覆盖外的空白
+      // 「铺满屏幕」的最小缩放锁：D 盘离线瓦片只覆盖中越走廊，缩太小会露出瓦片覆盖外的空白
       const coverZoom = this._minZoomForCoverage()
       // 地图公共选项：提取成变量，catch 分支「清残留后重试」复用同一份，避免两处漂移
       const mapOpts = {
         crs: cfg.crs,
         zoomControl: true,
-        // attribution 由 MapLibre 底图层自己提供
         attributionControl: false,
         // 业务折线（路线/风险段/基准线）改走 Canvas 批量绘制 —— 移动端长折线
         // SVG 重排是缩放卡顿的主因之一。
@@ -1332,16 +1346,14 @@ export default {
         preferCanvas: true,
         // zoomSnap:0 → 捏合是连续分数级缩放，这是「高德那种丝滑」的关键。
         zoomSnap: 0,
-        minZoom: coverZoom,
+        minZoom: cfg.minZoom,
         maxZoom: cfg.maxZoom,
         // 关掉 Leaflet 的缩放动画：动画期间 mapPane 挂 CSS transform 插值，
         // 业务图层（路线/标记仍由 Leaflet 定位）会被"再缩放一次"造成箭头脱节。
-        // 底图一侧不受影响：MapLibre WebGL 在自己 canvas 内跟手渲染缩放，
-        // 这里关的只是 Leaflet 对覆盖层的 transform 插值。
         // 代价：双指捏合直接跳到位、无平滑过渡（"贴得住"优先于"丝滑"，与大屏一致）。
         zoomAnimation: false,
-        maxBounds: cfg.bounds,
-        maxBoundsViscosity: 1.0,
+        // 边界锁放开：与调度大屏一致自由拖拽；仅 4326 离线源保留走廊锁（瓦片只覆盖那里）
+        ...(cfg.bounds ? { maxBounds: cfg.bounds, maxBoundsViscosity: 1.0 } : {}),
         bounceAtZoomLimits: false
       }
       let map
@@ -1407,8 +1419,8 @@ export default {
       this.map.on('zoomend', redrawOnZoom)
       this.map.on('moveend', redrawOnZoom)
 
-      // 底图：天地图(在线) → OSM(在线) → 本地离线矢量(MapLibre) 自动降级。
-      // 遮罩在首个可用底图 ready（在线首张瓦片成功 / 矢量首帧）时收起，见 _navBase.onReady。
+      // 底图：天地图影像 → 底图4 矢量 → D 盘离线瓦片，自动降级。
+      // 遮罩在首个可用底图 ready（首张瓦片成功）时收起，见 _navBase.onReady。
       this._navBase = {
         idx: this._baseStartIdx(),
         map: this.map,
@@ -1479,7 +1491,6 @@ export default {
       }
       // map.remove() 会级联移除并销毁底图图层，这里只停降级探测定时器 + 断引用
       if (this._navBase) { if (this._navBase.timer) clearTimeout(this._navBase.timer); this._navBase = null }
-      this._mbLayer = null
       this._riskBlinkPhase = false
       this._riskBlinkState = { route: false, risk: false }
       // this.map 丢失但容器仍有 _leaflet_id 时，也必须清掉，否则下次 L.map 会直接失败
@@ -1512,14 +1523,11 @@ export default {
         return false
       }
     },
-    /** 底图健康检查：在线栅格看是否已有瓦片成功；离线矢量看 MapLibre 是否 loaded */
+    /** 底图健康检查：看是否已有瓦片成功上屏 */
     _mapHasVisibleTiles() {
       const st = this._navBase
       if (!st) return false
-      if (st.kind === 'raster') return st.loaded > 0
-      const ml = st.mb && typeof st.mb.getMaplibreMap === 'function' ? st.mb.getMaplibreMap() : null
-      if (!ml) return false
-      try { return !!ml.loaded() } catch (e) { return false }
+      return st.loaded > 0
     },
     _routeProjectedIntoView() {
       const coords = this.route.pathCoords || []
@@ -1672,7 +1680,7 @@ export default {
       if (this.homeSearchOpen) { this.homeSearchOpen = false; return }
       if (this.tab !== 'route') { this.tab = 'route'; return }
     },
-    // ---------- 底图降级链：天地图(在线) → OSM(在线) → 本地离线矢量(MapLibre) ----------
+    // ---------- 底图降级链：天地图影像 → 底图4 天地图矢量 → 底图5 OSM → D 盘离线瓦片 ----------
     /** 起始源下标：显式离线（navigator.onLine=false，如拔网线演示）直接落到本地矢量，省掉在线探测等待 */
     _baseStartIdx() {
       // 已进 D 盘离线模式，或浏览器显式离线 → 直接落到末级（D 盘），跳过在线探测
@@ -1696,53 +1704,6 @@ export default {
       st.errored = 0
       st.settled = false
 
-      // 天地图：改由 MapLibre 经 maplibre-gl-leaflet 桥接层做 GPU 合成渲染。
-      // 相比旧的 Leaflet L.tileLayer 逐块 <img> 平移（WebView 内 CPU 解码、滑动掉帧），
-      // MapLibre 把瓦片作为纹理上屏、整屏一次 GPU 变换，滑动更接近原生。瓦片走后端同源代理
-      // /api/tianditu/... 解决天地图无 CORS 头 + 防盗链 Referer 两大拦路问题（见同名控制器）。
-      // 业务图层（路线流动/风险脉冲/口岸 divIcon）仍由 Leaflet 叠在桥接层之上，零改动。
-      // 探测：style 'load' 只代表样式就绪、瓦片未必上屏，故等首个 'idle' 且 ml.loaded() 为真、
-      // 且累计错误未超阈值才判「可用」收起遮罩；上游持续 404/超时（密钥失效/断网）即降级到 OSM。
-      if (key === 'tianditu' && typeof L.maplibreGL === 'function') {
-        const tdtDef = baseDef('tianditu')
-        st.kind = 'mb-raster'
-        try {
-          st.mb = L.maplibreGL({
-            style: tiandituBaseStyle,
-            attribution: (tdtDef && tdtDef.attribution) || '&copy; 天地图'
-          }).addTo(map)
-        } catch (e) {
-          console.warn('天地图 MapLibre 底图初始化失败，降级 OSM', e)
-          st.idx++
-          this._mountBase(map, st)
-          return
-        }
-        let ml = null
-        try { ml = st.mb.getMaplibreMap && st.mb.getMaplibreMap() } catch (e) { /* 忽略 */ }
-        if (ml) {
-          ml.on('error', () => { st.errored++ })
-          ml.on('load', () => {
-            const check = () => {
-              if (st.settled) return
-              if (st.errored >= 5) { this._fallbackBase(st); return }
-              try { if (ml.loaded()) this._settleBase(st) } catch (e) { /* 忽略 */ }
-            }
-            check()
-            ml.on('idle', check)
-          })
-        }
-        // 兜底探测窗口：6s 仍未 settled → 若已 loaded 且错误可控则收下，否则判定不可用降级
-        st.timer = setTimeout(() => {
-          if (st.settled) return
-          let ok = false
-          try { ok = !!(ml && ml.loaded() && st.errored < 5) } catch (e) { ok = false }
-          if (ok) this._settleBase(st)
-          else this._fallbackBase(st)
-        }, 6000)
-        this._onBaseSource(st)
-        return
-      }
-
       // 末级：D 盘离线瓦片（EPSG:4326）。主图是 3857，无法把 4326 栅格当一层直接叠（会错位），
       // 故：若当前已是 4326 离线图 → 直接铺 D 盘 jpg 层；否则 → 触发整图重建切到 4326。
       if (key === 'vector') {
@@ -1761,7 +1722,7 @@ export default {
         return
       }
 
-      // 在线栅格源（天地图 / OSM）
+      // 在线栅格源（天地图影像 / 底图4 矢量 / 底图5 OSM）
       const def = baseDef(key)
       if (!def) { st.idx = BASE_CHAIN.length - 1; this._mountBase(map, st); return }
       st.kind = 'raster'
@@ -1769,6 +1730,9 @@ export default {
         subdomains: def.subdomains,
         attribution: def.attribution,
         maxZoom: def.maxZoom || 18,
+        // 天地图影像 img_w 中越走廊高层级无覆盖（>z16 返回 200 纯白瓦片），钉住原生级别过扫拉伸；
+        // 矢量源(vec_w)无此限制，def 未给 maxNativeZoom 时回落到 maxZoom（行为不变）
+        maxNativeZoom: def.maxNativeZoom || (def.maxZoom || 18),
         updateWhenIdle: false,
         keepBuffer: 2,
         crossOrigin: def.crossOrigin || false,
@@ -1778,16 +1742,18 @@ export default {
         // 的高清瓦片供取用（注记 cia_w 同步 +1 级，标注与影像对齐）。
         detectRetina: true
       }
-      st.tile = L.tileLayer(def.url, tileOpts).addTo(map)
+      // 天地图源 URL 含 {tk} 占位符，makeTileLayer 自动换成多密钥轮转层（单 key 限流时兵分备用 key）
+      st.tile = makeTileLayer(def.url, tileOpts).addTo(map)
       // 天地图注记层（cia_w，透明 PNG）：叠在影像上显示地名/边界，不参与降级探测
       if (def.annoUrl) {
-        st.anno = L.tileLayer(def.annoUrl, { ...tileOpts, attribution: '', className: 'tdt-anno-layer' }).addTo(map)
+        st.anno = makeTileLayer(def.annoUrl, { ...tileOpts, attribution: '', className: 'tdt-anno-layer' }).addTo(map)
       }
       st.tile.on('tileload', () => { st.loaded++; this._settleBase(st) })
       st.tile.on('tileerror', () => {
         st.errored++
         // 一张都没成功且已失败多张 → 判定该在线源不可用，立即降级
         if (!st.settled && st.loaded === 0 && st.errored >= 2) this._fallbackBase(st)
+        this._onBaseDegraded(st)
       })
       // 探测窗口：请求一直挂起（无 error 也无 load）时，4s 后仍无成功瓦片则降级
       st.timer = setTimeout(() => { if (!st.settled && st.loaded === 0) this._fallbackBase(st) }, 4000)
@@ -1797,12 +1763,39 @@ export default {
     _settleBase(st) {
       if (!st || st.settled) return
       st.settled = true
+      // 记下判定可用时已发生的错误数：settle 之后的**新增**错误才代表底图在运行中坏掉
+      st.settledErrored = st.errored
       if (st.timer) { clearTimeout(st.timer); st.timer = null }
       if (typeof st.onReady === 'function') st.onReady()
     },
-    /** 降级到链中下一个源；已是最后一级（矢量）则不再降 */
-    _fallbackBase(st) {
-      if (!st || st.settled) return
+    /**
+     * 底图「已经收下、但运行中持续取不到瓦片」的自愈入口。
+     *
+     * 为什么必须有它：天地图按 tk 限流（上游回 429）漏掉的那几张瓦片，
+     * 会在地图上留下一片跟着地图一起移动的模糊补位块；而 _settleBase 早已
+     * 判定该源可用、降级链不会触发 —— 必须在 settle 之后继续盯错误计数。
+     *
+     * 处理：先原地重挂一次底图（新图层实例 = 全新瓦片缓存，强制重新取瓦，
+     * 限流只是瞬时抖动时用户几乎无感）；重挂后仍坏则降级到链中下一个源。
+     */
+    _onBaseDegraded(st) {
+      if (!st || !st.settled || !st.map) return
+      // 末级（D 盘离线）没有可降的下一源，重挂也拿不到数据，不做无谓重建
+      if (st.idx >= BASE_CHAIN.length - 1) return
+      if ((st.errored - (st.settledErrored || 0)) < BASE_DEGRADE_ERROR_BUDGET) return
+      if (!st.remounted) {
+        st.remounted = true
+        console.warn(`底图[${st.key}]持续取不到瓦片，重挂强制重新取瓦`)
+        this._mountBase(st.map, st)
+        return
+      }
+      console.warn(`底图[${st.key}]重挂后仍持续失败，降级`)
+      this._fallbackBase(st, true)
+    },
+    /** 降级到链中下一个源；已是最后一级（D 盘离线）则不再降。force 用于突破「已 settle」的判定 */
+    _fallbackBase(st, force) {
+      if (!st) return
+      if (st.settled && !force) return
       if (st.idx >= BASE_CHAIN.length - 1) return
       const from = this._baseChainKey(st.idx)
       st.idx++
@@ -1812,22 +1805,84 @@ export default {
       this._mountBase(st.map, st)
     },
     /**
+     * 手动循环切换底图：天地图影像 → 底图4 天地图矢量 → 底图5 OSM → D 盘离线 → 回到影像。
+     * 同为在线 3857 源（影像 ↔ 矢量 ↔ OSM）只重挂瓦片层；进出 D 盘离线（4326↔3857）
+     * 必须整图重建（与 _enterOfflineD 同一套路，只是方向由用户手动决定，
+     * 不挂「网络恢复自动切回」监听——离线是用户主动选的，不该被自动切走）。
+     */
+    cycleBase() {
+      const isHome = this.homeVisible
+      const st = isHome ? this._homeBase : this._navBase
+      if (!st || !st.map) return
+      const nextIdx = (st.idx + 1) % BASE_CHAIN.length
+      const nextOffline = this._baseChainKey(nextIdx) === 'vector'
+      if (this._useOfflineD === nextOffline) {
+        // 同为在线 3857 源：原地重挂图层即可，无需重建地图
+        st.idx = nextIdx
+        st.remounted = false
+        if (st === this._navBase) this._showMapVeil()
+        this._mountBase(st.map, st)
+        return
+      }
+      // 跨坐标系：翻转离线标志后整图重建，_baseStartIdx 会自动落到对应级别
+      this._useOfflineD = nextOffline
+      if (isHome) { this._destroyHomeMap(); this._buildHomeMap() }
+      else { this._rebuildMapForBaseSwitch() }
+    },
+    /**
+     * 底图跨坐标系切换（在线 3857 ↔ D 盘离线 4326）时的整图重建，并**完整恢复导航运行时**。
+     *
+     * 为什么不能只 _destroyMap+_buildMap+zoomToNav：整图重建会销毁 _meMarker，而
+     * _destroyMap 不会停模拟行驶定时器（_triTimer 仍空转）、_buildMap 也不恢复车辆；
+     * zoomToNav 又把视角拉回**路线起点**。于是导航中切底图后：车辆标记消失、地图跳回起点、
+     * 不再跟随 —— 起点若正好落在离线瓦片覆盖边缘还会整屏空白，表现就是"切底图后白屏/坏掉"。
+     *
+     * 这里在重建前抓取车辆当前位置/缩放/模拟状态，重建后原地恢复：车辆标记回到原位、
+     * 模拟从当前进度续跑、视角居中到车辆（而非起点）、自动跟随保持。
+     */
+    _rebuildMapForBaseSwitch() {
+      const isNav = this.navigating
+      // 整图重建会销毁这些状态，先抓快照用于重建后恢复
+      const vehPos = this._meMarker ? this._meMarker.getLatLng() : null
+      const prevZoom = this.map ? this.map.getZoom() : null
+      const wasSimulating = !!this._triTimer
+      // _destroyMap 不停模拟定时器；先停掉，重建后再从当前进度恢复，避免旧定时器空转
+      this._stopTripSimulation()
+
+      this._destroyMap()
+      this._buildMap()          // 内部已挂载新底图并 drawRoute
+      try { this.drawRoute() } catch (e) { console.error('切换底图后重绘路线失败', e) }
+
+      if (isNav) {
+        // 车辆标记 + 模拟行驶原地恢复（从当前进度续跑，不回起点）
+        if (wasSimulating) this._resumeTripSimulation()
+        else if (vehPos) this._placeTriMarker(vehPos.lat, vehPos.lng)
+        // 视角居中到车辆当前位置（缺省退回路线起点），保持自动跟随
+        this.navFollowing = true
+        this.navOffView = false
+        this._navZoomReady = true
+        const target = vehPos ||
+          (this.route.pathCoords && this.route.pathCoords[0]
+            ? L.latLng(this.route.pathCoords[0][0], this.route.pathCoords[0][1]) : null)
+        const z = prevZoom != null ? Math.min(prevZoom, this._navMaxZoom()) : this._navMaxZoom()
+        if (target) { this._centerOn(target, z, 0, false); this._resyncMapRenderer() }
+        else this.zoomToNav()
+      } else if (this.previewing) {
+        this.fitRoute(false)
+      }
+    },
+    /**
      * 切到 D 盘离线瓦片：因那套 jpg 是 EPSG:4326、与主图 3857 不同系，无法就地叠层，
      * 只能把对应地图整图重建为 4326 模式（_mapConfig 据 _useOfflineD 返回 4326 配置）。
-     * 网络恢复后自动切回在线天地图。仅在天地图 + OSM 都探测失败时才走到这里，正常在线不受影响。
+     * 网络恢复后自动切回在线天地图。仅在天地图影像 + 底图4 矢量 + 底图5 OSM 三个在线源都探测失败时才走到这里，正常在线不受影响。
      */
     _enterOfflineD(st) {
       if (this._useOfflineD) return
       this._useOfflineD = true
-      console.warn('在线底图（天地图/OSM）均不可用，重建为 D 盘离线瓦片（EPSG:4326）')
+      console.warn('在线底图（天地图影像/矢量/OSM）均不可用，重建为 D 盘离线瓦片（EPSG:4326）')
       const isNav = st === this._navBase
-      const redraw = () => {
-        try { this.drawRoute() } catch (e) { console.error('离线路底重绘路线失败', e) }
-        if (this.navigating) this.zoomToNav()
-        else if (this.previewing) this.fitRoute(false)
-      }
       const rebuild = () => {
-        if (isNav) { this._destroyMap(); this._buildMap(); redraw() }
+        if (isNav) { this._rebuildMapForBaseSwitch() }
         else { this._destroyHomeMap(); this._buildHomeMap() }
       }
       rebuild()
@@ -1841,9 +1896,11 @@ export default {
       }
       window.addEventListener('online', onOnline)
     },
-    /** 源切换后同步地图 maxZoom：在线栅格 18/19，本地矢量封顶 14（更高由 MapLibre overzoom） */
+    /** 源切换后同步地图 maxZoom：在线栅格 18/19，D 盘离线 13/14（更高级别由 overzoom 拉伸） */
     _onBaseSource(st) {
       if (!st || !st.map) return
+      // 同步手动切换按钮上显示的底图短名
+      this.baseName = BASE_SHORT_NAMES[st.key] || st.key
       const def = baseDef(st.key)
       const mz = st.key === 'vector' ? (this._useOfflineD ? 13 : 14) : (def && def.maxZoom ? def.maxZoom : 18)
       try { if (st.map.options.maxZoom !== mz) st.map.setMaxZoom(mz) } catch (e) { /* 忽略 */ }
@@ -1854,10 +1911,10 @@ export default {
       if (st.timer) { clearTimeout(st.timer); st.timer = null }
       if (st.tile) { try { map.removeLayer(st.tile) } catch (e) { /* 忽略 */ } st.tile = null }
       if (st.anno) { try { map.removeLayer(st.anno) } catch (e) { /* 忽略 */ } st.anno = null }
-      if (st.mb) { try { map.removeLayer(st.mb) } catch (e) { /* 忽略 */ } st.mb = null }
-      if (st === this._navBase) this._mbLayer = null
       st.kind = null
       st.settled = false
+      // remounted 是「这条降级链上重挂过几次」的跨挂载计数，不能随单次挂载清掉，否则会无限重挂
+      st.settledErrored = 0
     },
     /**
      * 底图加载遮罩：首个可用底图 ready 时由 _navBase.onReady 收起；
@@ -1874,7 +1931,7 @@ export default {
      * 重新拉一批新瓦片，铺满前 Leaflet 容器会露出灰白底 —— 这就是“开始导航后白屏”的观感。
      * 这里在切视角前“有条件地”重新拉起遮罩：先给 250ms 宽限，快的网络首批瓦片已到→
      * 全程不闪遮罩；确实慢才显示“地图加载中”，直到当前视野铺满（TileLayer load）或 3s 兜底收起。
-     * 仅对在线栅格源生效；矢量兜底是 WebGL 自绘、本就即时，无需遮罩。
+     * 仅对在线栅格源生效；D 盘离线瓦片本地必达，无需遮罩。
      */
     _veilUntilViewPaint() {
       const st = this._navBase
@@ -1896,28 +1953,28 @@ export default {
     },
     /**
      * 底图配置（EPSG:3857）：默认在线天地图，maxZoom 由 _onBaseSource 按当前源实时校正
-     *（在线栅格 18/19，本地矢量 14）。边界锁在中越走廊：无论哪种底图，视野都聚焦业务运营区。
+     *（在线栅格 18/19，D 盘离线 13/14）。边界锁在中越走廊：无论哪种底图，视野都聚焦业务运营区。
      */
     _mapConfig() {
-      // D 盘离线模式：那套 OSM 栅格是 EPSG:4326、只覆盖中越走廊 z7~z13，
+      // D 盘离线模式：那套离线栅格是 EPSG:4326、只覆盖中越走廊 z7~z13，
       // 必须用 4326 坐标系建图并把范围/缩放锁到瓦片覆盖内，否则会整图错位、露白。
       if (this._useOfflineD) {
         return {
           crs: L.CRS.EPSG4326,
           bounds: L.latLngBounds([[20.49, 101.68], [24.01, 109.51]]),
-          minZoom: 7,
-          maxZoom: 13,
+          minZoom: 5,
+          maxZoom: 18,
           center: [21.6, 106.8],
           offlineD: true,
           tileUrl: '/tiles/{z}/{x}/{y}.jpg',
-          tileOpts: { minZoom: 7, maxZoom: 13, minNativeZoom: 7, maxNativeZoom: 13, tileSize: 256, attribution: '© OpenStreetMap（离线）' }
+          tileOpts: { minZoom: 5, maxZoom: 18, minNativeZoom: 7, maxNativeZoom: 13, tileSize: 256, attribution: '© OpenStreetMap（离线）' }
         }
       }
       return {
         crs: L.CRS.EPSG3857,
-        bounds: L.latLngBounds([[20.49, 101.68], [24.01, 109.51]]),
-        minZoom: 7,   // 运行时由 _minZoomForCoverage 收紧成分数级
-        maxZoom: 18,  // 在线底图上限；降级到本地矢量时由 _onBaseSource 收到 14
+        // 边界锁放开（与调度大屏一致）：在线底图全球可用，不再锁中越走廊
+        minZoom: 3,
+        maxZoom: 18,  // 在线底图上限；降级到 D 盘离线时由 _onBaseSource 收到 13/14
         center: [21.6, 106.8]
       }
     },
@@ -1992,7 +2049,9 @@ export default {
      */
     _applyMapMinZoom() {
       if (!this.map) return
-      let floor = this._minZoomForCoverage()
+      // 缩放锁放开：下限直接用底图配置的 minZoom，不再按「铺满走廊」收紧；
+      // 仅预览时若整条路线比下限视野还大，才临时放宽到装下路线的那一级
+      let floor = (this._mapConfig() || {}).minZoom || 3
       if (this.previewing) {
         const rz = this._routeFitZoom()
         if (rz != null) floor = Math.min(floor, rz)
@@ -2332,6 +2391,25 @@ export default {
       this._simCum = cum
       this._simTotalM = cum[cum.length - 1]
       this._simDistM = 0
+      this._runTripTimer()
+    },
+    /**
+     * 从**当前进度**（_simDistM）继续模拟行驶，不重置里程、不把车辆拉回起点。
+     * 底图跨坐标系切换会整图重建、销毁 _meMarker；重建后用它把车辆原地恢复，
+     * 表现为"切底图后车辆仍在原位继续前进"，而不是消失或跳回起点。
+     */
+    _resumeTripSimulation() {
+      if (this._triTimer) return
+      const coords = this.route.pathCoords
+      // 进度/累计里程缺失（异常路径）时退回从起点重新开始
+      if (!coords || coords.length < 2 || !this._simCum) { this._startTripSimulation(); return }
+      this.gpsStatus = 'simulating'
+      const p = this._simPointAt(this._simDistM || 0)
+      if (p) this._placeTriMarker(p[0], p[1])
+      this._runTripTimer()
+    },
+    /** 模拟行驶推进定时器：_startTripSimulation 从头起、_resumeTripSimulation 续跑，共用同一段逻辑 */
+    _runTripTimer() {
       this._triTimer = setInterval(() => {
         if (!this.navigating) { this._stopTripSimulation(); return }
         this._simDistM = Math.min(this._simDistM + SIM_SPEED_MPS * SIM_TICK_MS / 1000, this._simTotalM)
@@ -4625,6 +4703,7 @@ export default {
 .home-map { position: absolute; inset: 0; z-index: 0; }
 .hm-ctrl { position: absolute; right: 12px; top: 96px; z-index: 5; display: flex; flex-direction: column; gap: 8px; }
 .hm-ctrl-btn { width: 44px; height: 44px; border: none; border-radius: 12px; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.15); font-size: 20px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.hm-ctrl-btn.base-btn { font-size: 13px; font-weight: 700; color: #374151; }
 .hm-modechip { position: absolute; left: 12px; top: 12px; z-index: 5; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,.92); box-shadow: 0 2px 10px rgba(0,0,0,.12); font-size: 12px; }
 .hm-modechip .mode-name { font-weight: 600; }
 .hm-modechip .strip-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
@@ -4841,6 +4920,8 @@ export default {
 .nav-status.warn .status-dot { background: #ea7a2e; }
 .nav-status.rerouted .status-dot { background: #f44336; }
 .nav-legend { position: absolute; top: 90px; right: 12px; z-index: 10; display: flex; flex-direction: column; gap: 4px; background: rgba(255,255,255,.85); backdrop-filter: blur(10px); padding: 8px 10px; border-radius: 10px; font-size: 10px; color: #666; }
+.base-switch-btn { position: absolute; top: 178px; right: 12px; z-index: 10; padding: 8px 12px; border: none; border-radius: 999px; background: rgba(255,255,255,.9); backdrop-filter: blur(10px); box-shadow: 0 2px 10px rgba(0,0,0,.15); font-size: 12px; font-weight: 700; color: #374151; cursor: pointer; transition: transform .15s; }
+.base-switch-btn:active { transform: scale(.95); }
 .lg { display: inline-block; width: 12px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
 .lg-route { background: #2563eb; }
 .lg-risk { background: #e53935; }

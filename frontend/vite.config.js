@@ -25,7 +25,6 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (id.includes('node_modules/leaflet')) return 'leaflet'
-          if (id.includes('node_modules/maplibre-gl') || id.includes('@maplibre')) return 'maplibre'
         }
       }
     }
@@ -38,8 +37,8 @@ export default defineConfig({
         changeOrigin: true,
         secure: false
       },
-      // 本地矢量底图瓦片也要代理到后端，否则 /tiles/... 会被 Vite 当 SPA 路由返回 HTML，
-      // MapLibre 解析失败导致底图道路全部不渲染（只剩中文地名等 Leaflet DOM 层）
+      // D 盘离线瓦片也要代理到后端，否则 /tiles/... 会被 Vite 当 SPA 路由返回 HTML，
+      // 瓦片层收到 HTML 内容全部解析失败，离线底图一片空白
       '/tiles': {
         target: 'http://localhost:8080',
         changeOrigin: true,
