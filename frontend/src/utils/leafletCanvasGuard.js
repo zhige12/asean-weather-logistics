@@ -110,3 +110,42 @@ if (L && L.Marker && L.Marker.prototype && !L.Marker.prototype.__animateZoomGuar
   }
   mkproto.__animateZoomGuarded = true
 }
+
+// ---------------------------------------------------------------------------
+// 竞态 3b：Tooltip/Popup（DivOverlay 系）_animateZoom 读空 _map（同一崩溃签名的另一处崩点）
+//
+// 现象：TypeError: Cannot read properties of null (reading '_latLngToNewLayerPoint')
+//       at Tooltip._animateZoom / DivOverlay._animateZoom ← Map.fire('zoomanim')。
+//
+// 成因：Tooltip/Popup 通过 getEvents 订阅 zoomanim→_animateZoom、move→_updatePosition。
+//       图层被 removeLayer / 地图销毁重建时若退订未生效（与竞态 2/3 同源，司机端
+//       公水联运走廊 polyline.bindPopup 在导航开始整层移除后已在线上堆栈中确认），
+//       幽灵浮层仍会收到缩放广播，_animateZoom 开头直接读
+//       this._map._latLngToNewLayerPoint(...) → 对 null 取属性抛错，
+//       从监听器列表中间打断 zoomanim 广播 → 地图卡在 leaflet-zoom-anim → 白屏。
+//
+// 处理：DivOverlay（Popup/Tooltip 共同父类）与 Tooltip 自身的 _animateZoom /
+//       _updatePosition 顶部加同样的幂等守卫。
+function __guardDivOverlayProto(proto, tag) {
+  if (!proto || proto[tag]) return
+  const origAnimate = proto._animateZoom
+  if (typeof origAnimate === 'function') {
+    proto._animateZoom = function () {
+      if (!this._map) return
+      return origAnimate.apply(this, arguments)
+    }
+  }
+  const origUpdate = proto._updatePosition
+  if (typeof origUpdate === 'function') {
+    proto._updatePosition = function () {
+      // _updatePosition 里 this._map.latLngToLayerPoint 同样读空 _map
+      if (!this._map) return
+      return origUpdate.apply(this, arguments)
+    }
+  }
+  proto[tag] = true
+}
+if (L) {
+  __guardDivOverlayProto(L.DivOverlay && L.DivOverlay.prototype, '__animateZoomGuarded')
+  __guardDivOverlayProto(L.Tooltip && L.Tooltip.prototype, '__animateZoomGuarded')
+}

@@ -632,7 +632,7 @@ import { reshapeForZoom } from '../utils/pathReshape.js'
 import { Geolocation } from '@capacitor/geolocation'
 import { createRouteFlow } from '../utils/routeFlow.js'
 import { splitRouteByRisk, riskEdgeSet } from '../utils/routeSegments.js'
-import { BASE_CHAIN, baseDef, makeTileLayer } from '../utils/tileSources.js'
+import { BASE_CHAIN, baseDef, makeTileLayer, tileUrlFromDef } from '../utils/tileSources.js'
 // Leaflet Canvas 渲染器销毁竞态防护（_redraw 异步排队、销毁后 _ctx 已删仍回调 → reading 'save' 报错）
 import '../utils/leafletCanvasGuard.js'
 import { normalizeForTTS, detectLanguage, HAZARD_VN_MAP } from '../utils/ttsNormalizer.js'
@@ -1434,9 +1434,9 @@ export default {
       // 先启动体检：后续路线/标记绘制即使异常，底图仍可加载并触发自动恢复
       this._scheduleMapHealthChecks()
 
-      // 原路线（灰虚线）在下，当前路线（蓝线）在上，风险段（红线）最上
+      // 原路线（灰虚线）在下，当前路线（绿线）在中，风险段（红线）最上
       this.baseLine = L.polyline([], { color: '#9aa5b1', weight: 3, opacity: 0.75, dashArray: '6 6' }).addTo(this.map)
-      this.routeLine = L.polyline([], { color: '#2563eb', weight: 5, opacity: 0.95 }).addTo(this.map)
+      this.routeLine = L.polyline([], { color: '#1ec95f', weight: 5, opacity: 0.95 }).addTo(this.map)
       this.riskLine = L.polyline([], { color: '#e74c3c', weight: 6, opacity: 0.9 }).addTo(this.map)
       this.portMarkers = []
       PORTS.forEach(p => {
@@ -1499,6 +1499,7 @@ export default {
       this.routeLine = null
       this.riskLine = null
       this.portMarkers = []
+      this._corridorLayer = null // 随 map.remove() 级联销毁，这里只断引用，新地图由 _drawCorridor 重建
     },
     _clearMapHealthChecks() {
       ;(this._mapHealthTimers || []).forEach(t => clearTimeout(t))
@@ -1727,12 +1728,19 @@ export default {
       if (!def) { st.idx = BASE_CHAIN.length - 1; this._mountBase(map, st); return }
       st.kind = 'raster'
       const tileOpts = {
-        subdomains: def.subdomains,
+        // 代理源（天地图/底图4）URL 无 {s} 占位符、def 里没有 subdomains；但 Leaflet 铺瓦时
+        // 无条件读 options.subdomains.length（_getSubdomain），显式传 undefined 会覆盖默认值
+        // 并在建图阶段直接抛 TypeError，必须兜底给个占位字符串。
+        subdomains: def.subdomains || 'abc',
         attribution: def.attribution,
         maxZoom: def.maxZoom || 18,
-        // 天地图影像 img_w 中越走廊高层级无覆盖（>z16 返回 200 纯白瓦片），钉住原生级别过扫拉伸；
-        // 矢量源(vec_w)无此限制，def 未给 maxNativeZoom 时回落到 maxZoom（行为不变）
-        maxNativeZoom: def.maxNativeZoom || (def.maxZoom || 18),
+        // 天地图影像 img_w 中越走廊 >z16 无覆盖（实测 z17/z18 不同坐标全回同一张 4.7KB
+        // 的 200 纯白瓦片）；矢量源无此限制，def 未给 maxNativeZoom 时回落到 maxZoom。
+        // 视网膜屏要再减 1：detectRetina 的 zoomOffset=+1 是加在**被 maxNativeZoom 夹过
+        // 之后**的请求级别上（tileZoom 先夹、URL 再 +1），不扣回去手机实际会请求
+        // maxNativeZoom+1 级 → 导航开场自动放到最大级时整屏取到 z17 纯白瓦片，
+        // 就是「放大到一定程度白屏、缩小一点就出来」的根因。
+        maxNativeZoom: (def.maxNativeZoom || (def.maxZoom || 18)) - (L.Browser.retina ? 1 : 0),
         updateWhenIdle: false,
         keepBuffer: 2,
         crossOrigin: def.crossOrigin || false,
@@ -1742,7 +1750,7 @@ export default {
         // 的高清瓦片供取用（注记 cia_w 同步 +1 级，标注与影像对齐）。
         detectRetina: true
       }
-      // 天地图源 URL 含 {tk} 占位符，makeTileLayer 自动换成多密钥轮转层（单 key 限流时兵分备用 key）
+      // 天地图两级源已走同源后端代理（密钥/缓存都在后端），所有源都是标准 L.tileLayer
       st.tile = makeTileLayer(def.url, tileOpts).addTo(map)
       // 天地图注记层（cia_w，透明 PNG）：叠在影像上显示地名/边界，不参与降级探测
       if (def.annoUrl) {
@@ -2092,9 +2100,9 @@ export default {
       const safeDraw = wholeRisk ? [] : safeGroups
       const riskDraw = wholeRisk ? [cur] : riskGroups
 
-      // 底层静态线：作为 Flow 特效之外的兜底，配色与 Flow 保持一致
+      // 底层静态线：作为 Flow 特效之外的兜底，配色与 Flow 保持一致（高德风亮绿）
       const baseWidth = this.navigating ? 7 : 5
-      this.routeLine.setStyle({ color: '#2563eb', weight: baseWidth, opacity: 1, dashArray: null })
+      this.routeLine.setStyle({ color: '#1ec95f', weight: baseWidth, opacity: 1, dashArray: null })
       this.routeLine.setLatLngs(safeDraw)
       // 风险段：Flow 特效层（markerPane）更高，会把这里细红线整条盖住，
       // 因此用更宽的半透明红色脉冲光晕，让风险段在地图上一眼可辨
@@ -2103,15 +2111,27 @@ export default {
       // 风险闪烁：preferCanvas 后折线无 SVG 元素可挂 risk-blink 类名，改 JS opacity 脉冲
       this._setRiskBlink(!!wholeRisk, riskDraw.length > 0)
 
-      // 前进箭头 + 流光带（外发光 + 流光 + 核心线 + 箭头 + 起终点脉冲）
+      // 前进箭头 + 流动主线（高德风：深绿描边 + 亮绿主线 + 白色 V 形前进箭头）
       // 特效层在 markerPane（600）之上，必须按段着色，否则单色特效会盖住红线
       if (cur.length > 1) {
         const segs = []
-        if (!wholeRisk) groups.forEach(g => segs.push({ latlngs: g.pts, color: g.risk ? '#e94560' : '#2563eb' }))
-        if (wholeRisk || !segs.length) segs.push({ latlngs: cur, color: '#e94560' })
+        // 安全=亮绿+深绿描边；风险=红+暗红描边，与风险卡片/红线语义一致
+        const SAFE = '#1ec95f'; const SAFE_CASE = '#0a7a3c'
+        const RISK = '#ef4444'; const RISK_CASE = '#8f1d1d'
+        if (!wholeRisk) groups.forEach(g => segs.push({
+          latlngs: g.pts,
+          color: g.risk ? RISK : SAFE,
+          casing: g.risk ? RISK_CASE : SAFE_CASE
+        }))
+        if (wholeRisk || !segs.length) segs.push({ latlngs: cur, color: RISK, casing: RISK_CASE })
         // 移动端降配：fps:15 限箭头 JS 循环帧；lite 关闭 drop-shadow 滤镜与流光/脉冲 CSS 动画
         //（CSS 动画不受 fps 约束，是滑动掉帧主因）；maxArrows:8 减半动画箭头数。大屏不传这些，保持全特效。
-        if (!this._routeFlow) this._routeFlow = createRouteFlow(this.map, { color: '#2563eb', fps: 15, lite: true, maxArrows: 8 })
+        // coreWidth 10 + casingBorder 6 ≈ 高德主线视觉粗度；白色 chevron 箭头沿路线前进。
+        if (!this._routeFlow) this._routeFlow = createRouteFlow(this.map, {
+          color: SAFE, casing: SAFE_CASE,
+          arrowShape: 'chevron', arrowColor: '#ffffff',
+          coreWidth: 10, fps: 15, lite: true, maxArrows: 8
+        })
         this._routeFlow.setSegments(segs)
       } else if (this._routeFlow) {
         this._routeFlow.setSegments([])
@@ -2119,6 +2139,74 @@ export default {
 
       // 风险段额外加发光标记（采样打点，避免密集几何生成上千个 marker）
       this._updateRiskMarkers(riskDraw)
+
+      // 公水联运（方案B）：司机公路段到南宁港为止，但后续「运河→海运→越南公路」要提前规划画出来，
+      // 让司机在图上看到货物之后的完整去向。仅方案B显示，不参与导航播报与进度计算。
+      this._drawCorridor()
+    },
+    /** 拉取并缓存公水联运后续走廊几何（一次会话一次请求，失败静默不影响导航） */
+    async _ensureCorridorData() {
+      if (this._corridorData || this._corridorFetching) return this._corridorData
+      this._corridorFetching = true
+      try {
+        const { data } = await axios.get('/api/canal/corridor', { timeout: 15000 })
+        this._corridorData = data
+        return data
+      } catch (e) {
+        console.warn('公水联运走廊总览拉取失败', e)
+        return null
+      } finally {
+        this._corridorFetching = false
+      }
+    },
+    /**
+     * 绘制/清除「后续走廊」：运河蓝点线、海运青虚线、越南公路橙虚线，
+     * 节点（六景/钦州港/海防/河内）用 divIcon 常驻标签（与口岸标记同套路，
+     * 不用 permanent Tooltip——Tooltip._updatePosition 缺 _map 守卫是已知坑）；
+     * 线体点开用 Popup（DivOverlay 里 Popup 带守卫，比 Tooltip 稳）。
+     */
+    _drawCorridor() {
+      if (!this.map) return
+      const d = this.activePlanId === 'B' ? this._corridorData : null
+      if (this._corridorLayer) {
+        try { this.map.removeLayer(this._corridorLayer) } catch (e) { /* 忽略 */ }
+        this._corridorLayer = null
+      }
+      // 首次进入方案B：异步拉一次走廊几何，到手后补画（不阻塞本帧路线重绘）
+      if (this.activePlanId === 'B' && !this._corridorData && !this._corridorFetching) {
+        this._ensureCorridorData().then(dd => {
+          if (dd && this.activePlanId === 'B') this._drawCorridor()
+        })
+      }
+      if (!d) return
+      const styles = {
+        canal: { color: '#0ea5e9', weight: 5, opacity: 0.9, dashArray: '2 10' },    // 内河运河：蓝点线
+        sea: { color: '#06b6d4', weight: 4, opacity: 0.85, dashArray: '14 10' },    // 海运航线：青虚线
+        road: { color: '#f59e0b', weight: 5, opacity: 0.9, dashArray: '10 8' }      // 越方公路：橙虚线
+      }
+      const layer = L.layerGroup()
+      ;(d.legs || []).forEach(leg => {
+        const path = leg.path || []
+        if (path.length < 2) return
+        const pl = L.polyline(path, styles[leg.mode] || styles.road)
+        pl.bindPopup(`<b>${leg.name}</b><br>${leg.from} → ${leg.to} · ${leg.km}km / 约${leg.hours}h<br><span style="opacity:.75">${leg.note || ''}</span>`, { maxWidth: 260 })
+        layer.addLayer(pl)
+      })
+      ;(d.nodes || []).forEach(n => {
+        if (!n.pos) return
+        layer.addLayer(L.marker(n.pos, {
+          icon: L.divIcon({
+            className: 'corridor-label-wrap',
+            html: `<span class="corridor-label-text">${n.icon || ''} ${n.name}</span><span class="corridor-dot" style="background:${n.color || '#0ea5e9'}"></span>`,
+            iconSize: [0, 0],
+            iconAnchor: [0, 0]
+          }),
+          interactive: false,
+          keyboard: false
+        }))
+      })
+      layer.addTo(this.map)
+      this._corridorLayer = layer
     },
     /**
      * risk-blink 的 JS 脉冲版：地图开 preferCanvas 后 routeLine/riskLine 的
@@ -2600,6 +2688,57 @@ export default {
       // 标记导航视角已就绪，此后车辆移动才会自动跟随
       this._navZoomReady = true
     },
+    /** 预约导航开场瓦片预取（800ms 防抖：连续点选候选/进出预览只跑一次） */
+    _schedulePrefetch() {
+      if (this._prefetchTimer) clearTimeout(this._prefetchTimer)
+      this._prefetchTimer = setTimeout(() => { this._prefetchTimer = null; this._prefetchNavTiles() }, 800)
+    },
+    /**
+     * 导航开场瓦片预取（预览阶段跑）：进导航时视角一步跳到最大缩放，那批高级别
+     * 瓦片原先要等点了「开始导航」才开始请求 —— 这就是"进导航加载地图慢"的主体。
+     * 预览时（司机挑路线、网络空闲）以路线起点为中心，把开场视口覆盖的请求级别
+     * 瓦片+注记层用 <img> 提前拉进 HTTP 缓存：URL 由 tileUrlFromDef 按与运行时
+     * 完全相同的规则生成；天地图走同源代理，响应带 Cache-Control: max-age=30d
+     * immutable，于是进导航时 Leaflet 的同 URL 请求直接命中缓存、开场即满屏；
+     * 预取同时也在给代理的内存/磁盘缓存预热，几乎不烧配额。
+     * fire-and-forget：单张失败无影响（该瓦回落到正常在线取）。
+     */
+    _prefetchNavTiles() {
+      const st = this._navBase
+      const def = st ? baseDef(this._baseChainKey(st.idx)) : null
+      if (!def) return // D 盘离线是同源本地瓦片，必达，无需预取
+      const start = this.route.pathCoords && this.route.pathCoords[0]
+      if (!start) return
+      // 运行时请求级别（与 _mountBase 的 tileOpts 完全同式）：tileZoom 先被
+      // maxNativeZoom（视网膜屏已减 1）夹住，detectRetina 的 zoomOffset 再 +1。
+      // 顺序不能反：旧写法 min(navMaxZoom+retina1, maxNativeZoom) 在手机上算出
+      // z16，而运行时实际请求 z17，预取全部落空、开场瓦片仍是点了导航才现取。
+      const nativeCap = (def.maxNativeZoom || (def.maxZoom || 18)) - (L.Browser.retina ? 1 : 0)
+      const tileZ = Math.min(this._navMaxZoom(), nativeCap) + (L.Browser.retina ? 1 : 0)
+      // Web Mercator 瓦片坐标（3857 在线源）
+      const n = 2 ** tileZ
+      const cx = Math.floor((start[1] + 180) / 360 * n)
+      const rad = start[0] * Math.PI / 180
+      const cy = Math.floor((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * n)
+      // 开场视口瓦片数：视网膜屏瓦片按 128px 显示、普通屏 256px；封顶 7 防失控
+      const ts = L.Browser.retina ? 128 : 256
+      const nx = Math.min(7, Math.ceil(window.innerWidth / ts) + 1)
+      const ny = Math.min(7, Math.ceil(window.innerHeight / ts) + 1)
+      const sig = def.key + ':' + tileZ + ':' + cx + ':' + cy + ':' + nx + 'x' + ny
+      if (this._prefetchSig === sig) return
+      this._prefetchSig = sig
+      const hx = Math.floor(nx / 2)
+      const hy = Math.floor(ny / 2)
+      const urls = []
+      for (let dx = -hx; dx <= hx; dx++) {
+        for (let dy = -hy; dy <= hy; dy++) {
+          urls.push(tileUrlFromDef(def, cx + dx, cy + dy, tileZ))
+          if (def.annoUrl) urls.push(tileUrlFromDef({ ...def, url: def.annoUrl }, cx + dx, cy + dy, tileZ))
+        }
+      }
+      console.info('[prefetch] 导航开场底图 ' + urls.length + ' 张（z' + tileZ + ' ' + def.key + '）已预约进 HTTP 缓存')
+      urls.forEach(u => { const im = new Image(); im.decoding = 'async'; im.src = u })
+    },
     /** 车辆位置更新时的跟随（已退出导航或处于自由视角时不打扰地图）*/
     _followVehicle(pt) {
       if (!this.map || !this.navigating || !this.navFollowing || !this._navZoomReady) return
@@ -2722,7 +2861,7 @@ export default {
       await this.$nextTick()
       this.initMap()
       // 进入预览即按新视口（地图在上、面板在下）适配整条路线
-      this.$nextTick(() => { this.fitRoute(false) })
+      this.$nextTick(() => { this.fitRoute(false); this._schedulePrefetch() })
     },
     // 预览页返回首页：保留已搜索的候选路线，方便再次进入预览
     exitPreview() {
@@ -2802,6 +2941,8 @@ export default {
       this.$nextTick(() => {
         this.drawRoute()
         if (!silent) this.fitRoute(false)
+        // 预览中换选候选：路线起点可能变，重新预约预取（签名未变则自动跳过）
+        if (this.previewing) this._schedulePrefetch()
       })
     },
     // 3) 按司机所选路线开始导航（choice 贯穿导航轮询，路线不再被系统推荐强制替换）
@@ -5248,6 +5389,13 @@ export default {
 .port-label-text { position: absolute; left: 0; top: -26px; transform: translateX(-50%); white-space: nowrap;
   background: rgba(0,0,0,.78); color: #fff; font-size: 11px; font-weight: 700;
   padding: 2px 7px; border-radius: 6px; pointer-events: none; }
+/* 公水联运后续走廊节点（方案B）：与口岸标记同套路的 divIcon 常驻标签，深色底区别于公路口岸橙色标 */
+.corridor-label-wrap { background: none !important; border: none !important; }
+.corridor-dot { position: absolute; left: -5px; top: -5px; width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+.corridor-label-text { position: absolute; left: 0; top: -24px; transform: translateX(-50%); white-space: nowrap;
+  background: rgba(8,15,30,.82); color: #e2e8f0; font-size: 10.5px; font-weight: 700;
+  padding: 2px 6px; border-radius: 6px; pointer-events: none; }
 /* 「当前位置」标签：直接画在标记图标内（替代原来的 permanent Tooltip，避免其空 _map 抛异常） */
 .nav-tri-label { position: absolute; top: -20px; left: 50%; transform: translateX(-50%); white-space: nowrap;
   background: rgba(0,0,0,.78); color: #fff; font-size: 11px; font-weight: 700;

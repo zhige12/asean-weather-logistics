@@ -3,8 +3,10 @@ package com.example.aseanweatherlogistics.config;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.TimeUnit;
 
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.CacheControl;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -36,6 +38,21 @@ public class WebConfig implements WebMvcConfigurer {
     // 以前是「D 盘存在就只注册 D 盘」二选一，导致 pbf 永远 404。
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry) {
+        // 前端构建产物的缓存策略（手机 App 直连本服务加载 driver.html，非安全上下文无法注册 SW，
+        // 只能靠 HTTP 缓存头控制新旧）：
+        // - 入口 HTML / 清单 / sw.js 无 hash，必须每次回源校验（no-cache 允许 304），
+        //   否则 WebView 启发式缓存会让手机一直跑旧 JS；
+        // - /assets/** 文件名带内容 hash，内容不可变，长缓存减少手机重复拉取。
+        String distUri = Paths.get(System.getProperty("user.dir"), "frontend", "dist").toUri().toString();
+        registry.addResourceHandler(
+                        "/driver.html", "/index.html", "/sw.js",
+                        "/manifest.json", "/manifest.webmanifest")
+                .addResourceLocations(distUri)
+                .setCacheControl(CacheControl.noCache());
+        registry.addResourceHandler("/assets/**")
+                .addResourceLocations(distUri + "assets/")
+                .setCacheControl(CacheControl.maxAge(30, TimeUnit.DAYS));
+
         String configured = System.getProperty("osm.tiles.path");
         Path tilesPath = configured != null && !configured.isBlank()
                 ? Paths.get(configured)

@@ -2,6 +2,7 @@ package com.example.aseanweatherlogistics.service;
 
 import com.example.aseanweatherlogistics.util.DemoClock;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -17,6 +18,36 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class IntermodalService {
+
+    /** 越南段路网规划：仅用于取 海防→河内 的真实道路几何（水运段无路网，用策展中心线） */
+    private final RouteService routeService;
+
+    public IntermodalService(RouteService routeService) {
+        this.routeService = routeService;
+    }
+
+    /**
+     * 走廊几何策展中心线（[lat,lng]），六景起点与路网节点 LJ 同点，保证公路线与走廊线无缝相接。
+     * 平陆运河：郁江六景 → 横州（运河起点） → 马道/企石枢纽 → 钦州港区 → 出海口，约 134km。
+     */
+    private static final double[][] CANAL_PATH = {
+            {22.861506, 108.927962},  // 南宁港六景作业区码头（郁江）
+            {22.750000, 109.030000},  // 郁江中段弯道
+            {22.620000, 109.100000},  // 横州段（运河起点）
+            {22.400000, 108.990000},  // 马道枢纽
+            {22.170000, 108.860000},  // 企石枢纽（灵山东）
+            {21.970000, 108.660000},  // 青年枢纽 → 钦州城区段
+            {21.776000, 108.534000}   // 钦州港出海口
+    };
+
+    /** 北部湾海运：钦州港 → 海防港（与路网节点 HP 同点收尾），沿湾中线近似 */
+    private static final double[][] SEA_PATH = {
+            {21.776000, 108.534000},  // 钦州港码头
+            {21.350000, 108.100000},  // 出湾向东南
+            {20.980000, 107.550000},  // 湾口航道
+            {20.720000, 107.020000},  // 白藤外海进港航道
+            {20.846041, 106.691518}   // 越南海防港
+    };
 
     /** 联运段。mode: 公路/换装/运河/海运 */
     public record Leg(String mode, String from, String to, double km, double hours,
@@ -50,6 +81,78 @@ public class IntermodalService {
 
     /** 公路成本模型：元/km（18吨冷链车） */
     public static final double ROAD_COST_PER_KM = 10.0;
+
+    /** 走廊几何懒缓存：除越南段外全部静态，首次计算后复用 */
+    private volatile Map<String, Object> corridorCache;
+
+    /**
+     * 公水联运「后续走廊」几何总览（司机公路段到南宁港为止，之后的运河/海运/越南公路仅供图上预览）：
+     * 水运两段无路网，用上面策展中心线；越南公路段（海防→河内）走路网 Dijkstra 真实道路，
+     * 失败退化为 海防-海阳-河内 直线。供 GET /api/canal/corridor 使用。
+     */
+    public Map<String, Object> corridor() {
+        Map<String, Object> cached = corridorCache;
+        if (cached != null) return cached;
+        synchronized (this) {
+            if (corridorCache != null) return corridorCache;
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("type", "intermodal-corridor");
+            List<Map<String, Object>> legs = new ArrayList<>();
+            legs.add(corridorLeg("canal", "平陆运河（六景 → 钦州港）", LEGS.get(2), Arrays.asList(CANAL_PATH)));
+            legs.add(corridorLeg("sea", "北部湾海运（钦州港 → 海防港）", LEGS.get(3), Arrays.asList(SEA_PATH)));
+            legs.add(corridorLeg("road", "越南侧公路（海防港 → 河内）", LEGS.get(4), vnRoadPath()));
+            out.put("legs", legs);
+            out.put("nodes", List.of(
+                    corridorNode("南宁港六景作业区", "交接·滚装上船", new double[]{22.861506, 108.927962}, "#f39c12", "⚓"),
+                    corridorNode("钦州港", "运河转海运", new double[]{21.776000, 108.534000}, "#0ea5e9", "🛳"),
+                    corridorNode("海防港", "卸船·海关", new double[]{20.846041, 106.691518}, "#06b6d4", "⚓"),
+                    corridorNode("河内仓库", "终点（越方短驳承运）", new double[]{21.028521, 105.853742}, "#f59e0b", "🏭")
+            ));
+            Map<String, Object> handover = new LinkedHashMap<>();
+            handover.put("until", "南宁港六景作业区");
+            handover.put("note", "司机公路段仅到南宁港；后续走廊为联运总览，不参与导航播报与进度计算");
+            out.put("driverHandover", handover);
+            corridorCache = out;
+            return out;
+        }
+    }
+
+    /** 海防→河内真实道路几何；路网不可达时退化为三城直线（海阳为中继点） */
+    private List<double[]> vnRoadPath() {
+        try {
+            List<double[]> coords = routeService.planRouteFast("HP", "HN").getPathCoords();
+            if (coords != null && coords.size() > 1) return coords;
+        } catch (Exception ignored) {
+            // 演示兜底，不阻断走廊返回
+        }
+        return List.of(
+                new double[]{20.846041, 106.691518},
+                new double[]{20.940765, 106.336731},
+                new double[]{21.028521, 105.853742});
+    }
+
+    private Map<String, Object> corridorLeg(String mode, String name, Leg leg, List<double[]> path) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("mode", mode);
+        m.put("name", name);
+        m.put("from", leg.from());
+        m.put("to", leg.to());
+        m.put("km", leg.km());
+        m.put("hours", leg.hours());
+        m.put("note", leg.note());
+        m.put("path", path);
+        return m;
+    }
+
+    private Map<String, Object> corridorNode(String name, String role, double[] pos, String color, String icon) {
+        Map<String, Object> n = new LinkedHashMap<>();
+        n.put("name", name);
+        n.put("role", role);
+        n.put("pos", pos);
+        n.put("color", color);
+        n.put("icon", icon);
+        return n;
+    }
     /** 公路口岸杂费（元/次） */
     public static final double ROAD_CUSTOMS_FEE_YUAN = 500.0;
 

@@ -110,13 +110,11 @@ export default {
       // 底图4 原先是独立叠加开关，现并入循环；任何时刻只有一套底图图层在跑。
       tileSources: [
         {
-          // 天地图在线 WMTS 栅格：影像底图 img_w + 影像注记 cia_w。
-          // DataServer 端点是标准 XYZ 风格，L.tileLayer 直接可用；tk 从环境变量注入。
-          // 不设 crossOrigin：天地图未必回 CORS 头，加了反而会让 <img> 加载失败。
+          // 天地图在线栅格：影像底图 img_w + 影像注记 cia_w，走同源后端代理
+          // （/api/tianditu/...，密钥与缓存都在后端，响应带 30 天长缓存）。
           name: '天地图',
-          url: 'https://t{s}.tianditu.gov.cn/DataServer?T=img_w&x={x}&y={y}&l={z}&tk={tk}',
-          annoUrl: 'https://t{s}.tianditu.gov.cn/DataServer?T=cia_w&x={x}&y={y}&l={z}&tk={tk}',
-          subdomains: '01234567',
+          url: '/api/tianditu/img_w/{z}/{x}/{y}.png',
+          annoUrl: '/api/tianditu/cia_w/{z}/{x}/{y}.png',
           attribution: '&copy; 天地图',
           maxZoom: 18,
           // 天地图影像(img_w)在中越走廊（尤其越南境内）高层级无覆盖，>z16 会返回「200 的纯白瓦片」，
@@ -129,9 +127,8 @@ export default {
           // 底图4：天地图矢量底图 vec_w + 矢量注记 cva_w（道路分级清晰，适合看路线）。
           // 原先是「底图4 独立叠加开关」，现并入底图循环：天地图→底图4→底图5→离线(D盘)。
           name: '底图4',
-          url: 'https://t{s}.tianditu.gov.cn/DataServer?T=vec_w&x={x}&y={y}&l={z}&tk={tk}',
-          annoUrl: 'https://t{s}.tianditu.gov.cn/DataServer?T=cva_w&x={x}&y={y}&l={z}&tk={tk}',
-          subdomains: '01234567',
+          url: '/api/tianditu/vec_w/{z}/{x}/{y}.png',
+          annoUrl: '/api/tianditu/cva_w/{z}/{x}/{y}.png',
           attribution: '&copy; 天地图',
           maxZoom: 18,
           minZoom: 3
@@ -305,7 +302,10 @@ export default {
       }
 
       const tileOpts = {
-        subdomains: s.subdomains,
+        // 代理源（天地图/底图4）URL 无 {s} 占位符、源定义里没有 subdomains；但 Leaflet
+        // 铺瓦时无条件读 options.subdomains.length（_getSubdomain），显式传 undefined 会覆盖
+        // 默认值并在 mounted 阶段直接抛 TypeError，必须兜底给个占位字符串。
+        subdomains: s.subdomains || 'abc',
         attribution: s.attribution,
         maxZoom: s.maxZoom || 18,
         // 缺省不限制原生级别（=maxZoom）；天地图影像源显式给 16，超出的级别 overzoom 拉伸，避免纯白瓦片

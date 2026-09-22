@@ -25,6 +25,8 @@ function ensureStyle() {
 .rf-glow-anim { animation: rf-dash 0.9s linear infinite; }
 @keyframes rf-dash { from { stroke-dashoffset: 52; } to { stroke-dashoffset: 0; } }
 .rf-core { fill: none; stroke-linecap: round; pointer-events: none; }
+/* 主线深色描边（高德风）：比 core 宽出一圈，仅在调用方传了 casing 颜色时创建 */
+.rf-casing { fill: none; stroke-linecap: round; pointer-events: none; }
 .rf-arrow-outer {
   width: 0; height: 0; display: flex; align-items: center; justify-content: center;
   pointer-events: none;
@@ -38,6 +40,17 @@ function ensureStyle() {
   transform-origin: 50% 50%;
   will-change: transform;
 }
+/* V 形前进箭头（❯ -chevron）：导航线白色箭头用，旋转/推进逻辑与实心三角完同一套 */
+.rf-chev {
+  position: absolute;
+  width: 15px; height: 15px;
+  background: currentColor;
+  clip-path: polygon(0% 0%, 35% 0%, 100% 50%, 35% 100%, 0% 100%, 62% 50%);
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.55));
+  transform-origin: 50% 50%;
+  will-change: transform;
+}
+.rf-chev-lite { filter: drop-shadow(0 1px 2px rgba(0,0,0,0.55)); }
 .rf-arrow-pulse { animation: rf-apulse 1.15s ease-in-out infinite; }
 @keyframes rf-apulse {
   0%, 100% { opacity: 0.5; filter: drop-shadow(0 0 2px rgba(0,0,0,0.5)); }
@@ -86,7 +99,16 @@ export function createRouteFlow(map, options = {}) {
     fps: 60,
     // 轻量特效模式（移动端）：关闭箭头 drop-shadow 滤镜与脉冲/流光 CSS 动画，
     // 这些动画不受 fps 限帧约束、在手机 WebView 上是滑动掉帧主因。大屏保持 false。
-    lite: false
+    lite: false,
+    // ---- 高德风主线（均为可选，不传保持旧样式，大屏不受影响）----
+    // 描边色：段未自带 casing 时用这个；传了才画 casing 层
+    casing: null,
+    // casing 比 core 宽的像素数（两侧合计）
+    casingBorder: 6,
+    // 箭头形状：'solid' 实心三角（默认）/ 'chevron' V 形前进箭头
+    arrowShape: 'solid',
+    // 箭头颜色：默认跟随段色；导航线传 '#fff' 用白色箭头
+    arrowColor: null
   }, options);
 
   // 流光/呼吸动画靠 SVG className 的 CSS keyframes 驱动，地图开 preferCanvas 后
@@ -114,20 +136,22 @@ export function createRouteFlow(map, options = {}) {
   let endMarker = null;
 
   function makeArrow() {
+    const shape = opts.arrowShape === 'chevron' ? 'rf-chev' : 'rf-arrow';
     const icon = L.divIcon({
       className: 'rf-arrow-outer',
       // 轻量模式：去掉 rf-arrow-pulse（filter/opacity 关键帧动画），配合 .rf-arrow-lite 关闭 drop-shadow
-      html: lite ? '<div class="rf-arrow rf-arrow-lite"></div>' : '<div class="rf-arrow rf-arrow-pulse"></div>',
+      html: lite ? `<div class="${shape} ${shape}-lite"></div>` : `<div class="${shape} rf-arrow-pulse"></div>`,
       iconSize: [0, 0]
     });
     const marker = L.marker([0, 0], { icon, pane: opts.pane, interactive: false, keyboard: false });
     return { marker, el: null };
   }
 
-  /** 为一段几何创建三层线 + 累计距离表 */
-  function makeTrack(segColor, pts) {
+  /** 为一段几何创建描边+三层线 + 累计距离表；casingColor 为空则不画描边（旧样式） */
+  function makeTrack(segColor, pts, casingColor) {
     const t = {
       color: segColor,
+      casingColor: casingColor || opts.casing || null,
       pts,
       cum: [0],
       total: 0,
@@ -163,6 +187,18 @@ export function createRouteFlow(map, options = {}) {
         interactive: false
       })
     };
+    if (t.casingColor) {
+      // 插在 core 之下（addLayers 顺序控制层级）、手势期不隐藏：它就是主线轮廓的一部分
+      t.casing = L.polyline(pts, {
+        color: t.casingColor,
+        weight: opts.coreWidth + opts.casingBorder,
+        opacity: 0.95,
+        className: 'rf-casing',
+        pane: opts.pane,
+        renderer: flowRenderer,
+        interactive: false
+      });
+    }
     for (let i = 1; i < pts.length; i++) {
       t.total += map.distance(L.latLng(pts[i - 1]), L.latLng(pts[i]));
       t.cum.push(t.total);
@@ -174,6 +210,7 @@ export function createRouteFlow(map, options = {}) {
     t.arrows.forEach(a => { try { map.removeLayer(a.marker); } catch (e) {} });
     t.arrows = [];
     if (t.outer._map) map.removeLayer(t.outer);
+    if (t.casing && t.casing._map) map.removeLayer(t.casing);
     if (t.glow._map) map.removeLayer(t.glow);
     if (t.core._map) map.removeLayer(t.core);
   }
@@ -231,7 +268,7 @@ export function createRouteFlow(map, options = {}) {
     t.spacingM = n > 0 ? t.total / n : 0;
     t.arrows.forEach(a => {
       if (!a.el) a.el = a.marker.getElement() && a.marker.getElement().firstChild;
-      if (a.el) a.el.style.color = t.color;
+      if (a.el) a.el.style.color = opts.arrowColor || t.color;
     });
   }
 
@@ -354,6 +391,8 @@ export function createRouteFlow(map, options = {}) {
   function addLayers() {
     tracks.forEach(t => {
       if (!t.outer._map) t.outer.addTo(map);
+      // 层级：外发光 → 描边 → 流光带 → 核心线（后加在上）
+      if (t.casing && !t.casing._map) t.casing.addTo(map);
       if (!t.glow._map) t.glow.addTo(map);
       if (!t.core._map) t.core.addTo(map);
     });
@@ -366,6 +405,7 @@ export function createRouteFlow(map, options = {}) {
     const segs = (segments || [])
       .map(s => ({
         color: (s && s.color) || color,
+        casing: (s && s.casing) || opts.casing || null,
         pts: ((s && s.latlngs) || []).filter(p => p && p.length >= 2)
       }))
       .filter(s => s.pts.length >= 2);
@@ -373,7 +413,7 @@ export function createRouteFlow(map, options = {}) {
       stop();
       return;
     }
-    tracks = segs.map(s => makeTrack(s.color, s.pts));
+    tracks = segs.map(s => makeTrack(s.color, s.pts, s.casing));
     addLayers();
     layout();
     updateEndpoints();
@@ -442,7 +482,7 @@ export function createRouteFlow(map, options = {}) {
      */
     bringToFront() {
       tracks.forEach(t => {
-        [t.outer, t.glow, t.core].forEach(l => {
+        [t.outer, t.casing, t.glow, t.core].forEach(l => {
           try { if (l && l._map && l.bringToFront) l.bringToFront(); } catch (e) { /* 已移除 */ }
         });
         t.arrows.forEach(a => {
