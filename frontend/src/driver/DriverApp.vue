@@ -95,7 +95,10 @@
       <!-- 宫格快捷入口（物流功能） -->
       <div v-show="!homeSearchOpen" class="hm-grid">
         <button v-for="g in homeGrid" :key="g.key" class="hm-grid-item" @click="onHomeGrid(g.key)">
-          <span class="hm-grid-ico" :style="{ background: g.color }">{{ g.icon }}</span>
+          <span class="hm-grid-ico" :style="{ color: g.color }">
+            <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"
+                 stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" v-html="g.svg"></svg>
+          </span>
           <span class="hm-grid-label">{{ g.label }}</span>
         </button>
       </div>
@@ -957,14 +960,21 @@ export default {
     originName() { return NODE_NAMES[this.resolvedOriginId] || this.originId },
     /** 首页是否可见（非预览/非导航）：控制首页概览地图的建/销 */
     homeVisible() { return !this.navigating && !this.previewing },
-    /** 首页宫格快捷入口（物流功能） */
+    /** 首页宫格快捷入口（物流功能）
+     *  演示用克制配色：白磨砂圆底 + 细线 SVG 图标（24 视窗 stroke 风），
+     *  图标线条统一走浅蓝/浅绿清新系，文字用亮蓝（见 .hm-grid-label） */
     homeGrid() {
       return [
-        { key: 'task', icon: '📋', label: '物流任务', color: '#22c55e' },
-        { key: 'alert', icon: '⚠️', label: '风险预警', color: '#22c55e' },
-        { key: 'plans', icon: '🧠', label: 'AI方案', color: '#3b82f6' },
-        { key: 'kb', icon: '📚', label: '知识库', color: '#a855f7' },
-        { key: 'me', icon: '🚛', label: '我的车辆', color: '#ec4899' }
+        { key: 'task', label: '物流任务', color: '#5ab4f0',
+          svg: '<rect x="8.2" y="3" width="7.6" height="3.6" rx="1.2"/><path d="M15.8 4.8H17a2 2 0 0 1 2 2v11.4a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6.8a2 2 0 0 1 2-2h1.2"/><path d="M8.8 11.2h6.4M8.8 14.6h4.6"/>' },
+        { key: 'alert', label: '风险预警', color: '#57d0a5',
+          svg: '<path d="M12 4.6 20.6 19.4H3.4Z"/><path d="M12 10v4.2"/><path d="M12 17.1h.01"/>' },
+        { key: 'plans', label: 'AI方案', color: '#7cc4f5',
+          svg: '<path d="M11 4.2 12.7 9 17.5 10.7 12.7 12.4 11 17.2 9.3 12.4 4.5 10.7 9.3 9Z"/><path d="M17.6 14.4 18.4 16.6 20.6 17.4 18.4 18.2 17.6 20.4 16.8 18.2 14.6 17.4 16.8 16.6Z"/>' },
+        { key: 'kb', label: '知识库', color: '#7fdca0',
+          svg: '<path d="M12 6.6C10.6 5.2 8.7 4.7 5.2 4.7v12.6c3.5 0 5.4.5 6.8 1.9 1.4-1.4 3.3-1.9 6.8-1.9V4.7c-3.5 0-5.4.5-6.8 1.9Z"/><path d="M12 6.6v12.6"/>' },
+        { key: 'me', label: '我的车辆', color: '#66bdf2',
+          svg: '<path d="M3 6.8h10.4v8.4H3z"/><path d="M13.4 9.6H17l3 3.4v2.2h-6.6"/><circle cx="7" cy="17.4" r="1.6"/><circle cx="16.4" cy="17.4" r="1.6"/>' }
       ]
     },
     /** 首页底部胶囊 Tab */
@@ -1765,7 +1775,12 @@ export default {
         // 并在建图阶段直接抛 TypeError，必须兜底给个占位字符串。
         subdomains: def.subdomains || 'abc',
         attribution: def.attribution,
-        maxZoom: def.maxZoom || 18,
+        // detectRetina 在初始化时会把本层 maxZoom 偷偷减 1（TileLayer.initialize），
+        // 而地图 maxZoom 仍是 def.maxZoom → 手机放到最大级时 tileZoom > 层 maxZoom，
+        // Leaflet _setView 直接把 tileZoom 置 undefined、一张瓦都不铺 → 整屏白底
+        // （即“放到最大白屏、缩小一点就恢复”；zoomToNav 开场自动拉到最大级同理）。
+        // 视网膜屏在这里补回 +1，被减后恰好落在源最大级，最大级由 maxNativeZoom overzoom 铺瓦。
+        maxZoom: (def.maxZoom || 18) + (L.Browser.retina ? 1 : 0),
         // 天地图影像 img_w 中越走廊 >z16 无覆盖（实测 z17/z18 不同坐标全回同一张 4.7KB
         // 的 200 纯白瓦片）；矢量源无此限制，def 未给 maxNativeZoom 时回落到 maxZoom。
         // 视网膜屏要再减 1：detectRetina 的 zoomOffset=+1 是加在**被 maxNativeZoom 夹过
@@ -4978,8 +4993,8 @@ export default {
 .hm-close { border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 10px; padding: 0 14px; cursor: pointer; }
 .hm-grid { position: absolute; left: 12px; right: 12px; bottom: 150px; z-index: 5; display: flex; justify-content: space-between; gap: 6px; }
 .hm-grid-item { flex: 1; border: none; background: transparent; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; }
-.hm-grid-ico { width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #fff; box-shadow: 0 3px 10px rgba(0,0,0,.18); }
-.hm-grid-label { font-size: 12px; color: #1e293b; text-shadow: 0 1px 2px rgba(255,255,255,.6); }
+.hm-grid-ico { width: 46px; height: 46px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.93); border: 1px solid rgba(15,23,42,.07); box-shadow: 0 2px 8px rgba(15,23,42,.14); }
+.hm-grid-label { font-size: 11px; color: #3ec7ff; font-weight: 500; letter-spacing: .5px; text-shadow: 0 1px 4px rgba(0,20,50,.65); }
 .hm-gocard { position: absolute; left: 12px; right: 12px; bottom: 84px; z-index: 5; display: flex; align-items: center; gap: 12px; background: #fff; border-radius: 16px; padding: 12px 14px; box-shadow: 0 4px 18px rgba(0,0,0,.15); }
 .hm-go-ico { width: 40px; height: 40px; border-radius: 10px; background: #e3f2fd; display: flex; align-items: center; justify-content: center; font-size: 20px; }
 .hm-go-info { flex: 1; }
