@@ -38,8 +38,22 @@ public class TransportTask {
     private String destinationId;
     /** 要求送达时限（展示文案） */
     private String deadline;
-    /** DISPATCHED=已派单待接单 / ACCEPTED=司机已接单 */
+    /**
+     * 调度员在派单前选定并下发的路线（recommended 推荐 / alternate 备选 / fastest 最快）。
+     * 司机「确认接单」后按此 choice 自动进入导航，路线不再由司机自选。
+     */
+    private String routeChoice;
+    /** 选定路线的展示名称（如「推荐路线 · 走友谊关」） */
+    private String routeLabel;
+    /** 选定路线摘要：途经 / 耗时 / 里程（司机预览订单时展示） */
+    private String routeSummary;
+    /** 选定路线的 AI 灾害概率（0-100，-1 表示未预测） */
+    private Integer hazardProbability;
+    /** 派单前那次「结合当前气象」的 AI 分析文案（快照，随单下发给司机） */
+    private String aiAnalysis;
+    /** DISPATCHED=已派单待接单 / ACCEPTED=司机已接单 / REJECTED=司机已拒单 */
     private String status;
     private Long dispatchedAt;
     private Long acceptedAt;
+    private Long rejectedAt;
 }

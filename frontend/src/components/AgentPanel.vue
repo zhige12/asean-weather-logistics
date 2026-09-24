@@ -2,6 +2,9 @@
   <section class="card agent-card">
     <h3>
       AI 决策分析 · 多智能体协同
+      <span v-if="triggerTag" class="route-state trigger-tag" :class="trigger === 'hazard' ? 'warn' : ''">
+        {{ triggerTag }}
+      </span>
       <span v-if="result" class="route-state" :class="result.aiPowered ? 'ok' : ''">
         {{ result.cacheHit ? "⚡ 预生成缓存" : result.aiPowered ? "本地大模型" : "规则模板" }}
       </span>
@@ -178,6 +181,47 @@
         <div class="recommend-box">💡 {{ result.recommendation }}</div>
       </div>
 
+      <!-- 开始导航模板（常态）：AI 决策分析下的多条路线，选一条派单给司机 -->
+      <div v-if="!isReroute && dispatchCandidates.length" class="block">
+        <div class="block-title">📋 开始导航派单 · 从以下路线选一条派给司机</div>
+        <div class="dcand-list">
+          <label
+            v-for="c in dispatchCandidates"
+            :key="c.key"
+            class="dcand-row"
+            :class="{ sel: c.key === dispatchSelected }"
+          >
+            <input type="radio" name="agent-dispatch-route" :value="c.key" v-model="dispatchSelected" />
+            <span class="dcand-radio" :class="{ on: c.key === dispatchSelected }"></span>
+            <span class="dcand-body">
+              <span class="dcand-title">
+                {{ c.label }}
+                <span v-if="c.key === 'recommended'" class="rec-tag">推荐</span>
+              </span>
+              <span class="dcand-via">{{ viaText(c) }}</span>
+              <span class="dcand-meta">
+                ⏱ {{ c.hours }}h · 📏 {{ c.distanceKm }}km ·
+                {{ c.riskCount > 0 ? "⚠ " + c.riskCount + " 风险" : "✓ 无风险" }}
+              </span>
+            </span>
+            <span
+              class="risk-chip"
+              :class="c.hazardProbability >= 0 ? 'risk-' + probKey(c.hazardProbability) : ''"
+            >
+              {{ c.hazardProbability >= 0 ? c.hazardProbability + "%" : "暂无" }}
+            </span>
+          </label>
+        </div>
+        <div class="row dispatch-row">
+          <button class="btn confirm" :disabled="dispatching || !dispatchSelected" @click="dispatchToDriver">
+            {{ dispatching ? "派单中…" : "✅ 确认选择此路线并派单给司机" }}
+          </button>
+        </div>
+        <div class="muted dispatch-hint">
+          派单后司机端自动切物流任务模式：预览订单（货物/重量/起终点/路线/AI 分析）→ 确认接单按选定路线自动导航，或拒单退回普通导航。
+        </div>
+      </div>
+
       <!-- 触达预览 -->
       <div class="block">
         <div class="block-title">🟡 触达智能体 · 角色专属指令（{{ result.outreachPreview?.count || 0 }} 个角色）</div>
@@ -189,13 +233,13 @@
         </div>
       </div>
 
-      <!-- 调度决策：确认方案 → 下发任务变更 -->
-      <div class="row dispatch-row">
+      <!-- 调度决策（改路线模板）：确认方案 → 下发任务变更 -->
+      <div v-if="isReroute" class="row dispatch-row">
         <button class="btn confirm" :disabled="dispatching || !selectedPlan || stale" @click="dispatch">
           {{ dispatching ? "下发中…" : stale ? "⏳ 等待新分析结果…" : "✅ 确认切换方案" + (selectedPlan || "") + " · 下发任务变更指令" }}
         </button>
       </div>
-      <div class="muted dispatch-hint">
+      <div v-if="isReroute" class="muted dispatch-hint">
         司机收到的是执行指令和权益保障包，不是"你想走公路还是水运"——切换运输方式是调度端的决策权限。
       </div>
     </template>
@@ -206,7 +250,7 @@
 import { computed, ref } from "vue";
 import axios from "axios";
 
-const emit = defineEmits(["dispatched"]);
+const emit = defineEmits(["dispatched", "dispatch-task"]);
 
 const props = defineProps({
   originId: { type: String, default: "NN" },
@@ -217,9 +261,19 @@ const running = ref(false);
 const dispatching = ref(false);
 const result = ref(null);
 const selectedPlan = ref("");
+// 本次分析的触发来源：normal=派单前常态 / hazard=灾害触发重算 / manual=手动
+const trigger = ref("manual");
+const triggerTag = computed(() => {
+  if (trigger.value === "normal") return "📋 派单前 · 常态分析";
+  if (trigger.value === "hazard") return "⚠️ 灾害触发 · 熔断重算";
+  return "";
+});
 // 风险变化后旧结果立即标记过期（不再展示旧推荐），并自动重算新方案
 const stale = ref(false);
 const rerunPending = ref(false);
+// 开始导航模板：供调度员比选并派单的多路线候选（含逐条灾害概率）
+const dispatchCandidates = ref([]);
+const dispatchSelected = ref("");
 
 // 三智能体实时状态（SSE agent-status 事件驱动 + 结果回填）
 const agentFlow = ref([
@@ -300,8 +354,9 @@ function fmtNum(v) {
   return v == null ? "-" : Number(v).toLocaleString();
 }
 
-async function runAnalysis(useCache) {
+async function runAnalysis(useCache, triggerSource) {
   running.value = true;
+  trigger.value = triggerSource || "manual";
   resetAgentFlow();
   try {
     const params = { originId: props.originId, destinationId: props.destinationId };
@@ -322,6 +377,12 @@ async function runAnalysis(useCache) {
     });
     // 默认选中推荐方案
     selectedPlan.value = recommendedId.value;
+    // 常态（开始导航）模板：同步拉多路线候选供比选派单；改路线模板不需要
+    if (data.analysisMode === "reroute") {
+      dispatchCandidates.value = [];
+    } else {
+      loadDispatchCandidates();
+    }
   } catch (e) {
     console.error("agent analysis failed", e);
     agentFlow.value.forEach((n) => {
@@ -331,8 +392,10 @@ async function runAnalysis(useCache) {
     running.value = false;
     // 推理期间又有新的风险注入 → 结果一出就立即再算一轮
     if (rerunPending.value) {
+      const t = rerunTrigger.value;
       rerunPending.value = false;
-      runAnalysis(false);
+      rerunTrigger.value = "manual";
+      runAnalysis(false, t);
     }
   }
 }
@@ -371,23 +434,71 @@ async function dispatch() {
   }
 }
 
+/** 开始导航模板：拉多路线候选（逐条结合实时气象的灾害概率），供调度员比选后派单 */
+async function loadDispatchCandidates() {
+  dispatchCandidates.value = [];
+  dispatchSelected.value = "";
+  try {
+    const { data } = await axios.get("/api/route/candidates", {
+      params: { originId: props.originId, destinationId: props.destinationId, cargoType: "cold" },
+      timeout: 30000,
+    });
+    const list = (data && data.candidates) || [];
+    dispatchCandidates.value = list;
+    // 默认选中推荐路线（无则选灾害概率最低的一条）
+    const withProb = list.filter((c) => c.hazardProbability >= 0);
+    const def = list.find((c) => c.key === "recommended")
+      || (withProb.length ? withProb.reduce((a, b) => (a.hazardProbability <= b.hazardProbability ? a : b)) : list[0]);
+    dispatchSelected.value = def ? def.key : "";
+  } catch (e) {
+    console.error("dispatch candidates failed", e);
+  }
+}
+
+function viaText(c) {
+  return Array.isArray(c.via) ? c.via.join(" → ") : (c.via || "");
+}
+function probKey(p) {
+  if (p >= 60) return "high";
+  if (p >= 30) return "mid";
+  return "low";
+}
+
+/** 开始导航派单：把选定路线快照 + 本次 AI 分析递上去，由父组件合并订单信息后调 /api/task/dispatch */
+function dispatchToDriver() {
+  const c = dispatchCandidates.value.find((x) => x.key === dispatchSelected.value);
+  if (!c) return;
+  const aiText = (result.value?.recommendation || "")
+    + (c.hazardReason ? ` 本线风险：${c.hazardReason}` : "");
+  emit("dispatch-task", {
+    route: {
+      routeChoice: c.key,
+      routeLabel: c.label,
+      routeSummary: `${viaText(c)} · ${c.hours}h · ${c.distanceKm}km`,
+      hazardProbability: c.hazardProbability >= 0 ? c.hazardProbability : -1,
+      aiAnalysis: aiText,
+    },
+  });
+}
+
 /**
- * 风险状态变化（场景注入/清除、沙盘雨量调整、水运禁航等）时由父组件调用：
- * 已有结果立即标记过期（界面上不再信任旧推荐），并自动重新计算新方案（防抖 1.2s）。
- * 正在推理则只排队，本轮结束后自动再算一轮。
+ * 风险状态变化（场景注入/清除、沙盘雨量调整、水运禁航、灾害推送等）时由父组件调用：
+ * 已有结果立即标记过期（界面上不再信任旧推荐），并马上重新计算新方案（防抖 0.3s）。
+ * 即使还没分析过也会触发（灾害一来就出熔断重算版），正在推理则只排队，本轮结束后自动再算一轮。
  */
 let staleTimer = null;
+const rerunTrigger = ref("manual");
 function notifyRiskChanged() {
-  if (!result.value && !running.value) return; // 还没分析过就不打扰
   stale.value = true;
   if (staleTimer) clearTimeout(staleTimer);
   staleTimer = setTimeout(() => {
     if (running.value) {
       rerunPending.value = true;
+      rerunTrigger.value = "hazard";
       return;
     }
-    runAnalysis(false);
-  }, 1200);
+    runAnalysis(false, "hazard");
+  }, 300);
 }
 
 defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
@@ -400,6 +511,13 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
 .agent-hint {
   font-size: 11px;
   margin-bottom: 10px;
+}
+.trigger-tag {
+  margin-right: 4px;
+}
+.trigger-tag.warn {
+  background: rgba(217, 119, 6, 0.16);
+  color: #d97706;
 }
 .agent-flow {
   display: flex;
@@ -802,5 +920,65 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
   font-size: 11px;
   margin-top: 6px;
   line-height: 1.6;
+}
+.dcand-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dcand-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(30, 50, 90, 0.16);
+  border-radius: 9px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.6);
+  transition: border-color 0.15s, background 0.15s;
+}
+.dcand-row.sel {
+  border-color: rgba(79, 109, 245, 0.6);
+  background: rgba(79, 109, 245, 0.08);
+}
+.dcand-row input {
+  display: none;
+}
+.dcand-radio {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(30, 50, 90, 0.3);
+  flex: 0 0 auto;
+}
+.dcand-radio.on {
+  border-color: #4f6df5;
+  background: radial-gradient(circle, #4f6df5 40%, transparent 45%);
+}
+.dcand-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.dcand-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1c2a44;
+}
+.dcand-via {
+  font-size: 10px;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dcand-meta {
+  font-size: 10px;
+  color: #5b6b85;
 }
 </style>

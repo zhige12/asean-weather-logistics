@@ -170,7 +170,7 @@ public class WeatherController {
         try {
             forecasts = deepseekService.queryForecastForPoints(points);
         } catch (Exception e) {
-            return Map.of("status", "error", "message", "Deepseek query failed: " + e.getMessage());
+            return Map.of("status", "error", "message", "AI 预测查询失败: " + e.getMessage());
         }
 
         // map forecasts to nearest edge in sample graph and inject
@@ -202,7 +202,7 @@ public class WeatherController {
             }
             // threshold (e.g., 100 km) to consider applying
             if (nearestEdgeId != null && bestDist < 200.0) {
-                RiskSegment rs = new RiskSegment(nearestEdgeId, "Deepseek forecast", "HIGH", penalty);
+                RiskSegment rs = new RiskSegment(nearestEdgeId, "AI 预报", "HIGH", penalty);
                 weatherSimulator.injectRisk(rs);
                 injected++;
             }

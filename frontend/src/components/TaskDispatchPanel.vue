@@ -5,8 +5,8 @@
       <span class="task-state" :class="stateClass">{{ stateText }}</span>
     </h3>
     <div class="muted note">
-      派单后司机端自动从「普通导航模式」切到「物流任务模式」，
-      车牌、货物、起终点以派单为准，司机不再手填。
+      派单分两步：先填单并触发开始导航前的 AI 气象决策分析（「AI 决策分析」面板会给出多条路线与六维对比），
+      再在该面板的『开始导航派单』模板里选一条路线派单给司机；司机端收到后可预览订单、接单自动按选定路线导航或拒单退回普通导航。
     </div>
 
     <div class="form-grid">
@@ -42,11 +42,22 @@
       </label>
     </div>
 
+    <!-- 触发出车前 AI 气象分析：路线比选与派单入口在「AI 决策分析」面板 -->
     <div class="row actions">
-      <button class="btn primary" :disabled="busy" @click="dispatch">
-        {{ busy ? "派单中…" : "📋 派单给司机" }}
-      </button>
+      <button class="btn primary" @click="analyze">🔍 AI 气象分析并规划路线</button>
       <button v-if="task" class="btn outline" :disabled="busy" @click="reset">撤销派单</button>
+    </div>
+
+    <!-- 分析已触发：路线比选与派单入口在「AI 决策分析」面板的『开始导航派单』模板里 -->
+    <div v-if="analyzed" class="analyze-box">
+      <div class="analyze-head">
+        <span>🌦 出车前 AI 气象分析已触发</span>
+        <span class="muted od-tag">{{ form.originId }} → {{ form.destinationId }}</span>
+      </div>
+      <div class="analyze-summary">
+        多路线候选与六维对比已生成在「AI 决策分析 · 多智能体协同」面板。
+        请在其中『开始导航派单』模板里选一条路线，点击「确认选择此路线并派单给司机」。
+      </div>
     </div>
 
     <div v-if="task" class="task-detail">
@@ -57,8 +68,11 @@
       <div class="detail-line muted">
         {{ task.originId }} → {{ task.destinationId }} · 时限 {{ task.deadline }}
       </div>
-      <div class="detail-line" :class="task.status === 'ACCEPTED' ? 'ok' : 'wait'">
-        {{ task.status === "ACCEPTED" ? "✅ 司机已接单" : "⏳ 已派单，等待司机接单" }}
+      <div v-if="task.routeLabel" class="detail-line muted">
+        已下发路线：{{ task.routeLabel }}<span v-if="task.hazardProbability >= 0"> · 灾害概率 {{ task.hazardProbability }}%</span>
+      </div>
+      <div class="detail-line" :class="statusClass">
+        {{ statusLine }}
         · 越方接力司机 {{ task.driverNameVn }}
       </div>
     </div>
@@ -73,7 +87,7 @@ const props = defineProps({
   // 由 App.vue 经 SSE（task-assigned）实时传入；null 表示尚未取到
   taskStatus: { type: Object, default: null },
 });
-const emit = defineEmits(["refresh"]);
+const emit = defineEmits(["refresh", "analyze"]);
 
 // 面板可选起终点：只列演示确定存在的节点，避免编造路网 ID
 const nodes = [
@@ -94,16 +108,35 @@ const form = reactive({
 const cargoTypes = ref({ DRAGON_FRUIT: { name: "冷链火龙果" }, ELECTRONICS: { name: "电子元件" } });
 const busy = ref(false);
 const localTask = ref(null);
+// 是否已触发出车前 AI 分析（触发后提示路线比选与派单入口）
+const analyzed = ref(false);
 
 // 本地兜底 + 父组件 SSE 推送，两者取先到者
 const task = computed(() => props.taskStatus?.task || localTask.value);
 const stateText = computed(() => {
   if (!task.value) return "未派单 · 司机端为普通导航模式";
-  return task.value.status === "ACCEPTED" ? "已接单" : "已派单 · 待接单";
+  if (task.value.status === "ACCEPTED") return "已接单";
+  if (task.value.status === "REJECTED") return "司机已拒单";
+  return "已派单 · 待接单";
 });
 const stateClass = computed(() => {
   if (!task.value) return "";
-  return task.value.status === "ACCEPTED" ? "ok" : "wait";
+  if (task.value.status === "ACCEPTED") return "ok";
+  if (task.value.status === "REJECTED") return "bad";
+  return "wait";
+});
+// 任务详情区的状态行（含拒单）
+const statusLine = computed(() => {
+  const s = task.value?.status;
+  if (s === "ACCEPTED") return "✅ 司机已接单";
+  if (s === "REJECTED") return "❌ 司机已拒单，可改派或撤销";
+  return "⏳ 已派单，等待司机接单";
+});
+const statusClass = computed(() => {
+  const s = task.value?.status;
+  if (s === "ACCEPTED") return "ok";
+  if (s === "REJECTED") return "bad";
+  return "wait";
 });
 
 async function loadConfig() {
@@ -124,17 +157,11 @@ async function refresh() {
   }
 }
 
-async function dispatch() {
-  busy.value = true;
-  try {
-    const { data } = await axios.post("/api/task/dispatch", { ...form });
-    localTask.value = data?.task || null;
-    emit("refresh", data);
-  } catch (e) {
-    console.error("task dispatch failed", e);
-  } finally {
-    busy.value = false;
-  }
+// 触发出车前 AI 分析：多智能体链路（常态模板）在「AI 决策分析」面板完成，
+// 路线比选与派单入口也在那里；这里只把订单信息递上去
+function analyze() {
+  emit("analyze", { ...form });
+  analyzed.value = true;
 }
 
 async function reset() {
@@ -183,6 +210,36 @@ defineExpose({ refresh });
   background: rgba(22, 163, 74, 0.18);
   color: #16a34a;
 }
+.task-state.bad {
+  background: rgba(220, 38, 38, 0.16);
+  color: #dc2626;
+}
+.analyze-box {
+  margin-top: 4px;
+}
+.analyze-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: #33415c;
+  margin-bottom: 6px;
+}
+.od-tag {
+  font-weight: 400;
+  font-size: 11px;
+}
+.analyze-summary {
+  font-size: 11px;
+  line-height: 1.7;
+  color: #475569;
+  background: rgba(79, 109, 245, 0.07);
+  border: 1px solid rgba(79, 109, 245, 0.18);
+  border-radius: 8px;
+  padding: 7px 9px;
+  margin-bottom: 8px;
+}
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -225,6 +282,10 @@ defineExpose({ refresh });
 }
 .detail-line.wait {
   color: #d97706;
+  font-weight: 600;
+}
+.detail-line.bad {
+  color: #dc2626;
   font-weight: 600;
 }
 </style>

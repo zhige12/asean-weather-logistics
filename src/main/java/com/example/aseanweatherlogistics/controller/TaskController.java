@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
  * - POST /api/task/dispatch  公司派单 → SSE 广播 task-assigned，司机端自动切物流任务模式
  * - GET  /api/task/current   司机端启动/重连拉取当前任务（无任务则保持普通导航模式）
  * - POST /api/task/accept    司机接单确认
+ * - POST /api/task/reject    司机拒单（退回普通导航模式）
  * - POST /api/task/reset     演示复位，撤销任务
  */
 @RestController
@@ -41,6 +42,13 @@ public class TaskController {
         String taskId = body != null && body.get("taskId") instanceof String s ? s : null;
         String driverName = body != null && body.get("driverName") instanceof String s ? s : null;
         return taskService.accept(taskId, driverName);
+    }
+
+    @PostMapping("/reject")
+    public Map<String, Object> reject(@RequestBody(required = false) Map<String, Object> body) {
+        String taskId = body != null && body.get("taskId") instanceof String s ? s : null;
+        String driverName = body != null && body.get("driverName") instanceof String s ? s : null;
+        return taskService.reject(taskId, driverName);
     }
 
     @PostMapping("/reset")

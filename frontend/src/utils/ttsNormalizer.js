@@ -232,7 +232,7 @@ function convertDatesVi(text) {
 const EN_TO_ZH = {
   'TIR': '国际运输许可证', 'ETA': '预计到达时间', 'GPS': '卫星定位',
   'SOS': '紧急求救', 'Agent': '智能助手', 'agent': '智能助手',
-  'AI': '人工智能', 'RAG': '知识检索增强', 'DeepSeek': '深度求索',
+  'AI': '人工智能', 'RAG': '知识检索增强',
 };
 
 /** 英文字母 → 中文拼音读法（用于逐字母读出未知缩写，如 DKNN → 迪凯恩恩） */

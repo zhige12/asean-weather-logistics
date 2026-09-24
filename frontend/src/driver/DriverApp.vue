@@ -9,8 +9,22 @@
       <div class="hm-ctrl">
         <button class="hm-ctrl-btn" title="放大" @click="homeZoom(1)">＋</button>
         <button class="hm-ctrl-btn" title="缩小" @click="homeZoom(-1)">－</button>
-        <button class="hm-ctrl-btn" title="回到网络中心" @click="homeLocate()">📍</button>
+        <!-- 图钉用内联 SVG：📍 emoji 在 Android WebView 上渲染成圆头“棒棒糖”样式，跨平台不一致 -->
+        <button class="hm-ctrl-btn" title="回到网络中心" @click="homeLocate()">
+          <svg class="pin-ico" viewBox="0 0 24 24" aria-hidden="true">
+            <path fill-rule="evenodd" d="M12 2a7.5 7.5 0 0 0-7.5 7.5c0 5.1 6.1 11.5 7.1 12.4a.57.57 0 0 0 .8 0c1-.9 7.1-7.3 7.1-12.4A7.5 7.5 0 0 0 12 2Zm0 5.6a2.4 2.4 0 1 0 0 4.8 2.4 2.4 0 0 0 0-4.8Z"/>
+          </svg>
+        </button>
         <button class="hm-ctrl-btn base-btn" title="切换底图" @click="cycleBase">{{ baseName }}</button>
+        <!-- 桌面端专属：一键浏览器全屏（演示大屏态）；手机端不显示 -->
+        <button v-if="isDesktop" class="hm-ctrl-btn fs-btn" :title="isFullscreen ? '退出全屏' : '全屏显示'" @click="toggleFullscreen">
+          <svg v-if="!isFullscreen" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>
+          </svg>
+          <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>
+          </svg>
+        </button>
       </div>
 
       <!-- 模式 / 路线状态浮标 -->
@@ -19,10 +33,8 @@
         <template v-if="mode === 'LOGISTICS'">
           <span class="strip-dot"></span>
           <span class="strip-text">{{ statusText }}</span>
-          <button v-if="task && task.status !== 'ACCEPTED'" class="mode-act accept" :disabled="taskAccepting" @click="acceptTask">
-            {{ taskAccepting ? '接单中…' : '确认接单' }}
-          </button>
-          <span v-else class="mode-act done">已接单</span>
+          <button class="mode-act preview" @click="showOrderDetail = true">📋 预览订单</button>
+          <span v-if="task && task.status === 'ACCEPTED'" class="mode-act done">已接单</span>
           <span class="mode-act-exit" @click="exitLogisticsMode">退出</span>
         </template>
         <span v-else class="mode-hint">免费导航 · 天气与口岸提醒</span>
@@ -228,7 +240,7 @@
                   <button class="refresh" @click="buildWarning" :disabled="warningLoading">{{ warningLoading ? '生成中…' : '生成预警' }}</button>
                 </div>
                 <div v-if="warning" class="warning-box">{{ warning }}</div>
-                <div v-else class="empty">点击生成 DeepSeek 中越双语预警</div>
+                <div v-else class="empty">点击生成 AI 中越双语预警</div>
               </section>
               <section class="card">
                 <div class="card-head"><span>当前风险清单</span><span class="count">{{ risks.length }}</span></div>
@@ -294,6 +306,45 @@
             </div>
         </div>
       </div>
+
+      <!-- 订单详情预览弹层：收到派单后查看订单信息 → 确认接单 / 拒绝此单 -->
+      <transition name="fade">
+        <div v-if="showOrderDetail && task" class="kb-overlay" @click.self="showOrderDetail = false">
+          <div class="kb-panel order-panel">
+            <div class="kb-head">订单信息 <span class="kb-close" @click="showOrderDetail = false">✕</span></div>
+            <div class="order-state" :class="task.status === 'ACCEPTED' ? 'ok' : (task.status === 'REJECTED' ? 'bad' : 'wait')">
+              {{ task.status === 'ACCEPTED' ? '✅ 已接单' : (task.status === 'REJECTED' ? '❌ 已拒单' : '⏳ 待接单') }}
+              · {{ task.taskId }}
+            </div>
+            <div class="order-cargo">
+              <span class="oc-ico">📦</span>
+              <div class="oc-main">
+                <div class="oc-name">{{ task.cargoName }}</div>
+                <div class="oc-sub">{{ task.weightT }} 吨 · {{ task.temp }}</div>
+              </div>
+            </div>
+            <div class="order-od">
+              <div class="ood-row"><span class="ood-dot from"></span><span class="ood-label">起运</span><span class="ood-val">{{ nodeName(task.originId) }}</span></div>
+              <div class="ood-row"><span class="ood-dot to"></span><span class="ood-label">目的</span><span class="ood-val">{{ nodeName(task.destinationId) }}</span></div>
+            </div>
+            <div class="order-kv"><span>承运司机</span><b>{{ task.driverName }}</b></div>
+            <div class="order-kv"><span>车牌</span><b>{{ task.plate }}</b></div>
+            <div class="order-kv"><span>送达时限</span><b>{{ task.deadline }}</b></div>
+            <div v-if="task.routeLabel" class="order-kv"><span>调度下发路线</span><b>{{ task.routeLabel }}</b></div>
+            <div v-if="task.routeSummary" class="order-kv"><span>路线摘要</span><b>{{ task.routeSummary }}</b></div>
+            <div v-if="task.hazardProbability >= 0" class="order-kv"><span>AI 灾害概率</span><b :class="probClass(task.hazardProbability)">{{ task.hazardProbability }}%</b></div>
+            <div v-if="task.aiAnalysis" class="order-ai">
+              <div class="oa-title">🌦 出车前 AI 气象分析</div>
+              <div class="oa-text">{{ task.aiAnalysis }}</div>
+            </div>
+            <div v-if="task.status !== 'ACCEPTED' && task.status !== 'REJECTED'" class="order-actions">
+              <button class="order-btn reject" :disabled="taskAccepting || taskRejecting" @click="rejectTask">{{ taskRejecting ? '处理中…' : '❌ 拒绝此单' }}</button>
+              <button class="order-btn accept" :disabled="taskAccepting || taskRejecting" @click="acceptTask">{{ taskAccepting ? '接单中…' : '✅ 确认接单' }}</button>
+            </div>
+            <div v-else class="order-done-hint">{{ task.status === 'ACCEPTED' ? '已接单，正在按调度路线导航。' : '已拒单，已退回普通导航模式。' }}</div>
+          </div>
+        </div>
+      </transition>
     </div>
 
     <!-- ====== FULL-SCREEN NAVIGATION ====== -->
@@ -335,6 +386,15 @@
             <span class="status-dot"></span>
             <span>{{ navigating ? statusText : previewStatusText }}</span>
           </div>
+          <!-- 桌面端专属：导航/预览态也能一键全屏 -->
+          <button v-if="isDesktop" class="nav-fs-btn" :title="isFullscreen ? '退出全屏' : '全屏显示'" @click="toggleFullscreen">
+            <svg v-if="!isFullscreen" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>
+            </svg>
+            <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>
+            </svg>
+          </button>
         </div>
       </div>
 
@@ -441,7 +501,9 @@
         <!-- 操作按钮 -->
         <div class="nav-actions">
           <button class="nav-btn" @click="locateMe" title="我的位置">
-            <span>📍</span>
+            <svg class="pin-ico" viewBox="0 0 24 24" aria-hidden="true">
+              <path fill-rule="evenodd" d="M12 2a7.5 7.5 0 0 0-7.5 7.5c0 5.1 6.1 11.5 7.1 12.4a.57.57 0 0 0 .8 0c1-.9 7.1-7.3 7.1-12.4A7.5 7.5 0 0 0 12 2Zm0 5.6a2.4 2.4 0 1 0 0 4.8 2.4 2.4 0 0 0 0-4.8Z"/>
+            </svg>
           </button>
           <button class="nav-btn" @click="fitRoute()" title="全览路线">
             <span>🔍</span>
@@ -784,6 +846,10 @@ export default {
       // 当前运输任务（派单下发的原始对象）
       task: null,
       taskAccepting: false,
+      // 拒单请求进行中
+      taskRejecting: false,
+      // 订单详情预览弹层（收到派单后查看货物/起终点/AI 分析，并在此接单或拒单）
+      showOrderDetail: false,
       // 当前执行的调度方案：'A'=公路绕行 / 'B'=公水联运 / 'C'=原地等待 / null=非调度（司机自己规划的行程）。
       // 之前 planId 只在 _switchNavForPlan/_autoStartDispatchNav 的参数里用过就丢了，
       // 导致播报和状态卡无从判断"当前是不是水运方案"。改为落库到组件状态，供全流程取用。
@@ -900,6 +966,9 @@ export default {
       homeSearchOpen: false,
       // 首页宫格/导航卡是否被下滑收起（只留搜索框，见 hm-collapse-grip / hm-expand-pill）
       homeCollapsed: false,
+      // 桌面端（≥900px）标识：显示全屏入口并启用整窗布局；isFullscreen 跟踪 Fullscreen API 状态
+      isDesktop: false,
+      isFullscreen: false,
       // 首页概览地图独立实例（与导航地图 this.map 互不干扰）
       _homeMap: null,
       // 退出导航二次确认弹层
@@ -1233,6 +1302,19 @@ export default {
     // 轮询兜底：15s 一次（SSE 为主通道）
     this.timer = setInterval(this.refreshAll, 15000)
     // AI 预警不再自动定时刷新（由用户点击触发，避免文案消失和重复播报）
+    // 首页加载即请求定位权限：Android 原生弹窗在 Capacitor 桥下触发，
+    // 司机一进 App 就授权，不必等到点「开始导航」。已授权/已永久拒绝时系统不再弹。
+    this._requestLocationOnLaunch()
+    // 桌面端识别 + 全屏状态监听：PC 打开司机端时显示全屏入口并启用整窗布局
+    this._desktopMq = window.matchMedia ? window.matchMedia('(min-width: 900px)') : null
+    if (this._desktopMq) {
+      this.isDesktop = this._desktopMq.matches
+      this._onDesktopMq = (e) => { this.isDesktop = e.matches }
+      if (this._desktopMq.addEventListener) this._desktopMq.addEventListener('change', this._onDesktopMq)
+      else if (this._desktopMq.addListener) this._desktopMq.addListener(this._onDesktopMq)
+    }
+    this._onFullscreenChange = () => { this.isFullscreen = !!document.fullscreenElement }
+    document.addEventListener('fullscreenchange', this._onFullscreenChange)
   },
   beforeUnmount() {
     clearInterval(this.timer)
@@ -1254,6 +1336,11 @@ export default {
     if (this._agentEs) this._agentEs.close()
     this._destroyMap()
     this._destroyHomeMap()
+    if (this._desktopMq && this._onDesktopMq) {
+      if (this._desktopMq.removeEventListener) this._desktopMq.removeEventListener('change', this._onDesktopMq)
+      else if (this._desktopMq.removeListener) this._desktopMq.removeListener(this._onDesktopMq)
+    }
+    if (this._onFullscreenChange) document.removeEventListener('fullscreenchange', this._onFullscreenChange)
     if (window.speechSynthesis) window.speechSynthesis.cancel()
   },
   methods: {
@@ -1327,6 +1414,18 @@ export default {
       }
       const el = this.$refs.homeMapEl
       this._resetMapContainer(el, !!(el && el._leaflet_id))
+    },
+    /** 桌面端全屏切换：Fullscreen API 隐藏浏览器边框；地图尺寸由 ResizeObserver 自动重测 */
+    toggleFullscreen() {
+      try {
+        if (!document.fullscreenElement) {
+          const p = document.documentElement.requestFullscreen && document.documentElement.requestFullscreen()
+          if (p && p.catch) p.catch(() => {})
+        } else if (document.exitFullscreen) {
+          const p = document.exitFullscreen()
+          if (p && p.catch) p.catch(() => {})
+        }
+      } catch (e) { /* 浏览器拒绝全屏时静默 */ }
     },
     homeZoom(d) {
       if (this._homeMap) this._homeMap.setZoom(this._homeMap.getZoom() + d)
@@ -2487,6 +2586,14 @@ export default {
         interactive: false
       }).addTo(this.map)
     },
+    /** 进首页即弹一次定位授权框（仅请求权限，不启动持续定位；失败/非原生环境静默忽略） */
+    async _requestLocationOnLaunch() {
+      try {
+        const perm = await Geolocation.checkPermissions()
+        if (perm.location === 'granted') return
+        await Geolocation.requestPermissions()
+      } catch (e) { /* 插件不可用或浏览器无该能力，忽略，不影响后续「开始导航」时的定位流程 */ }
+    },
     /** 开启 GPS 实时定位，Capacitor 原生定位优先，降级浏览器 geolocation，再降级模拟行驶 */
     _startRealTimeGPS() {
       this._stopRealTimeGPS()
@@ -3492,6 +3599,11 @@ export default {
      * 这里切换的是"免费普通导航"与"公司物流任务"两种身份。
      */
     _enterLogisticsMode(task) {
+      // 拒单任务（本人或越方窗口拒单后的广播）：不进入物流模式，退回普通导航
+      if (task && task.status === 'REJECTED') {
+        this._exitLogisticsMode(true)
+        return
+      }
       const first = this.mode !== 'LOGISTICS'
       this.mode = 'LOGISTICS'
       this.task = task
@@ -3515,9 +3627,13 @@ export default {
           text: `收到公司派单 ${task.taskId}`
         })
         if (this.tab !== 'task') this.tab = 'route'
+        // 新派单到达：非导航态下自动弹出订单详情，司机直接预览并接单/拒单
+        if (!this.navigating && !this.previewing && task.status !== 'ACCEPTED') {
+          this.showOrderDetail = true
+        }
       }
     },
-    /** 司机确认接单：大屏派单面板实时由"待接单"变为"已接单" */
+    /** 司机确认接单：大屏派单面板实时由"待接单"变为"已接单"，随后按调度选定路线自动进导航 */
     async acceptTask() {
       if (!this.task || this.task.status === 'ACCEPTED' || this.taskAccepting) return
       this.taskAccepting = true
@@ -3526,12 +3642,68 @@ export default {
           taskId: this.task.taskId, driverName: this.driverName
         })
         if (data && data.task) this.task = data.task
-        this.showPush('ok', '已接单', `${this.task.taskId} 已接单，调度中心已收到回执`)
+        this.showPush('ok', '已接单', `${this.task.taskId} 已接单，正在按调度路线开始导航…`)
+        this.showOrderDetail = false
+        // 接单即按调度员选定的路线自动进入导航
+        await this._startTaskNavigation()
       } catch (e) {
         console.error('accept task failed', e)
       } finally {
         this.taskAccepting = false
       }
+    },
+    /** 司机拒单：任务置 REJECTED，退回普通导航模式 */
+    async rejectTask() {
+      if (!this.task || this.taskRejecting) return
+      this.taskRejecting = true
+      try {
+        await axios.post('/api/task/reject', { taskId: this.task.taskId, driverName: this.driverName })
+        this.showOrderDetail = false
+        this._exitLogisticsMode(false)
+        this.showPush('info', '已拒单', '已拒绝该运单，退回普通导航模式')
+      } catch (e) {
+        console.error('reject task failed', e)
+      } finally {
+        this.taskRejecting = false
+      }
+    },
+    /**
+     * 接单后按调度员选定的路线自动进入导航：
+     * 以任务起终点拉候选，选中 routeChoice 对应的那条，再走标准预览→导航流程。
+     */
+    async _startTaskNavigation() {
+      const t = this.task
+      if (!t) return
+      if (t.originId) this.originId = t.originId
+      if (t.destinationId) this.destinationId = t.destinationId
+      this.routeLoading = true
+      try {
+        const r = await axios.get('/api/route/candidates', {
+          params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, cargoType: 'cold' },
+          timeout: 30000
+        })
+        this.candidates = this._mergeCorridorDuplicates((r.data && r.data.candidates) || [])
+        const want = t.routeChoice || 'recommended'
+        const hit = this.candidates.find(c => c.key === want)
+          || this.candidates.find(c => c.key === 'recommended')
+          || this.candidates[0]
+        if (hit) this.selectCandidate(hit.key, true)
+      } catch (e) {
+        console.error('task route preload failed', e)
+      } finally {
+        this.routeLoading = false
+      }
+      if (!this.candidates.length) {
+        this.showPush('warn', '路线数据异常', '未获取到调度路线，请在首页手动规划。')
+        return
+      }
+      // 复用已验证的预览→导航路径（enterPreview 建图，startNavigation 带 choice 贯穿）
+      await this.enterPreview()
+      await this.startNavigation()
+    },
+    /** 节点 id → 中文名（订单详情展示用） */
+    nodeName(id) {
+      return NODE_NAMES[id] || id || '--'
     },
     /** 退出物流任务（演示复位）：撤销后端派单并退回普通导航模式 */
     async exitLogisticsMode() {
@@ -5030,11 +5202,15 @@ export default {
 .hm-ctrl { position: absolute; right: 12px; top: 96px; z-index: 5; display: flex; flex-direction: column; gap: 8px; }
 .hm-ctrl-btn { width: 44px; height: 44px; border: none; border-radius: 12px; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.15); font-size: 20px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
 .hm-ctrl-btn.base-btn { font-size: 13px; font-weight: 700; color: #374151; }
+/* 定位图钉图标：深灰经典水滴形（参照系统定位图标），随按钮文字色 */
+.pin-ico { width: 22px; height: 22px; fill: #3d4450; }
+.nav-btn .pin-ico { width: 20px; height: 20px; }
 .hm-modechip { position: absolute; left: 12px; top: 12px; z-index: 5; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,.92); box-shadow: 0 2px 10px rgba(0,0,0,.12); font-size: 12px; }
 .hm-modechip .mode-name { font-weight: 600; }
 .hm-modechip .strip-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
 .hm-modechip .mode-act { border: none; border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
 .hm-modechip .mode-act.accept { background: #2563eb; color: #fff; }
+.hm-modechip .mode-act.preview { background: #eaf1ff; color: #2563eb; }
 .hm-modechip .mode-act.done { background: #e8f5e9; color: #2e7d32; }
 .hm-modechip .mode-act-exit { color: #94a3b8; cursor: pointer; }
 .hm-modechip .mode-hint { color: #64748b; }
@@ -5146,6 +5322,7 @@ export default {
 }
 .mode-act.accept { background: var(--brand); color: #fff; }
 .mode-act.accept:disabled { opacity: .6; cursor: default; }
+.mode-act.preview { background: var(--brand-soft); color: var(--brand); }
 .mode-act.done { background: #e4f6ea; color: #16a34a; cursor: default; }
 .mode-act-exit { font-size: 11px; color: #8a95a8; cursor: pointer; text-decoration: underline; }
 /* 路线状态条：绿色=畅通（剧本第四幕） */
@@ -5435,6 +5612,39 @@ export default {
 .kb-head { font-size: 14px; font-weight: 700; margin-bottom: 12px; display: flex; justify-content: space-between; }
 .kb-close { font-size: 16px; cursor: pointer; color: #999; }
 @media (prefers-reduced-motion: reduce) { .kb-panel, .hd-item, .hd-bar-in { animation: none !important; } }
+/* ===== 订单详情预览弹层（接到派单后查看货物/起终点/AI 分析 → 接单/拒单）===== */
+.order-panel { max-height: 78vh; }
+.order-state { font-size: 12px; font-weight: 700; padding: 5px 10px; border-radius: 8px; margin-bottom: 12px; display: inline-block; }
+.order-state.wait { background: #fff3e0; color: #c2410c; }
+.order-state.ok { background: #e4f6ea; color: #16a34a; }
+.order-state.bad { background: #fdecec; color: #dc2626; }
+.order-cargo { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 12px; background: linear-gradient(135deg, #f2f8ff, #eaf1ff); border: 1px solid rgba(99,102,241,.16); margin-bottom: 12px; }
+.oc-ico { font-size: 26px; }
+.oc-name { font-size: 16px; font-weight: 800; color: #1a1a2e; }
+.oc-sub { font-size: 12px; color: #667085; margin-top: 3px; }
+.order-od { margin-bottom: 10px; }
+.ood-row { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 5px 0; }
+.ood-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.ood-dot.from { background: #22a35a; }
+.ood-dot.to { background: #e53935; }
+.ood-label { font-size: 11px; color: #98a2b3; width: 32px; flex-shrink: 0; }
+.ood-val { font-weight: 700; color: #1a1a2e; }
+.order-kv { display: flex; justify-content: space-between; align-items: center; font-size: 13px; padding: 7px 0; border-top: 1px solid #f0f2f5; }
+.order-kv span { color: #667085; }
+.order-kv b { color: #1a1a2e; font-weight: 700; text-align: right; }
+.order-kv b.high { color: #dc2626; }
+.order-kv b.low { color: #16a34a; }
+.order-kv b.unknown { color: #98a2b3; }
+.order-ai { margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: #f7faff; border: 1px solid rgba(99,102,241,.16); }
+.oa-title { font-size: 12px; font-weight: 700; color: var(--prism-1); margin-bottom: 5px; }
+.oa-text { font-size: 12px; line-height: 1.7; color: #475569; white-space: pre-wrap; word-break: break-word; }
+.order-actions { display: flex; gap: 10px; margin-top: 16px; }
+.order-btn { flex: 1; padding: 13px; border-radius: 12px; border: none; font-size: 14px; font-weight: 700; cursor: pointer; transition: transform .12s, filter .15s; }
+.order-btn:active:not(:disabled) { transform: scale(.98); }
+.order-btn:disabled { opacity: .55; cursor: default; }
+.order-btn.accept { background: linear-gradient(135deg, #16a34a, #34d399); color: #fff; box-shadow: 0 4px 12px rgba(46,125,50,.3); }
+.order-btn.reject { background: #fff; color: #dc2626; border: 1px solid #f3c7c7; }
+.order-done-hint { margin-top: 14px; font-size: 12px; color: #667085; text-align: center; }
 .cmp-row { display: flex; justify-content: space-between; margin-top: 6px; font-size: 13px; color: #666; }
 .cmp-row.warn { color: #c62828; font-weight: 600; }
 .cmp-label { color: #999; }
@@ -5558,6 +5768,28 @@ export default {
 .touch-bar { height: 8px; border-radius: 4px; background: #eceff1; overflow: hidden; }
 .touch-fill { height: 100%; background: linear-gradient(90deg, #34d399, #66bb6a); border-radius: 4px; transition: width 0.5s; }
 .touch-text { font-size: 11px; color: #7c8ca6; margin-top: 6px; }
+/* 全屏按钮：与地图控件同套白底圆角风格，图标用细线 SVG（展开/收起四角） */
+.fs-btn svg { width: 20px; height: 20px; fill: none; stroke: #3d4450; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.nav-fs-btn { margin-left: auto; flex: 0 0 auto; width: 34px; height: 34px; border: none; border-radius: 10px; background: rgba(255,255,255,.92); box-shadow: 0 1px 6px rgba(0,0,0,.12); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.nav-fs-btn svg { width: 18px; height: 18px; fill: none; stroke: #3d4450; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ============================================================
+   桌面端（≥900px）：司机端铺满整窗（配合全屏按钮做演示大屏），
+   悬浮层限宽对齐，避免手机布局被宽屏拉变形
+   ============================================================ */
+@media (min-width: 900px) {
+  .phone { max-width: 100%; box-shadow: none; }
+  /* 搜索框 / 去X 卡：左对齐限宽；宫格 / Tab 栏 / 抽屉：居中限宽 */
+  .hm-search { left: 16px; right: auto; width: min(440px, calc(100vw - 32px)); }
+  .hm-gocard { left: 16px; right: auto; width: min(440px, calc(100vw - 32px)); }
+  .hm-grid { left: 16px; right: auto; width: min(680px, calc(100vw - 32px)); }
+  .hm-tabbar { left: 50%; right: auto; transform: translateX(-50%); width: min(680px, calc(100vw - 32px)); }
+  .hm-sheet { left: 50%; right: auto; transform: translateX(-50%); width: min(820px, 100vw); }
+  .hm-ctrl { right: 16px; top: 16px; }
+  /* 导航底部面板：卡片居中限宽，宽屏下不拉伸满屏 */
+  .nav-bottom > * { max-width: 860px; margin-left: auto; margin-right: auto; }
+  .nav-topbar { padding-left: 16px; padding-right: 16px; }
+}
 </style><style>
 /* Leaflet 全局防护：调度确认进入导航时，确保地图层不被任何主题样式隐藏 */
 .phone.nav-mode .nav-map.leaflet-container {

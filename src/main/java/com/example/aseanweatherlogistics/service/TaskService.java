@@ -33,6 +33,7 @@ public class TaskService {
     public static final String STATUS_NONE = "NONE";
     public static final String STATUS_DISPATCHED = "DISPATCHED";
     public static final String STATUS_ACCEPTED = "ACCEPTED";
+    public static final String STATUS_REJECTED = "REJECTED";
 
     /** 默认派单内容（剧本：公司派阿明从南宁拉 18 吨火龙果去河内） */
     public static final String DEFAULT_PLATE = "桂A·D12345";
@@ -82,6 +83,12 @@ public class TaskService {
         t.setOriginId(str(body, "originId", DEFAULT_ORIGIN));
         t.setDestinationId(str(body, "destinationId", DEFAULT_DESTINATION));
         t.setDeadline(str(body, "deadline", "次日 18:00 前送达河内仓库"));
+        // 调度员派单前选定的路线与那次 AI 气象分析快照（司机预览订单 / 接单自动导航据此走）
+        t.setRouteChoice(str(body, "routeChoice", "recommended"));
+        t.setRouteLabel(str(body, "routeLabel", null));
+        t.setRouteSummary(str(body, "routeSummary", null));
+        t.setHazardProbability(intOf(body, "hazardProbability"));
+        t.setAiAnalysis(str(body, "aiAnalysis", null));
         t.setStatus(STATUS_DISPATCHED);
         t.setDispatchedAt(System.currentTimeMillis());
         this.current = t;
@@ -114,6 +121,30 @@ public class TaskService {
             t.setAcceptedAt(System.currentTimeMillis());
             String who = (driverName == null || driverName.isBlank()) ? t.getDriverName() : driverName;
             decisionLog.log("TASK", "司机接单", who + " 已接单，任务号 " + t.getTaskId());
+            broadcast();
+        }
+        return current();
+    }
+
+    /**
+     * 司机拒单。司机端在物流任务模式点「拒绝此单」调用：
+     * 任务置 REJECTED 并广播，大屏派单面板显示「司机已拒单」，
+     * 司机端收到广播后退回普通导航模式（拒单任务保留为 current，供调度员改派/撤销）。
+     *
+     * @param driverName 拒单司机（缺省用任务上的承运司机）
+     */
+    public synchronized Map<String, Object> reject(String taskId, String driverName) {
+        TransportTask t = this.current;
+        if (t == null || (taskId != null && !taskId.isBlank() && !taskId.equals(t.getTaskId()))) {
+            throw new IllegalArgumentException("无匹配的运输任务：" + taskId);
+        }
+        if (!STATUS_REJECTED.equals(t.getStatus())) {
+            t.setStatus(STATUS_REJECTED);
+            t.setRejectedAt(System.currentTimeMillis());
+            String who = (driverName == null || driverName.isBlank()) ? t.getDriverName() : driverName;
+            decisionLog.log("TASK", "司机拒单",
+                    who + " 拒绝任务 " + t.getTaskId() + "，司机端退回普通导航模式");
+            log.info("task rejected: {}", t.getTaskId());
             broadcast();
         }
         return current();
@@ -182,5 +213,12 @@ public class TaskService {
             return n.doubleValue();
         }
         return def;
+    }
+
+    private static Integer intOf(Map<String, Object> body, String key) {
+        if (body != null && body.get(key) instanceof Number n) {
+            return n.intValue();
+        }
+        return null;
     }
 }

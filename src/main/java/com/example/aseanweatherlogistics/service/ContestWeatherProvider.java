@@ -14,6 +14,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -47,6 +51,15 @@ public class ContestWeatherProvider implements WeatherProvider {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
+    /**
+     * 主/次两批气象请求并行拉取线程池：官方接口单次最多 3 个变量，6 个变量必须分两批；
+     * 并发后总耗时≈单批（约 10s）而非两批相加（约 21s），避免现场“刷新气象”让评委干等。
+     */
+    private final ExecutorService fetchExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "contest-weather-fetch");
+        t.setDaemon(true);
+        return t;
+    });
 
     @Override
     public String id() {
@@ -73,9 +86,24 @@ public class ContestWeatherProvider implements WeatherProvider {
             return List.of();
         }
         Bbox bbox = buildBbox(nodes);
-        ObservationResponse p1 = queryObservations(OBS_PRIMARY_VARS, bbox);
-        ObservationResponse p2 = queryObservations(OBS_SECONDARY_VARS, bbox);
-        if (p1 == null || p2 == null) {
+        // 主批次(TMP/RH/PRE) 与 次批次(WIN_U/VIS) 并行拉取（两批各≤3 变量，符合官方单次上限）
+        CompletableFuture<ObservationResponse> primaryFuture =
+                CompletableFuture.supplyAsync(() -> queryObservations(OBS_PRIMARY_VARS, bbox), fetchExecutor);
+        CompletableFuture<ObservationResponse> secondaryFuture =
+                CompletableFuture.supplyAsync(() -> queryObservations(OBS_SECONDARY_VARS, bbox), fetchExecutor);
+        try {
+            CompletableFuture.allOf(primaryFuture, secondaryFuture)
+                    .get(requestTimeoutSeconds + 5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            // 任一批超时/异常不阻塞另一批：下方用 getNow(null) 各取已得结果
+            primaryFuture.cancel(true);
+            secondaryFuture.cancel(true);
+        }
+        ObservationResponse p1 = primaryFuture.getNow(null);
+        ObservationResponse p2 = secondaryFuture.getNow(null);
+        // 仅主批次（含熔断核心 PRE、温度 TMP、湿度 RH）为硬性必需；
+        // 次批次（风/能见度）失败时按默认值降级，不因次要变量缺失而整条链路空返回。
+        if (p1 == null) {
             return List.of();
         }
         if (p1.latitudes().isEmpty() || p1.longitudes().isEmpty() || p1.times().isEmpty()) {
@@ -85,7 +113,9 @@ public class ContestWeatherProvider implements WeatherProvider {
         List<Double> longitudes = p1.longitudes();
         int lastTime = p1.times().size() - 1;
         Map<String, VariableGrid> merged = new HashMap<>(p1.data());
-        merged.putAll(p2.data());
+        if (p2 != null) {
+            merged.putAll(p2.data());
+        }
         long fetchedAt = System.currentTimeMillis();
         List<RealWeatherService.WeatherPoint> out = new ArrayList<>(nodes.size());
         for (RoadNode node : nodes) {

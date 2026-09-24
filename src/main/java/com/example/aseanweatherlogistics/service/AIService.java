@@ -637,7 +637,7 @@ public class AIService {
             return "当前沿线实时气象未发现明显灾害风险，道路通行正常。";
         }
         StringBuilder sb = new StringBuilder();
-        sb.append(source.equals("deepseek") ? "AI 灾害预测（DeepSeek + 实时气象）" : "灾害预测（实时气象规则引擎）")
+        sb.append(source.equals("deepseek") ? "AI 灾害预测（大模型 + 实时气象）" : "灾害预测（实时气象规则引擎）")
                 .append("：未来 6-12 小时沿线存在 ").append(hazards.size()).append(" 项风险");
         if (injected > 0) {
             sb.append("，已注入 ").append(injected).append(" 条受影响路段并实时重算路线");

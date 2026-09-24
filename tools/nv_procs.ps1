@@ -1,1 +1,0 @@
-Get-Process | Where-Object { $_.Path -like '*NVIDIA*' -or $_.ProcessName -like '*nv*' -or $_.ProcessName -like '*NVIDIA*' } | Select-Object ProcessName, Id, Path | Format-Table -AutoSize | Out-String -Width 200

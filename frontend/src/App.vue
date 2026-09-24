@@ -1,7 +1,7 @@
 <template>
   <div class="app-root" :class="{ 'panel-dragging': panelDragging }">
     <header class="app-header">
-      <h1>东盟跨境物流气象导航平台 · 调度大屏（志哥正在拼命推进中......）</h1>
+      <h1>东盟跨境物流气象导航平台 · 调度大屏</h1>
       <div class="header-right">
         <button class="btn small outline-light" @click="openDriver">司机端 ↗</button>
         <button class="btn small" @click="getStatus">OSM 状态</button>
@@ -47,7 +47,7 @@
         <RoutePlanner @planned="applyPlannedRoute" />
 
         <!-- 第四幕：公司派单（司机端收到后自动切物流任务模式） -->
-        <TaskDispatchPanel ref="taskPanelRef" :task-status="taskStatus" @refresh="refreshTask" />
+        <TaskDispatchPanel ref="taskPanelRef" :task-status="taskStatus" @refresh="refreshTask" @analyze="onPreDispatchAnalysis" />
 
         <!-- 第一/二幕：决策沙盘（官方推送熔断 + 滑块观察决策边界） -->
         <DecisionSandbox ref="sandboxRef" @sandbox-change="onSandboxChange" />
@@ -58,6 +58,7 @@
           :originId="originId"
           :destinationId="destinationId"
           @dispatched="onDispatched"
+          @dispatch-task="onDispatchTask"
         />
 
         <!-- 第五/六幕：多角色触达 + 分级叫应追踪 -->
@@ -245,7 +246,7 @@
         </section>
 
         <section class="card">
-          <h3>AI 预警（DeepSeek 双语 + RAG）</h3>
+          <h3>AI 预警（AI 双语 + RAG）</h3>
           <div class="row">
             <button class="btn" @click="buildBilingual" :disabled="bilingualLoading">{{ bilingualLoading ? 'AI 生成中，约 10 秒…' : '生成中越双语预警' }}</button>
           </div>
@@ -253,7 +254,7 @@
         </section>
 
         <section class="card">
-          <h3>AI 灾害预测（实时气象 + DeepSeek）</h3>
+          <h3>AI 灾害预测（实时气象 + AI）</h3>
           <div class="row">
             <button class="btn" :disabled="hazardLoading" @click="predictHazards">
               {{ hazardLoading ? 'AI 预测中，约 10 秒…' : 'AI 灾害预测并注入风险' }}
@@ -448,6 +449,9 @@ export default {
       outreachStatus: { targets: [], total: 0, confirmed: 0, pending: 0 },
       // 运输任务（公司派单）：司机端据此切物流任务模式，大屏派单面板显示接单状态
       taskStatus: { task: null, status: 'NONE' },
+      // 公司派单面板递来的订单信息（车牌/司机/货物/重量/起终点）：
+      // 「AI 决策分析」面板的开始导航模板派单时与选定路线合并后下发
+      dispatchForm: null,
       // 左侧面板缩放系数（1=默认360px）：拖动右边缘手柄整体等比放大，字号随之变大
       panelZoom: 1,
       panelDragging: false
@@ -1002,6 +1006,10 @@ export default {
       } else {
         this.pushTimeline('SSE 告警', `${reason}${advice ? `：${advice}` : ''}`, 'danger');
       }
+      // 灾害推送（官方气象/后端守护重算）且确实产生风险或绕行 → 立即触发多智能体「灾害触发·熔断重算」分析（版本二）
+      if (data.error || rerouted || (data.risks && data.risks.length)) {
+        if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.notifyRiskChanged();
+      }
       clearTimeout(this._agentNoticeTimer);
       this._agentNoticeTimer = setTimeout(() => { this.agentNotice = null; }, 8000);
     },
@@ -1045,6 +1053,38 @@ export default {
       this.outreachStatus = status;
       this.pushTimeline('任务变更下发', '调度员确认方案，任务变更指令已推送至司机/船东/沿岸百姓', 'warn');
       this.refreshDecisionLog();
+    },
+    /** 派单前出车分析完成：记住订单信息、同步起终点并触发多智能体「派单前·常态」决策分析（版本一） */
+    onPreDispatchAnalysis(payload) {
+      this.dispatchForm = payload || null;
+      if (payload && payload.originId) this.originId = payload.originId;
+      if (payload && payload.destinationId) this.destinationId = payload.destinationId;
+      this.pushTimeline('派单前 AI 决策分析', '调度员发起出车前分析，三智能体生成常态方案对比与多路线候选，选定一条后派单给司机', 'info');
+      this.$nextTick(() => {
+        if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.runAnalysis(false, 'normal');
+      });
+    },
+    /** 开始导航模板派单：订单信息（公司派单面板）+ 选定路线快照（AI 决策分析面板）合并下发司机端 */
+    async onDispatchTask(payload) {
+      const route = (payload && payload.route) || null;
+      if (!route) return;
+      const body = { ...(this.dispatchForm || {}), ...route };
+      // 空值剔掉，让后端剧本默认值生效
+      Object.keys(body).forEach(k => {
+        if (body[k] === undefined || body[k] === null || body[k] === '') delete body[k];
+      });
+      try {
+        const { data } = await axios.post('/api/task/dispatch', body);
+        this.refreshTask(data);
+        const t = data && data.task;
+        this.pushTimeline('公司派单',
+          t ? `${t.plate} ${t.driverName}承运 ${t.cargoName} ${t.weightT}t，路线「${t.routeLabel || t.routeChoice}」已下发，等待司机接单`
+            : '派单指令已下发',
+          'warn');
+      } catch (e) {
+        console.error(e);
+        alert('派单失败，请重试');
+      }
     },
     refreshOutreach() {
       axios.get('/api/outreach/status').then(({ data }) => { this.outreachStatus = data; }).catch(() => {});
@@ -1208,7 +1248,7 @@ export default {
         this.bilingualLoading = false;
       }
     },
-    // ---- AI + 实时气象灾害预测：DeepSeek 预测 → 注入风险 → agent 实时重算 → SSE 推新路线 ----
+    // ---- AI + 实时气象灾害预测：大模型预测 → 注入风险 → agent 实时重算 → SSE 推新路线 ----
     async predictHazards() {
       if (!this.routeResult || !this.routeResult.route) {
         alert('请先规划跨境路线');
@@ -1279,7 +1319,7 @@ export default {
         this.pushTimeline('行程启动', '司机已开始导航，AI 自动生成常态方案对比，等待调度员人工确认', 'info');
         // 等起终点 props 同步到面板后再触发分析
         this.$nextTick(() => {
-          if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.runAnalysis(false);
+          if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.runAnalysis(false, 'normal');
         });
       } catch (e) {
         // 轮询失败静默，下一轮再试
@@ -1582,7 +1622,7 @@ export default {
 .hazard-reason { color:#5b6b85; margin-top:3px; }
 .hazard-advice { color:#16a34a; margin-top:2px; }
 
-/* 候选路线列表 */ollama listollama listollama list
+/* 候选路线列表 */
 .candidate-list {
   display:flex; flex-direction:column; gap:8px; margin-top:6px;
 }
