@@ -26,6 +26,8 @@ import osmium
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 PBF = os.path.join(_HERE, "data", "vietnam-260811.osm.pbf")
+# 中国侧真实路网源（广西 OSM 抽包）；存在则并入，南宁等中国节点吸附到真实路网
+PBF_CN = os.path.join(_HERE, "data", "guangxi-latest.osm.pbf")
 OUT = os.path.join(_HERE, "..", "src", "main", "resources", "data", "vietnam-road-network.json")
 
 # 走廊 bbox：lat 15.5~23.5, lon 102.5~110.0（覆盖老街-河内-海防-下龙-岘港）
@@ -92,6 +94,11 @@ CN_EDGES = [
     {"id": "E9", "fromNodeId": "DX", "toNodeId": "MC", "distanceKm": 4, "speedKmh": 20, "customs": True, "customsDelayHours": 3.0, "name": "芒街口岸通道", "roadType": "customs"},
     {"id": "E36", "fromNodeId": "HK", "toNodeId": "LC", "distanceKm": 2, "speedKmh": 20, "customs": True, "customsDelayHours": 2.0, "name": "河口口岸通道", "roadType": "customs"},
 ]
+
+# 广西 OSM 覆盖到的中国跨境节点（吸附为锚点接入密集路网）；河口属云南，不在此列，走手写兜底。
+CN_ANCHOR_CITIES = {n["id"]: (n["name"], n["latitude"], n["longitude"]) for n in CN_NODES if n["id"] != "HK"}
+# 仅用口岸虚拟边缝合两侧真实路网（境内段改由广西/越南 OSM 密集路网承担，不再用手写长边）
+CUSTOMS_EDGES = [e for e in CN_EDGES if e.get("customs")]
 
 # 中国侧虚拟边补充贴路几何（OSM 越南境内才覆盖；中国段沿真实高速/国道的走向折线，
 # 否则司机端画线在城市间直连，看似"穿山"）。格式与 OSM 边一致: [[lat, lon], ...]
@@ -527,30 +534,15 @@ class NetworkHandler(osmium.SimpleHandler):
         self.ways.append((w.id, node_ids, dict(w.tags)))
 
 
-def main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--bbox", default=None,
-                        help="自定义 bbox: lat_min,lat_max,lon_min,lon_max（默认全量走廊 bbox）")
-    parser.add_argument("--out", default=OUT, help="输出 JSON 路径")
-    args = parser.parse_args()
-
-    if not os.path.exists(PBF):
-        print(f"[错误] 未找到 PBF 文件: {PBF}")
-        sys.exit(1)
-
-    bbox = BBOX
-    if args.bbox:
-        parts = [float(x) for x in args.bbox.split(",")]
-        bbox = {"lat_min": parts[0], "lat_max": parts[1], "lon_min": parts[2], "lon_max": parts[3]}
-        print(f"自定义 bbox: {bbox}")
-
-    print("读取 PBF ...")
+def generate_source(pbf_paths, bbox, anchor_cities, snap_km, label):
+    """独立读取若干 PBF 并抽稀为该来源路网。分来源处理，规避不同国家 extract 之间
+    OSM 节点 ID 冲突 / 坐标相互覆盖所导致的路网断裂。
+    返回 (nodes, edges, anchor_match, degree, coords, ways, key_nodes)。"""
     handler = NetworkHandler(bbox)
-    handler.apply_file(PBF, locations=False)
-
+    for p in pbf_paths:
+        handler.apply_file(p, locations=False)
     coords, ways = handler.coords, handler.ways
-    print(f"  bbox 内节点: {len(coords)}, 候选道路: {len(ways)}")
+    print(f"[{label}] bbox 内节点: {len(coords)}, 候选道路: {len(ways)}")
 
     # 过滤：way 至少 2 个节点在 coords 中
     valid_ways = []
@@ -561,16 +553,16 @@ def main():
     ways = valid_ways
     print(f"  有效道路: {len(ways)}")
 
-    # ---- 统计节点度（交叉口识别） ----
+    # 统计节点度（交叉口识别）
     degree = Counter()
     for _, seq, _ in ways:
         for a, b in zip(seq, seq[1:]):
             degree[a] += 1
             degree[b] += 1
 
-    # 锚点城市 -> 最近 OSM 节点（距离阈值 6km，否则该城市不可达则警告）
+    # 锚点 -> 最近 OSM 节点（阈值 snap_km）
     anchor_match = {}
-    for cid, (cname, clat, clon) in ANCHOR_CITIES.items():
+    for cid, (cname, clat, clon) in anchor_cities.items():
         best_n, best_d = None, 1e9
         for nid, (lat, lon) in coords.items():
             if degree[nid] < 1:
@@ -578,15 +570,13 @@ def main():
             d = haversine_km(clat, clon, lat, lon)
             if d < best_d:
                 best_d, best_n = d, nid
-        if best_d <= 6.0:
+        if best_n is not None and best_d <= snap_km:
             anchor_match[cid] = (best_n, best_d, cname)
             print(f"  锚点 {cid}({cname}) -> OSM 节点 {best_n} 距离 {best_d:.2f}km")
         else:
-            print(f"  [警告] 锚点 {cid}({cname}) 最近节点 {best_n} 距离 {best_d:.2f}km，超出阈值")
+            print(f"  [警告] 锚点 {cid}({cname}) 最近节点 {best_n} 距离 {best_d:.2f}km，超出阈值（回退手写坐标）")
 
     # 关键节点 = 交叉口(度!=2) ∪ 锚点命中节点 ∪ way 端点
-    # 注：OSM way 常在等级变化/任意点断开，首尾节点往往是普通节点(度=2)。
-    # 若不强制为关键节点，way 之间的连接边会被丢弃，导致路网断裂成孤立组件。
     key_nodes = {n for n, d in degree.items() if d != 2}
     for nid, _, _ in anchor_match.values():
         key_nodes.add(nid)
@@ -594,13 +584,11 @@ def main():
         key_nodes.add(seq[0])
         key_nodes.add(seq[-1])
 
-    # OSM 节点 id -> 锚点短 ID（边端点需用锚点 ID，保证与节点定义一致）
     osm_to_anchor = {nid: cid for cid, (nid, _, _) in anchor_match.items()}
-    # 锚点命中节点：抽稀时无条件作为断点生成边（市中心密集网格常 <50m，不能过滤掉）
     anchor_nodes = set(osm_to_anchor)
 
-    # ---- 抽稀：沿 way 合并中间节点，生成边（保留几何折线 c，贴合底图真实走向） ----
-    edge_by_pair = {}  # (from, to) -> edge dict（多条 way 重叠时取距离较短者）
+    # 抽稀：沿 way 合并中间节点，生成边（保留几何折线 c）
+    edge_by_pair = {}
     for wid, seq, tags in ways:
         htype = tags.get("highway", "primary")
         htype_base = htype.split("_")[0]
@@ -608,20 +596,19 @@ def main():
         wname = tags.get("name", tags.get("ref", ""))
         start = seq[0]
         acc = 0.0
-        geom = [coords[start]]   # 当前段经过的坐标序列：起点 + 沿途每个 OSM 节点 → 关键点
+        geom = [coords[start]]
         for i in range(len(seq) - 1):
             a, b = seq[i], seq[i + 1]
             lat1, lon1 = coords[a]
             lat2, lon2 = coords[b]
             acc += haversine_km(lat1, lon1, lat2, lon2)
-            geom.append(coords[b])   # 收集真实走向（底图上是弯曲的，直线会对不上）
+            geom.append(coords[b])
             if b in key_nodes or b == seq[-1]:
                 if b != start and (acc >= 0.05 or b in anchor_nodes or b == seq[-1]):
                     geom.append(coords[b])
                     pair = (start, b)
                     eid = f"W{wid}-{start}-{b}"
                     if pair in edge_by_pair:
-                        # 保留更短/更高级的边
                         old = edge_by_pair[pair]
                         if acc >= old["distanceKm"]:
                             start, acc = b, 0.0
@@ -638,25 +625,21 @@ def main():
                 start, acc = b, 0.0
                 geom = [coords[b]]
 
-    # ---- 组装节点 ----
+    # 组装节点
     nodes = []
     used_ids = set()
     name_by_node = {}
-
-    # 锚点城市节点（保留原 ID）
     for cid, (nid, dist, cname) in anchor_match.items():
         lat, lon = coords[nid]
         nodes.append({"id": cid, "name": cname, "latitude": round(lat, 6), "longitude": round(lon, 6)})
         used_ids.add(cid)
         name_by_node[nid] = cname
-
-    # 其余关键节点
     for nid in sorted(key_nodes - set(a[0] for a in anchor_match.values())):
         lat, lon = coords[nid]
         nodes.append({"id": str(nid), "name": name_by_node.get(nid, ""), "latitude": round(lat, 6), "longitude": round(lon, 6)})
         used_ids.add(str(nid))
 
-    # ---- 组装边（保证边两端节点存在） ----
+    # 组装边（保证边两端节点存在）
     edges = []
     seen_edge_ids = set()
     anchor_cids = set(osm_to_anchor.values())
@@ -664,7 +647,6 @@ def main():
         f, t = e["fromNodeId"], e["toNodeId"]
         missing = [x for x in (f, t) if x not in used_ids]
         if missing:
-            # 锚点相关边：缺失端是普通节点(度=2 way 端点)，补齐为节点保留，否则边被丢弃导致锚点孤立
             if f not in anchor_cids and t not in anchor_cids:
                 continue
             for m in missing:
@@ -678,14 +660,81 @@ def main():
         edges.append(e)
         seen_edge_ids.add(e["id"])
 
-    # 中国侧节点 + 边（保持 ID 兼容场景注入/通关配置）
-    cn_id_set = {n["id"] for n in CN_NODES}
-    nodes = CN_NODES + [n for n in nodes if n["id"] not in cn_id_set]
-    edges = CN_EDGES + edges
-    # 中国侧虚拟边贴路几何补全（缺 c 才补，保留手工调整）
+    return nodes, edges, anchor_match, degree, coords, ways, key_nodes
+
+
+def main():
+    import argparse
+    from collections import deque
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bbox", default=None,
+                        help="自定义 bbox: lat_min,lat_max,lon_min,lon_max（默认全量走廊 bbox）")
+    parser.add_argument("--out", default=OUT, help="输出 JSON 路径")
+    args = parser.parse_args()
+
+    if not os.path.exists(PBF):
+        print(f"[错误] 未找到 PBF 文件: {PBF}")
+        sys.exit(1)
+
+    bbox = BBOX
+    if args.bbox:
+        parts = [float(x) for x in args.bbox.split(",")]
+        bbox = {"lat_min": parts[0], "lat_max": parts[1], "lon_min": parts[2], "lon_max": parts[3]}
+        print(f"自定义 bbox: {bbox}")
+
+    # 越南侧：与既有逻辑完全一致、单独成图，保证零回归
+    vn_nodes, vn_edges, vn_am, vn_deg, vn_coords, vn_ways, vn_keys = generate_source(
+        [PBF], bbox, ANCHOR_CITIES, 6.0, "越南")
+
+    # 中国广西侧：单独成图，跨境节点作为锚点吸附到真实路网
+    cn_nodes, cn_edges, cn_am = [], [], {}
+    if os.path.exists(PBF_CN):
+        cn_nodes, cn_edges, cn_am, _, _, _, _ = generate_source(
+            [PBF_CN], bbox, CN_ANCHOR_CITIES, 20.0, "中国广西")
+    else:
+        print(f"[提示] 未找到中国侧 PBF ({PBF_CN})，中国侧仅保留手写节点")
+
+    # 前缀中国侧数字节点 ID（"C<osmid>"），规避与越南 extract 的 OSM 节点 ID 冲突；
+    # 字母锚点（NN/CZ/PX/YGG/DX）保持不变，跨境缝合只发生在口岸锚点处。
+    def _pfx(x):
+        return ("C" + x) if x.isdigit() else x
+    for n in cn_nodes:
+        n["id"] = _pfx(n["id"])
+    for e in cn_edges:
+        # 边 ID 内嵌了原始 way/node 号，两份 extract 在边境重叠带会撞号（同一条路两边都有），
+        # 故连边 ID 一并加前缀，保证与越南侧边 ID 不冲突。
+        e["id"] = "C" + e["id"]
+        e["fromNodeId"] = _pfx(e["fromNodeId"])
+        e["toNodeId"] = _pfx(e["toNodeId"])
+
+    # 合并：未吸附的手写中国节点（如河口属云南）作兜底；
+    # 手写跨境/口岸边 E1/E2/E3/E8/E4/E9/E36 保留作城际走廊兜底（广西密集路网
+    # 因抽稀存在城市孤岛间隙，手写长边保证南宁—崇左—凭祥—友谊关一定连通），
+    # 密集真实路网叠加其上提供街路级吸附精度。
+    snapped = set(vn_am) | set(cn_am)
+    cn_fallback = [n for n in CN_NODES if n["id"] not in snapped]
+    nodes = cn_fallback + vn_nodes + cn_nodes
+    edges = CN_EDGES + vn_edges + cn_edges
     for e in edges:
         if e.get("c") is None and e["id"] in CN_ROAD_GEOM:
             e["c"] = CN_ROAD_GEOM[e["id"]]
+
+    # 跨境走廊连通性自检：南宁 -> 河内（经友谊关/同登）
+    adj = {}
+    for e in edges:
+        adj.setdefault(e["fromNodeId"], set()).add(e["toNodeId"])
+        adj.setdefault(e["toNodeId"], set()).add(e["fromNodeId"])
+    seen = {"NN"}
+    q = deque(["NN"])
+    while q:
+        for nx in adj.get(q.popleft(), ()):
+            if nx not in seen:
+                seen.add(nx)
+                q.append(nx)
+    print(f"[连通自检] NN→HN {'可达' if 'HN' in seen else '!!! 不可达 !!!'}（NN 侧连通节点 {len(seen)}）")
+
+    # 供后续越南侧锚点诊断复用上下文
+    anchor_match, degree, coords, ways, key_nodes = vn_am, vn_deg, vn_coords, vn_ways, vn_keys
 
     # 版本标记（验证执行）
     with open("convert_version.txt", "w", encoding="utf-8") as f:
