@@ -8,6 +8,8 @@ import com.google.gson.reflect.TypeToken;
 import jakarta.annotation.PostConstruct;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.InetSocketAddress;
+import java.net.ProxySelector;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -49,6 +51,15 @@ public class GeocodeService {
 
     private static final String GEOCODER_URL = "http://api.tianditu.gov.cn/geocoder?ds=%s&tk=%s";
 
+    /**
+     * 服务覆盖走廊大致经纬度范围（广西—越南北部 + 平陆运河沿线）：
+     * 在线编码返回的坐标落在此窗外时视为同名误命中（如裸"石埠"命中上海），触发城市前缀纠偏。
+     */
+    private static final double CORR_LAT_MIN = 8.0;
+    private static final double CORR_LAT_MAX = 27.0;
+    private static final double CORR_LON_MIN = 99.0;
+    private static final double CORR_LON_MAX = 110.0;
+
     private final RouteService routeService;
     private final Gson gson = new Gson();
     private final HttpClient http = HttpClient.newBuilder()
@@ -63,9 +74,20 @@ public class GeocodeService {
     private final String nominatimEndpoint;
     private final String nominatimUserAgent;
     private final int nominatimTimeoutSeconds;
+    /** Nominatim 专用客户端：配置了 geocode.nominatim.proxy(host:port) 时经该 HTTP 代理出公网，否则直连 */
+    private final HttpClient nominatimClient;
     /** Nominatim 节流：公共服务要求 ≤1 req/s，跨请求串行并保证最小间隔 */
     private final Object nominatimLock = new Object();
     private long nominatimLastAt = 0L;
+
+    /**
+     * 天地图密钥为「浏览器端」类型，服务端 REST 调用必须带合规 Referer + 浏览器 UA 才放行
+     * （与瓦片代理同一策略，否则返回 301012 权限类型错误 → 中国地名全部无法编码）。
+     */
+    private final String tiandituReferer;
+    private final String tiandituUserAgent;
+    /** 裸地名易命中外地同名点：结果落在覆盖窗外时用该城市前缀重试，把坐标拉回服务走廊 */
+    private final String regionBias;
 
     /** 本地地名库（启动时一次性加载） */
     private final List<Place> places = new ArrayList<>();
@@ -75,18 +97,45 @@ public class GeocodeService {
 
     public GeocodeService(RouteService routeService,
                           @Value("${tianditu.keys:}") String keyPool,
+                          @Value("${tianditu.referer:}") String tiandituReferer,
+                          @Value("${tianditu.user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36}") String tiandituUserAgent,
+                          @Value("${geocode.region-bias:南宁市}") String regionBias,
                           @Value("${geocode.nominatim.enabled:false}") boolean nominatimEnabled,
                           @Value("${geocode.nominatim.endpoint:https://nominatim.openstreetmap.org/search}") String nominatimEndpoint,
                           @Value("${geocode.nominatim.user-agent:asean-weather-logistics/1.0}") String nominatimUserAgent,
-                          @Value("${geocode.nominatim.timeout-seconds:8}") int nominatimTimeoutSeconds) {
+                          @Value("${geocode.nominatim.timeout-seconds:8}") int nominatimTimeoutSeconds,
+                          @Value("${geocode.nominatim.proxy:}") String nominatimProxy) {
         this.routeService = routeService;
         this.keys = keyPool == null || keyPool.isBlank()
                 ? List.of()
                 : List.of(keyPool.split(","));
+        this.tiandituReferer = tiandituReferer;
+        this.tiandituUserAgent = tiandituUserAgent;
+        this.regionBias = regionBias;
         this.nominatimEnabled = nominatimEnabled;
         this.nominatimEndpoint = nominatimEndpoint;
         this.nominatimUserAgent = nominatimUserAgent;
         this.nominatimTimeoutSeconds = nominatimTimeoutSeconds <= 0 ? 8 : nominatimTimeoutSeconds;
+        this.nominatimClient = buildNominatimClient(nominatimProxy);
+    }
+
+    /** 配置了 host:port 则让 Nominatim 走该 HTTP 代理出公网（演示机需翻墙时），否则直连。 */
+    private static HttpClient buildNominatimClient(String proxy) {
+        HttpClient.Builder b = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5));
+        if (proxy != null && !proxy.isBlank()) {
+            String p = proxy.trim();
+            int colon = p.lastIndexOf(':');
+            if (colon > 0) {
+                try {
+                    String host = p.substring(0, colon);
+                    int port = Integer.parseInt(p.substring(colon + 1));
+                    b = b.proxy(ProxySelector.of(new InetSocketAddress(host, port)));
+                } catch (NumberFormatException ignored) {
+                    // 代理地址非法：回落直连，不因配置错误让整体地理编码不可用
+                }
+            }
+        }
+        return b.build();
     }
 
     @PostConstruct
@@ -170,9 +219,31 @@ public class GeocodeService {
         return r.isEmpty() ? s : r;
     }
 
-    /** 天地图地理编码（在线）：密钥池轮转，全池失败返回 null 不抛异常 */
+    /**
+     * 天地图地理编码（在线）：先按原词查，若命中覆盖窗外的同名点（如裸"石埠"→上海），
+     * 再带城市前缀重试纠偏。全池失败或纠偏未果返回 null，交给上层继续走 Nominatim。
+     */
     private double[] geocodeOnline(String q) {
+        double[] direct = geocodeOnlineRaw(q);
+        if (direct != null && isInCorridor(direct[0], direct[1])) {
+            return direct;
+        }
+        // 窗外同名误命中：带城市前缀纠偏（已带前缀则不重复拼）
+        if (direct != null && regionBias != null && !regionBias.isBlank() && !q.startsWith(regionBias)) {
+            double[] biased = geocodeOnlineRaw(regionBias + q);
+            if (biased != null && isInCorridor(biased[0], biased[1])) {
+                return biased;
+            }
+        }
+        // 无结果，或结果在窗外且纠偏未果：视为不可信，交由 Nominatim 兜底
+        return null;
+    }
+
+    /** 天地图在线编码单趟：密钥池轮转 + 合规 Referer/UA；全池失败返回 null 不抛异常。 */
+    private double[] geocodeOnlineRaw(String q) {
         if (keys.isEmpty()) return null;
+        String ref = (tiandituReferer == null || tiandituReferer.isBlank())
+                ? "http://localhost/" : tiandituReferer;
         for (int i = 0; i < keys.size(); i++) {
             String key = nextKey();
             String ds = URLEncoder.encode("{\"keyWord\":\"" + q + "\"}", StandardCharsets.UTF_8);
@@ -180,6 +251,8 @@ public class GeocodeService {
                 HttpRequest req = HttpRequest.newBuilder(
                                 URI.create(String.format(GEOCODER_URL, ds, key)))
                         .timeout(Duration.ofSeconds(6))
+                        .header("Referer", ref)
+                        .header("User-Agent", tiandituUserAgent)
                         .GET().build();
                 HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
                 if (resp.statusCode() != 200) {
@@ -201,6 +274,12 @@ public class GeocodeService {
             }
         }
         return null;
+    }
+
+    /** 坐标是否落在服务走廊内（在线编码同名误命中剔除用）。 */
+    private static boolean isInCorridor(double lat, double lng) {
+        return lat >= CORR_LAT_MIN && lat <= CORR_LAT_MAX
+                && lng >= CORR_LON_MIN && lng <= CORR_LON_MAX;
     }
 
     /**
@@ -235,7 +314,7 @@ public class GeocodeService {
                     .header("User-Agent", nominatimUserAgent)
                     .header("Accept-Language", "vi,zh,en")
                     .GET().build();
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = nominatimClient.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() != 200) {
                 log.warn("Nominatim 地理编码 {} 返回 HTTP {}", q, resp.statusCode());
                 return null;
