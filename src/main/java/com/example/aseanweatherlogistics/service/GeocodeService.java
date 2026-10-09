@@ -1,7 +1,9 @@
 package com.example.aseanweatherlogistics.service;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.google.gson.reflect.TypeToken;
 import jakarta.annotation.PostConstruct;
 import java.io.InputStream;
@@ -56,18 +58,35 @@ public class GeocodeService {
     private final List<String> keys;
     private int keyCursor = 0;
 
+    /** 海外地理编码兜底（天地图未命中时启用，主要覆盖越南街道 / POI） */
+    private final boolean nominatimEnabled;
+    private final String nominatimEndpoint;
+    private final String nominatimUserAgent;
+    private final int nominatimTimeoutSeconds;
+    /** Nominatim 节流：公共服务要求 ≤1 req/s，跨请求串行并保证最小间隔 */
+    private final Object nominatimLock = new Object();
+    private long nominatimLastAt = 0L;
+
     /** 本地地名库（启动时一次性加载） */
     private final List<Place> places = new ArrayList<>();
 
-    /** 天地图在线结果缓存：name → 坐标，避免重复花配额 */
-    private final Map<String, double[]> onlineCache = new ConcurrentHashMap<>();
+    /** 在线结果缓存：name → 坐标+来源，避免重复花配额/重复外调 */
+    private final Map<String, GeoHit> onlineCache = new ConcurrentHashMap<>();
 
     public GeocodeService(RouteService routeService,
-                          @Value("${tianditu.keys:}") String keyPool) {
+                          @Value("${tianditu.keys:}") String keyPool,
+                          @Value("${geocode.nominatim.enabled:false}") boolean nominatimEnabled,
+                          @Value("${geocode.nominatim.endpoint:https://nominatim.openstreetmap.org/search}") String nominatimEndpoint,
+                          @Value("${geocode.nominatim.user-agent:asean-weather-logistics/1.0}") String nominatimUserAgent,
+                          @Value("${geocode.nominatim.timeout-seconds:8}") int nominatimTimeoutSeconds) {
         this.routeService = routeService;
         this.keys = keyPool == null || keyPool.isBlank()
                 ? List.of()
                 : List.of(keyPool.split(","));
+        this.nominatimEnabled = nominatimEnabled;
+        this.nominatimEndpoint = nominatimEndpoint;
+        this.nominatimUserAgent = nominatimUserAgent;
+        this.nominatimTimeoutSeconds = nominatimTimeoutSeconds <= 0 ? 8 : nominatimTimeoutSeconds;
     }
 
     @PostConstruct
@@ -106,12 +125,20 @@ public class GeocodeService {
         String q = name.trim();
         Place hit = matchLocal(q);
         if (hit != null) return result(hit.name, hit.lat, hit.lng, "local");
-        double[] cached = onlineCache.get(q);
-        if (cached != null) return result(q, cached[0], cached[1], "tianditu");
+        GeoHit cached = onlineCache.get(q);
+        if (cached != null) return result(q, cached.lat, cached.lng, cached.source);
         double[] online = geocodeOnline(q);
-        if (online == null) return null;
-        onlineCache.put(q, online);
-        return result(q, online[0], online[1], "tianditu");
+        if (online != null) {
+            onlineCache.put(q, new GeoHit(online[0], online[1], "tianditu"));
+            return result(q, online[0], online[1], "tianditu");
+        }
+        // 天地图未命中：兜底走 OSM Nominatim，覆盖越南街道/店名等海外 POI
+        double[] osm = geocodeNominatim(q);
+        if (osm != null) {
+            onlineCache.put(q, new GeoHit(osm[0], osm[1], "osm"));
+            return result(q, osm[0], osm[1], "osm");
+        }
+        return null;
     }
 
     /** 本地库匹配：精确 → 去行政后缀精确 → 双向包含（取名字最短的命中，避免"南宁"命中"南宁港…"） */
@@ -174,6 +201,57 @@ public class GeocodeService {
             }
         }
         return null;
+    }
+
+    /**
+     * 海外地理编码兜底（OpenStreetMap Nominatim）：天地图未命中时调用，覆盖越南街道/店名等 POI。
+     * 遵守公共实例 Usage Policy：自定义 User-Agent + 全局串行并保证 ≥1s 最小间隔。
+     * 任何异常/限流/无结果均返回 null，不抛出（由上层转成 400 友好提示）。
+     *
+     * @return {lat, lng}（WGS-84）或 null
+     */
+    private double[] geocodeNominatim(String q) {
+        if (!nominatimEnabled || nominatimEndpoint == null || nominatimEndpoint.isBlank()) return null;
+        // 节流：跨请求串行，保证相邻两次外调间隔 ≥1s
+        long waitMs;
+        synchronized (nominatimLock) {
+            long now = System.currentTimeMillis();
+            waitMs = Math.max(0L, 1000L - (now - nominatimLastAt));
+            nominatimLastAt = now + waitMs;
+        }
+        if (waitMs > 0) {
+            try {
+                Thread.sleep(waitMs);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+        }
+        String url = nominatimEndpoint + "?format=json&limit=1&q="
+                + URLEncoder.encode(q, StandardCharsets.UTF_8);
+        try {
+            HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+                    .timeout(Duration.ofSeconds(nominatimTimeoutSeconds))
+                    .header("User-Agent", nominatimUserAgent)
+                    .header("Accept-Language", "vi,zh,en")
+                    .GET().build();
+            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                log.warn("Nominatim 地理编码 {} 返回 HTTP {}", q, resp.statusCode());
+                return null;
+            }
+            JsonElement root = JsonParser.parseString(resp.body());
+            if (!root.isJsonArray() || root.getAsJsonArray().isEmpty()) return null;
+            JsonObject first = root.getAsJsonArray().get(0).getAsJsonObject();
+            if (!first.has("lat") || !first.has("lon")) return null;
+            double lat = first.get("lat").getAsDouble();
+            double lng = first.get("lon").getAsDouble();
+            if (lat == 0 && lng == 0) return null;
+            return new double[]{lat, lng};
+        } catch (Exception e) {
+            log.warn("Nominatim 地理编码请求失败 q={}：{}", q, e.getMessage());
+            return null;
+        }
     }
 
     private synchronized String nextKey() {
@@ -248,5 +326,17 @@ public class GeocodeService {
         double lng;
         String tag;
         String nodeId;
+    }
+
+    /** 在线地理编码结果缓存条目：坐标 + 来源（tianditu / osm） */
+    private static class GeoHit {
+        final double lat;
+        final double lng;
+        final String source;
+        GeoHit(double lat, double lng, String source) {
+            this.lat = lat;
+            this.lng = lng;
+            this.source = source;
+        }
     }
 }
