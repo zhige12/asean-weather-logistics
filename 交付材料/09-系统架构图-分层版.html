@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>系统架构图（分层版）· 气象驱动的跨境物流智能调度</title>
+<style>
+  /* 打印/截图向：白底、宽度写死，保证成图尺寸可复现。分层泳道 + ①→④ 因果主线。 */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #fff; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: #17222e; }
+  #fig { width: 1560px; padding: 20px 26px 16px; }
+
+  .cap { border-bottom: 2px solid #17457c; padding-bottom: 9px; margin-bottom: 12px;
+         display: flex; align-items: flex-end; justify-content: space-between; }
+  .cap h1 { font-size: 24px; color: #17457c; letter-spacing: .4px; }
+  .cap .sub { font-size: 13px; color: #4a5b6b; margin-top: 5px; line-height: 1.5; }
+  .cap .no { font-size: 13px; color: #17457c; border: 1px solid #9db6cf; border-radius: 3px;
+             padding: 3px 9px; white-space: nowrap; }
+
+  /* 整体外框：左侧层标签 + 中间层内容 + 右侧贯穿竖带 */
+  .frame { display: flex; align-items: stretch; gap: 8px; }
+  .stack { flex: 1 1 auto; display: flex; flex-direction: column; gap: 7px; }
+
+  .layer { display: flex; align-items: stretch; gap: 8px; }
+  .tab { flex: 0 0 168px; color: #fff; border-radius: 4px; padding: 9px 10px 9px 12px;
+         display: flex; flex-direction: column; justify-content: center; position: relative;
+         clip-path: polygon(0 0, 90% 0, 100% 50%, 90% 100%, 0 100%); }
+  .tab b { font-size: 16px; letter-spacing: .5px; }
+  .tab span { font-size: 10.5px; opacity: .92; margin-top: 3px; line-height: 1.4; }
+  .tab .step { position: absolute; top: 6px; right: 20px; background: #fff; color: #17222e;
+               font-size: 12px; font-weight: 700; width: 21px; height: 21px; line-height: 21px;
+               text-align: center; border-radius: 50%; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+
+  .body { flex: 1 1 auto; border: 1px solid #c6d2dd; border-radius: 4px; padding: 7px;
+          display: flex; flex-wrap: wrap; gap: 6px; align-content: stretch; }
+  .cell { flex: 1 1 210px; border: 1px solid #c6d2dd; border-radius: 3px; background: #fff;
+          padding: 6px 8px; }
+  .cell h4 { font-size: 12.6px; margin-bottom: 3px; }
+  .cell p { font-size: 11.2px; color: #4a5b6b; line-height: 1.5; }
+  .cell code { font-family: Consolas, monospace; font-size: 10.6px; color: #17457c;
+               background: #eef3f8; padding: 0 3px; border-radius: 2px; }
+  .cell b { color: #22303d; }
+  .wide { flex: 1 1 100%; }
+
+  /* 各层配色（与层标签同系，便于眼睛顺着层走） */
+  .l1 { background: #eaf6fd; } .t1 { background: #1f7fb8; } .l1 .cell h4 { color: #1f6f9e; }
+  .l2 { background: #e8f7f6; } .t2 { background: #128f8a; } .l2 .cell h4 { color: #0f7d78; }
+  .l3 { background: #fdf1e7; } .t3 { background: #b35215; } .l3 .cell h4 { color: #a3490f; }
+  .l4 { background: #ecf7f4; } .t4 { background: #146b5f; } .l4 .cell h4 { color: #115a50; }
+  .l5 { background: #ecf2fa; } .t5 { background: #2f6fa8; } .l5 .cell h4 { color: #2a6293; }
+  .l6 { background: #f3effa; } .t6 { background: #5b3f8c; } .l6 .cell h4 { color: #4f3779; }
+  .l7 { background: #f4f6f8; } .t7 { background: #566b7d; } .l7 .cell h4 { color: #46596a; }
+
+  /* 层间箭头：写清"上一级交给下一级的是什么" */
+  .flow { display: flex; align-items: center; gap: 8px; padding: 0 0 0 176px; color: #17457c; }
+  .flow .tri { font-size: 15px; line-height: 1; }
+  .flow .lbl { font-size: 11.2px; color: #4a5b6b; }
+  .flow .lbl b { color: #17457c; }
+
+  /* 创新点：虚线绿框 + 角标 */
+  .innov { border: 1.5px dashed #2e8b57; background: #f2fbf5; position: relative; }
+  .innov h4 { color: #1f6f45 !important; }
+  .badge { position: absolute; top: -8px; right: 6px; background: #2e8b57; color: #fff;
+           font-size: 10px; padding: 0 7px; border-radius: 8px; }
+
+  /* 右侧贯穿竖带 */
+  .spine { flex: 0 0 196px; border: 1px solid #c6d2dd; border-radius: 4px; background: #f6f8fa;
+           padding: 9px 9px; display: flex; flex-direction: column; gap: 7px; }
+  .spine h3 { font-size: 13.5px; color: #17457c; text-align: center; padding-bottom: 5px;
+              border-bottom: 1px solid #d5dfe8; }
+  .spine .it { font-size: 11.2px; color: #4a5b6b; line-height: 1.5; border-left: 3px solid #9db6cf;
+               padding-left: 6px; }
+  .spine .it b { color: #17222e; display: block; font-size: 11.8px; }
+
+  .foot { margin-top: 10px; border-top: 1px solid #c6d2dd; padding-top: 7px; font-size: 11.2px;
+          color: #55687a; line-height: 1.55; }
+  .foot b { color: #17222e; }
+</style>
+</head>
+<body spellcheck="false">
+<div id="fig">
+
+  <div class="cap">
+    <div>
+      <h1>面向东盟跨境物流的突发气象预警与多路线协同调度平台 · 系统架构图（分层版）</h1>
+      <div class="sub">
+        自上而下是<b>分层职责</b>；带 ①②③④ 的四层是本项目的<b>因果主线</b>：
+        气象数据<b>从哪来</b> ① → 拿来<b>有什么用</b> ② → 怎么与 <b>AI 智能体交互</b> ③ → 最终<b>指导了什么动作</b> ④（换线绕行 / 改走水运 / 停驶等待 / 分级叫应）
+      </div>
+    </div>
+    <div class="no">图 2　分层架构与气象驱动主线</div>
+  </div>
+
+  <div class="frame">
+    <div class="stack">
+
+      <!-- 接入与展现 -->
+      <div class="layer">
+        <div class="tab t1"><b>接入与展现层</b><span>同一套后端，四种入口</span></div>
+        <div class="body l1">
+          <div class="cell"><h4>调度大屏（Web）</h4><p>路线对比、风险断面、候选方案、气象数据源切换与来源说明，一屏内可现场复算</p></div>
+          <div class="cell"><h4>司机端 App</h4><p>Android（Capacitor 打包）；接单、导航、预警条、停驶待命与一键复驶</p></div>
+          <div class="cell"><h4>中越双语触达页</h4><p>面向船东船员、沿岸群众的双语叫应页与回执入口</p></div>
+          <div class="cell"><h4>离线交付包</h4><p>安装版 exe 与 zip 双入口，内置 JRE、路网与瓦片，评委双击即用，断网可演示</p></div>
+        </div>
+      </div>
+
+      <div class="flow"><span class="tri">▼</span><span class="lbl"><b>页面动作 → HTTP / SSE</b>　（密钥与凭据不下发到浏览器）</span></div>
+
+      <!-- 通讯与护栏 -->
+      <div class="layer">
+        <div class="tab t2"><b>通讯与护栏层</b><span>接口通道 + 公网安全边界</span></div>
+        <div class="body l2">
+          <div class="cell"><h4>同步接口</h4><p>路径计算、方案与候选查询、通关时效调整、数据源切换与来源核验</p></div>
+          <div class="cell"><h4>实时推送</h4><p>风险变化 → 熔断事件、换线指令、回执状态；前端防抖后触发重算，做到"突发气象马上出新路线"</p></div>
+          <div class="cell"><h4>地图瓦片同源代理</h4><p>底图凭据由后端代管并按 key 轮转，前端只走同源地址，杜绝密钥外泄</p></div>
+          <div class="cell"><h4>公网演示护栏</h4><p>危险与维护类接口对公网屏蔽；写操作按来源 IP 限流，超限返回 429</p></div>
+        </div>
+      </div>
+
+      <div class="flow"><span class="tri">▼</span><span class="lbl"><b>调度请求 → 取数编排</b>　（守护线程定时回源 + 界面手动拉取同走一条闸）</span></div>
+
+      <!-- ① 气象数据接入 -->
+      <div class="layer">
+        <div class="tab t3"><span class="step">①</span><b>气象数据接入层</b><span>数据从哪来 · 三源可切换 · 频度合规</span></div>
+        <div class="body l3">
+          <div class="cell"><h4>大赛官方气象接口（默认主源）</h4><p>CRA40 实况与预报格点，凭组委会令牌回源；令牌<b>只存服务端环境变量</b>，不进仓库、不进前端产物。界面标签原文：「比赛官方接口（CRA40 实况）」</p></div>
+          <div class="cell"><h4>公开气象服务（备源比对）</h4><p>免令牌，与官方源跑同一条路线做交叉比对。界面标签原文：「真实气象接口（Open-Meteo 公网实况）」</p></div>
+          <div class="cell"><h4>包内模拟数据（离线兜底）</h4><p>断网或令牌失效时接管，标签同步变为「离线模拟」，不假装在线</p></div>
+          <div class="cell"><h4>频度合规闸门（禁止暴力访问）</h4><p>结果缓存 <b>10 min</b>；<b>每个数据源各自</b>最小回源间隔 <b>60 s</b>；跨源最小间隔 <b>5 s</b>；同一源连续 <b>3</b> 次失败熔断静默 <b>300 s</b>。切源换不来免费额度</p></div>
+          <div class="cell wide"><h4>来源当场可核验（不是嘴上说说）</h4>
+            <p><code>GET /api/weather/real</code> 同时回传 <code>selectedSource</code>（用户选的源）与 <code>servedSource</code>（屏幕上这批数字<b>真正来自</b>哪个源）＋ <code>servedFresh</code>（是否本次取的）；<code>GET /api/weather/rate-stats</code> 回传真实回源次数 / 被节流拦截次数 / 熔断次数与逐源窗口。<b>用户的选择与数据的实际来源是两件事，界面上分开写清</b>，节流窗口内显示的是缓存就直说是缓存。</p></div>
+        </div>
+      </div>
+
+      <div class="flow"><span class="tri">▼</span><span class="lbl"><b>格点观测 → 落到路径边</b>　（节点实况按路段归属聚合）</span></div>
+
+      <!-- ② 风险引擎 -->
+      <div class="layer">
+        <div class="tab t4"><span class="step">②</span><b>风险引擎层</b><span>气象有什么用 · 转成"能不能走"</span></div>
+        <div class="body l4">
+          <div class="cell"><h4>实时气象联动判据（逐边取两端较差天气）</h4><p>小时雨强 <b>≥ 50 mm/h → 惩罚 100</b>（暴雨）；≥ 20 → 20；风速 ≥ 60 km/h → 50；能见度 &lt; 100m → 50、&lt; 500m → 20；气温 ≥ 35℃ → 8（冷链货损）。<b>惩罚系数 ≥ 100 即判该边“等效道路中断”，算路时直接跳过</b></p></div>
+          <div class="cell"><h4>官方预报 / 沙盘判据（口岸断面）</h4><p>断面取<b>未来 6h 累计降雨</b>：友谊关阈值随企业风险容忍度取保守 <b>80</b> / 平衡 <b>100</b> / 激进 <b>120mm</b>，芒街固定 <b>70mm</b>；达阈值即注入 penalty=100 参与算路，<b>界面改档即全链路重估</b></p></div>
+          <div class="cell"><h4>恢复带滞后，不来回翻</h4><p>80mm 熔断后需降到 <b>75mm 以下</b>才解除（阈值 − 5mm 滞后线）；降雨达 50mm 只进入“关注”态作叙事展示，<b>不注入软惩罚</b>——惩罚是乘数，乘上去会连口岸通关时间一起放大，方案时效就失真了</p></div>
+          <div class="cell"><h4>同一次降雨，为何只封友谊关</h4><p>友谊关 <b>85mm ≥ 80</b> → 越限熔断；芒街 <b>62mm &lt; 70</b> → 未越限可通行。逐边给出越限依据与触发源，不是一刀切</p></div>
+          <div class="cell"><h4>熔断后剩余图重算 + 全要素代价</h4><p>毫秒级、可重复执行；输出里程 / 耗时 / 绕行延误 / 油耗 / 通行费 / 通关时效 / 货损金额 / 碳排放</p></div>
+          <div class="cell innov"><span class="badge">创新点</span><h4>公—水双向互备评估</h4><p>公路熔断 → 即刻评估运河水运可执行性；水运禁航（能见度 &lt; 1000m 等红线）→ 反向核算公路绕行成本</p></div>
+          <div class="cell wide"><h4>水运断面独立建模</h4><p>运河每条支流按自身特征向量单独输出风险概率，不做全线一刀切；通航观测可由水运平台回传或模拟推送，回传后同样走②的阈值闸门与③的解释链</p></div>
+        </div>
+      </div>
+
+      <div class="flow"><span class="tri">▼</span><span class="lbl"><b>熔断清单 + 代价向量 → 决策边界</b>　（结构化数据下传，不传原始报文）</span></div>
+
+      <!-- ③ AI 智能体 -->
+      <div class="layer">
+        <div class="tab t5"><span class="step">③</span><b>AI 智能体层</b><span>怎么与 AI 交互 · 引擎给边界，模型给文字</span></div>
+        <div class="body l5">
+          <div class="cell wide"><h4>职责严格分离（本图最关键的一条线）</h4><p>
+            <b>引擎 → 智能体</b>：下传结构化熔断清单与决策边界（哪条边熔断、绕行代价、货损金额），作为提示上下文；
+            <b>智能体 → 引擎</b>：只回文字（风险解释、方案研判陈述、中越双语预警文案），<b>模型生成的数字一律不采信</b>，所有数值仍由确定性引擎产出。</p></div>
+          <div class="cell"><h4>三个智能体顺序接力</h4><p>风险研判（为什么封友谊关不封芒街）→ 方案生成（对可比方案集做取舍建议）→ 协同触达（按角色出双语文案）</p></div>
+          <div class="cell"><h4>行业知识库提供依据</h4><p>通航安全规定 / 跨境物流规范 / 企业作业规则，按标题、关键词、正文<b>加权匹配</b>，命中条目注入上下文，抑制无根据表述</p></div>
+          <div class="cell"><h4>推理通道逐级兜底且如实回报</h4><p>本地大模型 → 企业内网网关 → 在线大模型 → 规则模板；结果面板标注本次<b>真正走了哪一档</b>，断网重试即变"规则模板"</p></div>
+          <div class="cell"><h4>任一通道不可用都不断流程</h4><p>只影响文字表述，<b>数值结果与推荐方案不变</b>；预生成文案仅在缓存模式出现并单独标注</p></div>
+          <div class="cell"><h4>输出落点</h4><p>解释文字回到大屏方案卡与司机端预警条，并连同当次通道标识写入决策日志，事后可回溯"当时为什么说这句话"</p></div>
+        </div>
+      </div>
+
+      <div class="flow"><span class="tri">▼</span><span class="lbl"><b>建议 → 调度员确认</b>　（人在回路，系统不越权执行）</span></div>
+
+      <!-- ④ 调度动作 -->
+      <div class="layer">
+        <div class="tab t6"><span class="step">④</span><b>调度执行层</b><span>分析结果指导了什么</span></div>
+        <div class="body l6">
+          <div class="cell"><h4>换线绕行 · 切换口岸 / 走廊</h4><p>友谊关封了改走芒街；地图同画原路线（灰虚线）与新路线，标注绕行增加的时长与费用</p></div>
+          <div class="cell"><h4>局部绕行避灾</h4><p>车已开到中途前方成灾：从当前位置绕开灾害段再归回原路线，不推倒重来</p></div>
+          <div class="cell innov"><span class="badge">创新点</span><h4>改走水运 / 反向回公路</h4><p>车辆滚装上船经平陆运河转海运出境；运河禁航时反向给出公路方案</p></div>
+          <div class="cell"><h4>原地等待 · 延迟发车</h4><p>公路与水运同时受阻时不强推绕行；司机端进入<b>停驶待命</b>（车辆真的不动），条件恢复后一键复驶</p></div>
+          <div class="cell"><h4>行驶进度闸门</h4><p>已越过装货港的车不再被推荐"回港口坐船"，砍掉看起来最优却已无法执行的建议</p></div>
+          <div class="cell"><h4>分级叫应到五类人 + 回执闭环</h4><p>调度员 / 货车司机 / 越南司机 / 船东船员 / 沿岸百姓，中越双语播报；未确认自动升级触达渠道</p></div>
+          <div class="cell"><h4>货损与到达时间随之改写</h4><p>冷链火龙果延误超 4h 起按每小时 2.4% 计损（电子元件超 2h 起按 1.8%）；司机端到达时间按在途进度动态修正</p></div>
+        </div>
+      </div>
+
+      <div class="flow"><span class="tri">▼</span><span class="lbl"><b>全过程留痕 → 数据与底座</b>　（每一次结论都能回溯到当时的雨量、阈值与通道）</span></div>
+
+      <!-- 数据底座 -->
+      <div class="layer">
+        <div class="tab t7"><b>数据与底座层</b><span>自主清洗的资产 + 可复核日志</span></div>
+        <div class="body l7">
+          <div class="cell"><h4>中越跨境公路路网</h4><p>开源数据自主清洗 + 口岸断边补全，支撑算路与风险叠加</p></div>
+          <div class="cell"><h4>通关时效库</h4><p>公开口岸公报整理，参与总耗时与方案排序</p></div>
+          <div class="cell"><h4>行业知识库</h4><p>法规、规范与企业作业规则，供智能体检索引用</p></div>
+          <div class="cell"><h4>底图瓦片两级缓存</h4><p>内存热缓存 + 磁盘缓存，离线也能出图；高缩放层级按需回源</p></div>
+          <div class="cell"><h4>决策日志与预生成缓存</h4><p>时间线留痕，风险变化即标记旧结论过期并重算；缓存模式单独标注不与实时混同</p></div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- 右侧贯穿竖带 -->
+    <div class="spine">
+      <h3>贯穿全链 · 可核验</h3>
+      <div class="it"><b>人在回路</b>系统只给建议与执行末端指令，不越权改单</div>
+      <div class="it"><b>来源逐档如实</b>气象"选了谁 / 实际来自谁 / 是否本次取的"分开显示</div>
+      <div class="it"><b>AI 通道如实</b>本地 / 网关 / 在线 / 规则模板分标签，不谎称本地推理</div>
+      <div class="it"><b>判据可查</b>两套链路（实时雨强 / 预报累计量）的阈值、滞后恢复线与越限依据均在界面给出</div>
+      <div class="it"><b>输入不冒充</b>沙盘降雨区分“官方预报格点”与“剧本手填”，取数失败沿用当前值而不报“无降雨”</div>
+      <div class="it"><b>频度可复核</b>统计端点供第三方验证"未暴力访问官方接口"</div>
+      <div class="it"><b>密钥不外泄</b>官方令牌与底图凭据只存服务端，产物零密钥</div>
+      <div class="it"><b>断网不断演示</b>离线兜底 + 包内数据，降级状态明说</div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <b>读图要点</b>　七层是职责划分，带圈数字 ①→④ 才是本项目的主张：<b>① 气象观测量从官方接口进来</b>（且来源与频度都可当场核验）→
+    <b>② 被直接转换为路径可通行性</b>（雨量越限即等效中断，不是把数字念给人听）→ <b>③ 大模型只负责解释与文案，数字全部由确定性引擎产出</b> →
+    <b>④ 因此每一个调度动作都能回溯到具体雨量与阈值</b>：换线绕行、局部绕行、改走水运、停驶等待、分级叫应，现场改档即可复算。
+    水运不作为并列第二主线，只在公路受阻时被触发评估，故以虚线框表示。本图只划分职责与数据流向，不体现具体框架选型；
+    接口清单见《01-技术文档》，带技术标注的展开版见《02-系统架构与数据使用说明》，气象→动作的横向因果链另见《08-系统架构图》。
+  </div>
+
+</div>
+</body>
+</html>

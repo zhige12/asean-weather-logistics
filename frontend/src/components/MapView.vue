@@ -6,7 +6,7 @@
       <div class="overlay-card">
         <div class="overlay-toolbar">
           <strong>跨境路网</strong>
-          <button class="tile-switch" @click="cycleTileSource">底图:{{ tileSourceName }}</button>
+          <button class="tile-switch" title="切换底图（底图1→底图4 循环）" @click="cycleTileSource">{{ tileSourceName }}</button>
         </div>
         <div class="overlay-row"><span class="dot" style="background:orange"></span> 路网风险边</div>
         <div class="overlay-row"><span class="dot" style="background:#16a34a"></span> 安全路段</div>
@@ -16,6 +16,7 @@
         <div class="overlay-row"><span class="dot" style="background:#888;border:1px dashed #555"></span> 基准原路线（红虚线=已避开的风险段）</div>
         <div class="overlay-row"><span class="hazard-dot">×</span> 灾害点</div>
         <div class="overlay-row"><span class="dot" style="background:#d32f2f;border-radius:50%"></span> 口岸节点</div>
+        <div class="overlay-row"><span class="dot" style="background:#0ea5e9;border:1px dashed #0ea5e9"></span> 坐船走廊（运河/海运/越方公路）</div>
       </div>
     </div>
   </div>
@@ -31,6 +32,8 @@ import { splitRouteByRisk, riskEdgeSet } from '../utils/routeSegments.js';
 import { makeTileLayer } from '../utils/tileSources.js';
 // Leaflet Canvas 渲染器销毁竞态防护（控制台偶发 Canvas._clear 读空 _ctx 报 reading 'save'），一次性 patch，两端共用
 import '../utils/leafletCanvasGuard.js';
+// 轻界面模式：弱机上把路线特效层降为静态（去 drop-shadow 逐帧重算 + 限帧），见 utils/perfMode.js
+import { isLite, onLiteChange } from '../utils/perfMode.js';
 
 export default {
   name: 'MapView',
@@ -55,7 +58,9 @@ export default {
     // 候选路线：除主线外的其他可选路径，统一以浅蓝虚线叠加展示
     candidates: { type: Array, default: () => [] },
     // 当前主线对应的候选 key（与主线条目同步，不重复画）
-    selectedCandidateKey: { type: String, default: '' }
+    selectedCandidateKey: { type: String, default: '' },
+    // 陆水联运「坐船走廊」几何（/api/canal/corridor 返回：legs + nodes），非空时在地图上高亮
+    corridor: { type: Object, default: null }
   },
   watch: {
     network: { handler() { this.drawNetwork(); }, immediate: true },
@@ -85,7 +90,8 @@ export default {
     pickDestination: { handler(v) { this.drawPickMarker('destination', v); } },
     // 候选列表变化（拉回 / 选中切换）→ 重新画备选线
     candidates: { handler() { this.drawAlternates(); }, deep: true },
-    selectedCandidateKey: { handler() { this.drawAlternates(); } }
+    selectedCandidateKey: { handler() { this.drawAlternates(); } },
+    corridor: { handler() { this.drawCorridor(); } }
   },
   data() {
     return {
@@ -98,35 +104,36 @@ export default {
       baselineLayers: [],  // 基准路线：灰虚线（安全段）+ 红虚线（原路线穿过的风险段）
       hazardLayers: [],
       selectedLayer: null,
-      // 默认底图：天地图在线影像（img_w）+ 注记（cia_w），WMTS 栅格，合规、边界安全。
-      // 在线服务，拔网线即失效——离线演示请用 cycleTileSource 切到「离线(D盘)」本地瓦片。
+      // 默认底图：底图1 天地图在线影像（img_w）+ 注记（cia_w），WMTS 栅格，合规、边界安全。
+      // 在线服务，拔网线即失效——离线演示请用 cycleTileSource 切到「底图4（D盘离线）」本地瓦片。
       // D 盘离线瓦片是 EPSG:4326 栅格（*.jpg，中越走廊 z7-13），后端 /tiles/** 托管；
       // 与在线源的 3857 不同系，选中它时 initMap 会把整图重建为 4326（见 initMap / loadTiles）。
       tileSourceIdx: 0,
-      tileSourceName: '天地图',
+      tileSourceName: '底图1',
       // 天地图注记层（cia_w），叠在影像底图之上，只画地名/边界
       tileAnnoLayer: null,
-      // 底图循环链（「底图」按钮按序切换）：天地图影像 → 底图4 天地图矢量 → 底图5 OSM → 离线(D盘)。
-      // 底图4 原先是独立叠加开关，现并入循环；任何时刻只有一套底图图层在跑。
+      // 底图循环链（「底图」按钮按序切换，命名序号制与司机端一致）：
+      // 底图1 天地图影像 → 底图2 天地图矢量 → 底图3 OSM → 底图4 离线(D盘)。
+      // 底图2 原先是独立叠加开关，现并入循环；任何时刻只有一套底图图层在跑。
       tileSources: [
         {
-          // 天地图在线栅格：影像底图 img_w + 影像注记 cia_w，走同源后端代理
+          // 底图1：天地图在线栅格：影像底图 img_w + 影像注记 cia_w，走同源后端代理
           // （/api/tianditu/...，密钥与缓存都在后端，响应带 30 天长缓存）。
-          name: '天地图',
+          name: '底图1',
           url: '/api/tianditu/img_w/{z}/{x}/{y}.png',
           annoUrl: '/api/tianditu/cia_w/{z}/{x}/{y}.png',
           attribution: '&copy; 天地图',
           maxZoom: 18,
           // 天地图影像(img_w)在中越走廊（尤其越南境内）高层级无覆盖，>z16 会返回「200 的纯白瓦片」，
           // 表现为放大到某级整屏白屏。用 maxNativeZoom 把有效瓦片钉在 z16，更高级由 Leaflet overzoom
-          // 拉伸 z16 真实影像（发虚但不空白），与离线(D盘)源 z13→18 overzoom 同一套路。
+          // 拉伸 z16 真实影像（发虚但不空白），与底图4 离线(D盘)源 z13→18 overzoom 同一套路。
           maxNativeZoom: 16,
           minZoom: 3
         },
         {
-          // 底图4：天地图矢量底图 vec_w + 矢量注记 cva_w（道路分级清晰，适合看路线）。
-          // 原先是「底图4 独立叠加开关」，现并入底图循环：天地图→底图4→底图5→离线(D盘)。
-          name: '底图4',
+          // 底图2：天地图矢量底图 vec_w + 矢量注记 cva_w（道路分级清晰，适合看路线）。
+          // 原先是「矢量独立叠加开关」，现并入底图循环：底图1→底图2→底图3→底图4。
+          name: '底图2',
           url: '/api/tianditu/vec_w/{z}/{x}/{y}.png',
           annoUrl: '/api/tianditu/cva_w/{z}/{x}/{y}.png',
           attribution: '&copy; 天地图',
@@ -134,9 +141,9 @@ export default {
           minZoom: 3
         },
         {
-          // 底图5：OSM 在线栅格（自 git 历史恢复并更名）。境内直连无 CDN、可能慢/超时，
+          // 底图3：OSM 在线栅格（自 git 历史恢复）。境内直连无 CDN、可能慢/超时，
           // 排在天地图两级之后作第三层兜底；失败瓦片仅 tileerror 隐藏、不重试（避免请求风暴）。
-          name: '底图5',
+          name: '底图3',
           url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
           subdomains: 'abc',
           attribution: '&copy; OpenStreetMap contributors',
@@ -145,9 +152,9 @@ export default {
           crossOrigin: true
         },
         {
-          // D 盘离线栅格瓦片（EPSG:4326，*.jpg，中越走廊 z7-13）：后端 /tiles/** 托管，完全离线。
+          // 底图4：D 盘离线栅格瓦片（EPSG:4326，*.jpg，中越走廊 z7-13）：后端 /tiles/** 托管，完全离线。
           // 与在线天地图的 3857 不同系，选中时 initMap 会整图重建为 4326（offline4326 标记）。
-          name: '离线(D盘)',
+          name: '底图4',
           url: '/tiles/{z}/{x}/{y}.jpg',
           subdomains: null,
           // 数据本身来自 OSM，版权署名需保留（仅文字，不发任何 OSM 网络请求）
@@ -163,7 +170,9 @@ export default {
       pickMarkerOrigin: null,
       pickMarkerDest: null,
       // 非选中候选路线的图层集合（浅蓝虚线）
-      alternateLayers: []
+      alternateLayers: [],
+      // 坐船走廊图层集合（运河/海运/越方公路折线 + 节点标签）
+      corridorLayers: []
     };
   },
   computed: {
@@ -180,14 +189,22 @@ export default {
     this.map.on('click', e => {
       if (this.pickMode) this.$emit('map-click', { lat: e.latlng.lat, lon: e.latlng.lng });
     });
+    // 轻界面开关中途切换时重建特效层：特效是创建时按 lite 一次性定下的，
+    // 不重建就还得刷新才生效（观众可不想为此按 F5）
+    this._offLiteChange = onLiteChange(() => this._rebuildRouteFlow());
   },
   beforeUnmount() {
+    if (this._offLiteChange) { this._offLiteChange(); this._offLiteChange = null; }
     if (this._zoomRedrawTimer) { clearTimeout(this._zoomRedrawTimer); this._zoomRedrawTimer = null; }
     if (this._routeFlow) { this._routeFlow.destroy(); this._routeFlow = null; }
     if (this.tileAnnoLayer) { try { this.map.removeLayer(this.tileAnnoLayer); } catch (e) {} this.tileAnnoLayer = null; }
     if (this.alternateLayers) {
       this.alternateLayers.forEach(l => { try { this.map.removeLayer(l); } catch (e) {} });
       this.alternateLayers = [];
+    }
+    if (this.corridorLayers) {
+      this.corridorLayers.forEach(l => { try { this.map.removeLayer(l); } catch (e) {} });
+      this.corridorLayers = [];
     }
     if (this.map) { this.map.off('click'); this.map.remove(); }
   },
@@ -231,7 +248,7 @@ export default {
       // cycleTileSource，所以默认情况下**压根没有缩放重绘**。改绑到这里，每个新实例都绑。
       this.map.on('zoomend', this._onZoomRedraw);
     },
-    // 手动切换底图源（按 tileSources 顺序循环：天地图 → 底图4 → 底图5 → 离线(D盘)）
+    // 手动切换底图源（按 tileSources 顺序循环：底图1 → 底图2 → 底图3 → 底图4）
     cycleTileSource() {
       this._afterZoomAnim(() => {
         this.tileSourceIdx = (this.tileSourceIdx + 1) % this.tileSources.length;
@@ -276,8 +293,8 @@ export default {
       tile.style.visibility = 'hidden';
       tile.style.display = 'none';
     },
-    // 瓦片源：按 tileSources 数组顺序（天地图 / 底图4 / 底图5 / 离线(D盘)）。
-    // 离线(D盘)源是同源 4326 栅格（地图已在 initMap 以 4326 重建），直接铺 jpg 层；
+    // 瓦片源：按 tileSources 数组顺序（底图1 / 底图2 / 底图3 / 底图4）。
+    // 底图4(D盘离线)源是同源 4326 栅格（地图已在 initMap 以 4326 重建），直接铺 jpg 层；
     // 在线源失败瓦片仅 hideBrokenTile 隐藏，不做重试——完全交给 Leaflet 原生瓦片管理。
     loadTiles(idx) {
       if (idx >= this.tileSources.length) return;
@@ -302,7 +319,7 @@ export default {
       }
 
       const tileOpts = {
-        // 代理源（天地图/底图4）URL 无 {s} 占位符、源定义里没有 subdomains；但 Leaflet
+        // 代理源（底图1/底图2）URL 无 {s} 占位符、源定义里没有 subdomains；但 Leaflet
         // 铺瓦时无条件读 options.subdomains.length（_getSubdomain），显式传 undefined 会覆盖
         // 默认值并在 mounted 阶段直接抛 TypeError，必须兜底给个占位字符串。
         subdomains: s.subdomains || 'abc',
@@ -359,7 +376,7 @@ export default {
             keyboard: false
           });
           const isPort = /作业区|港区/.test(n.name || '');
-          m.bindPopup(`<b>${n.name}</b><br/>${n.latitude.toFixed(4)}, ${n.longitude.toFixed(4)}<br/><i>${isPort ? '港区（公水联运换装点）' : '口岸（通关虚拟边）'}</i>`);
+          m.bindPopup(`<b>${n.name}</b><br/>${n.latitude.toFixed(4)}, ${n.longitude.toFixed(4)}<br/><i>${isPort ? '港区（陆水联运换装点）' : '口岸（通关虚拟边）'}</i>`);
           portMarkers.push(m);
         }
       });
@@ -502,10 +519,23 @@ export default {
 
       // 前进箭头 + 流光带也要按段着色，否则单色特效会盖住红绿分段
       if (!this._routeFlow) {
-        this._routeFlow = createRouteFlow(this.map, { color: '#16a34a' });
+        // lite（轻界面）：箭头不逐帧重算 drop-shadow、不起脉冲/流光关键帧，并把 JS 帧循环压到 24fps。
+        // 大屏默认满特效 60fps；弱机或手动开了轻界面时走这一档，箭头与红绿分段仍在。
+        this._routeFlow = isLite()
+          ? createRouteFlow(this.map, { color: '#16a34a', lite: true, fps: 24, maxArrows: 8, spacingPx: 140 })
+          : createRouteFlow(this.map, { color: '#16a34a' });
       }
       this._routeFlow.setSegments(flowSegs);
       this._frontRouteLayers();
+    },
+    /**
+     * 轻界面开关切换后重建特效层：destroy 旧实例、清掉绘制签名，
+     * 再用记住的当前路线重画一次（不清签名会被 drawRoute 的“同一张图”免疫直接 return）。
+     */
+    _rebuildRouteFlow() {
+      if (this._routeFlow) { this._routeFlow.destroy(); this._routeFlow = null; }
+      this._lastRouteSig = null;
+      if (this._lastRoute && this._lastRoute.length) this.drawRoute(this._lastRoute);
     },
     /**
      * 主路线置顶：备选候选线（虚线）与主线走同一条走廊，
@@ -588,6 +618,40 @@ export default {
         this.alternateLayers.push(line);
       });
       // 备选线是后画的，会把主线压在下面（同一走廊上尤其明显），最后把主线提回顶层
+      this._frontRouteLayers();
+    },
+    // 陆水联运「坐船走廊」：运河蓝点线、海运青虚线、越方公路橙虚线 + 六景/钦州港/海防/河内节点标签。
+    // corridor 为空即清除（卡片收起时 App 传 null）；画法与司机端 _drawCorridor 一致。
+    drawCorridor() {
+      if (!this.map) return;
+      (this.corridorLayers || []).forEach(l => { try { this.map.removeLayer(l); } catch (e) {} });
+      this.corridorLayers = [];
+      const d = this.corridor;
+      if (!d || !d.legs) return;
+      const styles = {
+        canal: { color: '#0ea5e9', weight: 5, opacity: 0.9, dashArray: '2 10' },
+        sea: { color: '#06b6d4', weight: 4, opacity: 0.85, dashArray: '14 10' },
+        road: { color: '#f59e0b', weight: 5, opacity: 0.9, dashArray: '10 8' }
+      };
+      (d.legs || []).forEach(leg => {
+        const path = leg.path || [];
+        if (path.length < 2) return;
+        const pl = L.polyline(path, styles[leg.mode] || styles.road).addTo(this.map);
+        pl.bindPopup(`<b>${leg.name}</b><br>${leg.from} → ${leg.to} · ${leg.km}km / 约${leg.hours}h<br><span style="opacity:.75">${leg.note || ''}</span>`, { maxWidth: 260 });
+        this.corridorLayers.push(pl);
+      });
+      (d.nodes || []).forEach(n => {
+        if (!n.pos) return;
+        const mk = L.marker(n.pos, {
+          icon: L.divIcon({
+            className: 'corridor-label-wrap',
+            html: `<span class="corridor-label-text">${n.icon || ''} ${n.name}</span>`,
+            iconSize: [0, 0], iconAnchor: [0, 0]
+          }),
+          interactive: false, keyboard: false
+        }).addTo(this.map);
+        this.corridorLayers.push(mk);
+      });
       this._frontRouteLayers();
     },
     // 基准（未绕行）路线：灰色虚线；其中穿过风险区的段改红色虚线，直观对比"绕行避开了哪一段"
@@ -698,6 +762,9 @@ export default {
 .leaflet-tile-pane { background:#dcebf2; }
 /* 加载失败或尚未加载的瓦片 img 本身也兜底成浅蓝，避免浏览器默认灰白破损图 */
 .leaflet-tile-pane img.leaflet-tile { background:#dcebf2 !important; }
+/* 坐船走廊节点标签（六景/钦州港/海防/河内）：白字黑描边，与地名注记同风格 */
+.corridor-label-wrap { position:absolute; transform:translate(-50%,-100%); pointer-events:none; white-space:nowrap; }
+.corridor-label-text { color:#fff; font-size:12px; font-weight:800; text-shadow:0 0 3px rgba(0,0,0,0.95),1px 1px 2px rgba(0,0,0,0.9),-1px -1px 2px rgba(0,0,0,0.9); }
 /* 天地图注记层（cia_w）是透明 PNG（只有地名/边界），不能被上面的占位背景填成不透明浅蓝，
    否则会盖住影像底图；这里按图层容器 class 精确覆盖回透明。 */
 .tdt-anno-layer img.leaflet-tile { background:transparent !important; }

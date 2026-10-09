@@ -5,12 +5,13 @@
 // 前端不再持有任何密钥，热门瓦片全生命周期只消耗一次天地图配额。
 import L from 'leaflet';
 
-// 在线底图（按降级顺序）：天地图影像(img_w)+注记(cia_w) → 底图4 天地图矢量(vec_w)+注记(cva_w)
-// → 底图5 OSM（无密钥、直连）。都不可用时，才由调用方降级到 D 盘离线瓦片（EPSG:4326）。
+// 在线底图（按降级顺序，命名统一为 底图1→底图4 序号制，两端一致）：
+// 底图1 天地图影像(img_w)+注记(cia_w) → 底图2 天地图矢量(vec_w)+注记(cva_w)
+// → 底图3 OSM（无密钥、直连）。都不可用时，才由调用方降级到底图4 D 盘离线瓦片（EPSG:4326）。
 export const ONLINE_BASES = [
   {
     key: 'tianditu',
-    name: '天地图',
+    name: '底图1',
     url: '/api/tianditu/img_w/{z}/{x}/{y}.png',
     annoUrl: '/api/tianditu/cia_w/{z}/{x}/{y}.png',
     attribution: '&copy; 天地图',
@@ -19,19 +20,19 @@ export const ONLINE_BASES = [
     maxNativeZoom: 16
   },
   {
-    // 底图4：天地图矢量底图（导航用，道路分级清晰）+ 矢量注记（地名/路名）
+    // 底图2：天地图矢量底图（导航用，道路分级清晰）+ 矢量注记（地名/路名）
     key: 'tdtvec',
-    name: '底图4',
+    name: '底图2',
     url: '/api/tianditu/vec_w/{z}/{x}/{y}.png',
     annoUrl: '/api/tianditu/cva_w/{z}/{x}/{y}.png',
     attribution: '&copy; 天地图',
     maxZoom: 18
   },
   {
-    // 底图5：OSM 在线栅格（早期版本从 git 历史恢复并更名）。境内直连 tile.openstreetmap.org
+    // 底图3：OSM 在线栅格（早期版本从 git 历史恢复）。境内直连 tile.openstreetmap.org
     // 无 CDN、可能慢/超时，故排在天地图两级之后作第三层兜底；失败瓦片仅隐藏不重试。
     key: 'osm',
-    name: '底图5',
+    name: '底图3',
     url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
     subdomains: 'abc',
     attribution: '&copy; OpenStreetMap contributors',
@@ -40,8 +41,8 @@ export const ONLINE_BASES = [
   }
 ];
 
-// 底图循环/降级链（大屏与司机端同序）：天地图影像(在线) → 底图4 天地图矢量(在线)
-// → 底图5 OSM(在线) → D 盘离线瓦片(4326)
+// 底图循环/降级链（大屏与司机端同序，命名序号制）：底图1 天地图影像(在线)
+// → 底图2 天地图矢量(在线) → 底图3 OSM(在线) → 底图4 D 盘离线瓦片(4326)
 export const BASE_CHAIN = ['tianditu', 'tdtvec', 'osm', 'vector'];
 
 // 按 key 取在线源定义；'vector' 不在 ONLINE_BASES 内，返回 null（由调用方走 D 盘离线瓦片分支）。

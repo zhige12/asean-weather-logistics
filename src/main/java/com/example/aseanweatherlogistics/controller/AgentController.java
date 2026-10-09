@@ -31,11 +31,16 @@ public class AgentController {
         return routeAgentService.subscribe();
     }
 
+    /**
+     * 注册关注路线。mode 可选：road=公路导航（默认），canal=陆水联运（正在导航去平陆运河六景港），
+     * 运河禁航时 canal 模式的关注路线会随 canal-block 事件点名推给调度大屏。
+     */
     @PostMapping("/register")
     public Map<String, Object> registerRoute(
             @RequestParam String originId,
-            @RequestParam String destinationId) {
-        routeAgentService.registerActiveRoute(originId, destinationId);
+            @RequestParam String destinationId,
+            @RequestParam(required = false) String mode) {
+        routeAgentService.registerActiveRoute(originId, destinationId, mode);
         return Map.of("ok", true, "origin", originId, "destination", destinationId);
     }
 

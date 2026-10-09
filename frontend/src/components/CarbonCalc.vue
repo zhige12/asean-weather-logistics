@@ -167,5 +167,5 @@ export default {
 .carbon-tips { border-top: 1px dashed #c8e6c9; padding-top: 8px; }
 .tip-title { font-size: 12px; font-weight: 600; color: #333; margin-bottom: 4px; }
 .tip-item { font-size: 11px; color: #555; padding: 2px 0; }
-.tip-item::before { content: '💡 '; }
+.tip-item::before { content: '· '; }
 </style>

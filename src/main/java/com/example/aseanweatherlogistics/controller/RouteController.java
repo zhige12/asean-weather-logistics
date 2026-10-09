@@ -7,6 +7,7 @@ import com.example.aseanweatherlogistics.model.entity.RoadEdge;
 import com.example.aseanweatherlogistics.service.GeocodeService;
 import com.example.aseanweatherlogistics.service.GraphHopperRouteService;
 import com.example.aseanweatherlogistics.service.RouteService;
+import com.example.aseanweatherlogistics.service.IntermodalService;
 import com.example.aseanweatherlogistics.service.OsmDataLoader;
 import com.example.aseanweatherlogistics.service.WeatherSimulator;
 import com.example.aseanweatherlogistics.service.AIService;
@@ -36,8 +37,9 @@ public class RouteController {
     private final RouteRepository routeRepository;
     private final RouteAgentService routeAgentService;
     private final GeocodeService geocodeService;
+    private final IntermodalService intermodalService;
 
-    public RouteController(RouteService routeService, OsmDataLoader osmDataLoader, GraphHopperRouteService graphHopperRouteService, WeatherSimulator weatherSimulator, AIService aiService, RouteRepository routeRepository, RouteAgentService routeAgentService, GeocodeService geocodeService) {
+    public RouteController(RouteService routeService, OsmDataLoader osmDataLoader, GraphHopperRouteService graphHopperRouteService, WeatherSimulator weatherSimulator, AIService aiService, RouteRepository routeRepository, RouteAgentService routeAgentService, GeocodeService geocodeService, IntermodalService intermodalService) {
         this.routeService = routeService;
         this.osmDataLoader = osmDataLoader;
         this.graphHopperRouteService = graphHopperRouteService;
@@ -46,6 +48,7 @@ public class RouteController {
         this.routeRepository = routeRepository;
         this.routeAgentService = routeAgentService;
         this.geocodeService = geocodeService;
+        this.intermodalService = intermodalService;
     }
 
     /**
@@ -253,7 +256,14 @@ public class RouteController {
                 c.put("hazardLevel", "未知");
             }
         }
-        return Map.of("candidates", list);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("candidates", list);
+        // 平陆运河走廊（南宁→河内）：在公路候选之外并列给出「可坐船」推荐位。
+        // 独立于 candidates 数组，避免污染以公路路线为前提的老消费方（导航/选路逻辑）。
+        if (intermodalService.serves(o, d)) {
+            out.put("canalOption", intermodalService.normalSailingOption());
+        }
+        return out;
     }
 
     @GetMapping("/plan-with-weather")

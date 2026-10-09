@@ -1,5 +1,11 @@
 import { createApp } from 'vue'
+// Leaflet 销毁/缩放竞态守卫：入口顶层先打补丁，再加载任何地图组件（同 src/main.js）
+import '../utils/leafletCanvasGuard.js'
 import DriverApp from './DriverApp.vue'
+// 轻界面模式：与大屏共用 localStorage 里的开关，挂载前先落地（见 utils/perfMode.js）
+import { initPerfMode } from '../utils/perfMode.js'
+
+initPerfMode()
 
 const app = createApp(DriverApp)
 

@@ -76,10 +76,13 @@ public class TiandituTileProxyController {
      */
     private static final long PERMIT_WAIT_MS = 10_000L;
     /**
-     * 内存热缓存条数上限（磁盘是主缓存、不限张数；内存只挡热点、省磁盘 I/O）。
-     * 10 万条按单张 5~30KB 估算约 0.5~3GB，需确保 JVM -Xmx 留有余量（建议 ≥ 4G）。
+     * 内存热缓存条数上限（磁盘才是主缓存、不限张数；内存只挡热点、省磁盘 I/O）。
+     * 10 万条按单张 5~30KB 估算约 0.5~3GB，在 8GB 内存的评委机上跑离线包会直接开始换页，
+     * 表现是「整机发木、点什么都没反应」。离线包内总共才 2.9 万张瓦片，留 10 万条纯属浪费。
+     * 上限改为可配（tianditu.mem-cache-entries），默认 2 万：热点足够覆盖，内存占用降到 ~0.1-0.6GB。
      */
-    private static final int MEM_CACHE_MAX_ENTRIES = 100_000;
+    @Value("${tianditu.mem-cache-entries:20000}")
+    private int memCacheMaxEntries;
     private static final int RETRY_AFTER_SECONDS = 20;
 
     private final HttpClient client = HttpClient.newBuilder()
@@ -90,14 +93,11 @@ public class TiandituTileProxyController {
     /** 回源并发闸门。 */
     private final Semaphore upstream = new Semaphore(MAX_UPSTREAM_INFLIGHT);
 
-    /** 内存热缓存（LRU）：accessOrder=true 的 LinkedHashMap 即 LRU，超出条数从最久未用端淘汰。 */
-    private final Map<String, CachedTile> memCache = Collections.synchronizedMap(
-            new LinkedHashMap<>(256, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, CachedTile> eldest) {
-                    return size() > MEM_CACHE_MAX_ENTRIES;
-                }
-            });
+    /**
+     * 内存热缓存（LRU）：accessOrder=true 的 LinkedHashMap 即 LRU，超出条数从最久未用端淘汰。
+     * 上限来自配置，故不在字段初始化器里建（那时 @Value 还没注入），见 {@link #initKeys()}。
+     */
+    private Map<String, CachedTile> memCache;
 
     /** 同瓦去重：一屏几十张瓦片里重复坐标/预览预取与运行时撞车时，只放一个回源请求。 */
     private final ConcurrentHashMap<String, CompletableFuture<CachedTile>> inflight = new ConcurrentHashMap<>();
@@ -145,6 +145,13 @@ public class TiandituTileProxyController {
 
     @PostConstruct
     void initKeys() {
+        memCache = Collections.synchronizedMap(
+                new LinkedHashMap<>(256, 0.75f, true) {
+                    @Override
+                    protected boolean removeEldestEntry(Map.Entry<String, CachedTile> eldest) {
+                        return size() > Math.max(1000, memCacheMaxEntries);
+                    }
+                });
         List<String> merged = new ArrayList<>();
         if (configuredTk != null && !configuredTk.isBlank()) merged.add(configuredTk.trim());
         if (configuredKeys != null && !configuredKeys.isBlank()) {
@@ -156,7 +163,8 @@ public class TiandituTileProxyController {
         if (keys.isEmpty()) {
             System.err.println("[tianditu-proxy] 未配置任何密钥（tianditu.keys / tianditu.tk），瓦片将全部 503");
         } else {
-            System.out.println("[tianditu-proxy] 密钥池 " + keys.size() + " 个 key，磁盘缓存目录 " + cacheDir);
+            System.out.println("[tianditu-proxy] 密钥池 " + keys.size() + " 个 key，磁盘缓存目录 " + cacheDir
+                    + "，内存热缓存上限 " + Math.max(1000, memCacheMaxEntries) + " 张");
         }
     }
 
@@ -174,11 +182,6 @@ public class TiandituTileProxyController {
         if (x < 0 || y < 0 || x >= max || y >= max) {
             return notFound();
         }
-        if (keys.isEmpty()) {
-            // 没密钥不是「没数据」：必须让前端感知到并降级，否则底图会永久停在模糊补位上
-            return unavailable();
-        }
-
         String ck = layer + '/' + z + '/' + x + '/' + y;
 
         // 2) 内存热缓存
@@ -191,6 +194,14 @@ public class TiandituTileProxyController {
         if (disk != null) {
             memCache.put(ck, disk);
             return ok(disk);
+        }
+
+        // 缓存两级都没命中才需要回源，此时没密钥就取不到。
+        // 密钥检查必须排在缓存之后：离线演示包内刻意不含任何密钥，
+        // 若排在之前，包内已就位的整份磁盘瓦片缓存会全部 503，等于自废底图。
+        if (keys.isEmpty()) {
+            // 没密钥不是「没数据」：必须让前端感知到并降级，否则底图会永久停在模糊补位上
+            return unavailable();
         }
 
         // 4) 同瓦去重：已有请求在回源就等它的结果，避免冷启动瞬间重复烧配额

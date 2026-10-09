@@ -9,7 +9,7 @@ import java.util.Map;
 import org.springframework.stereotype.Service;
 
 /**
- * 公水联运方案模型（演示第三/四幕 · 方案B）：
+ * 陆水联运方案模型（演示第三/四幕 · 方案B）：
  * 南宁仓库 → 南宁港六景作业区（公路）→ 平陆运河（水运）→ 钦州港 → 海运 → 越南海防港 → 河内仓库。
  * <p>
  * 段时/段成本为策展的演示参数（对齐剧本：总时约 基准+0.5h、总成本约 基准-1200元），
@@ -21,9 +21,12 @@ public class IntermodalService {
 
     /** 越南段路网规划：仅用于取 海防→河内 的真实道路几何（水运段无路网，用策展中心线） */
     private final RouteService routeService;
+    /** 水运禁航红线引擎：推荐位卡片需实时标注运河禁航状态，不能继续显示「可坐船」 */
+    private final WaterRiskEngine waterRiskEngine;
 
-    public IntermodalService(RouteService routeService) {
+    public IntermodalService(RouteService routeService, WaterRiskEngine waterRiskEngine) {
         this.routeService = routeService;
+        this.waterRiskEngine = waterRiskEngine;
     }
 
     /**
@@ -94,7 +97,7 @@ public class IntermodalService {
     private volatile Map<String, Object> corridorCache;
 
     /**
-     * 公水联运「后续走廊」几何总览（司机公路段到南宁港为止，之后的运河/海运/越南公路仅供图上预览）：
+     * 陆水联运「后续走廊」几何总览（司机公路段到南宁港为止，之后的运河/海运/越南公路仅供图上预览）：
      * 水运两段无路网，用上面策展中心线；越南公路段（海防→河内）走路网 Dijkstra 真实道路，
      * 失败退化为 海防-海阳-河内 直线。供 GET /api/canal/corridor 使用。
      */
@@ -178,7 +181,52 @@ public class IntermodalService {
     }
 
     /**
-     * 生成方案B（公水联运）对比卡。
+     * 平陆运河陆水联运走廊的「可坐船」判定：只要本程是出境去越南（起点在中国侧、目的地在越南侧），
+     * 就并列推荐「坐船出境」——船经平陆运河 + 海运到海防/河内，覆盖一切「要去越南」的行程，
+     * 不再死盯 南宁(NN) → 河内(HN) 这一对。去越南不必只有公路，不带货、只是想去越南，也能全程坐船过去。
+     * <p>起点也要求在越南侧之外：已在越南境内的行程（如 河内→海防）不再推荐「从南宁坐船出境」。
+     * <p>注：船终点是海防/河内，与陆路口岸城市（如凭祥对面的同登）可能不同城，卡片文案已说明
+     * 「坐船出境到河内」，由司机自行权衡。
+     */
+    public boolean serves(String originId, String destinationId) {
+        return !routeService.isInVietnam(originId) && routeService.isInVietnam(destinationId);
+    }
+
+    /**
+     * 普通导航「不带货也能坐船去越南」推荐位摘要（常态，与公路候选并列展示，非风险兜底）：
+     * 只给展示与选路所需的最小字段；真正出发仍复用方案B（滚装上船→随船经运河→海运）。
+     */
+    public Map<String, Object> normalSailingOption() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("key", "canal");
+        m.put("type", "intermodal");
+        m.put("label", "陆水联运 · 平陆运河（可坐船出境）");
+        m.put("via", "南宁港六景 → 平陆运河 → 钦州港 → 海运 → 越南海防港 → 河内");
+        m.put("hours", round1(totalHours()));
+        m.put("distanceKm", round1(LEGS.stream().mapToDouble(Leg::km).sum()));
+        m.put("costYuan", round0(totalCostYuan()));
+        m.put("canalTollNote", "平陆运河过闸费当前免征");
+        List<Map<String, Object>> legs = new ArrayList<>();
+        for (Leg leg : LEGS) {
+            Map<String, Object> lm = new LinkedHashMap<>();
+            lm.put("mode", leg.mode());
+            lm.put("from", leg.from());
+            lm.put("to", leg.to());
+            lm.put("km", leg.km());
+            lm.put("hours", leg.hours());
+            legs.add(lm);
+        }
+        m.put("legs", legs);
+        m.put("note", "车辆滚装上船、随船经平陆运河转海运直达越南；不赶时间、甚至不带货也能全程坐船出境到河内。");
+        // 禁航状态随卡片下发：前端据此标红并说明情况，避免禁航后仍推荐「可坐船出境」
+        boolean blocked = waterRiskEngine.isWaterBlocked();
+        m.put("canalBlocked", blocked);
+        m.put("canalBlockedReason", blocked ? waterRiskEngine.blockedReason() : null);
+        return m;
+    }
+
+    /**
+     * 生成方案B（陆水联运）对比卡。
      *
      * @param roadBaselineKm    公路基准里程（来自真实路网 Dijkstra）
      * @param roadBaselineHours 公路基准时长（来自真实路网 Dijkstra）
@@ -191,7 +239,7 @@ public class IntermodalService {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", "B");
         m.put("type", "intermodal");
-        m.put("name", "公水联运（平陆运河）");
+        m.put("name", "陆水联运（平陆运河）");
         m.put("route", "南宁 → 南宁港六景作业区 → 平陆运河 → 钦州港 → 海运 → 越南海防港 → 河内");
         List<Map<String, Object>> legs = new ArrayList<>();
         // 段说明里的钟点用占位符在生成卡片时替换：LEGS 是静态模板（类加载时定型），

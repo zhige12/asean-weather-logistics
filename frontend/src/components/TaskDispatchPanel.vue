@@ -44,14 +44,21 @@
 
     <!-- 触发出车前 AI 气象分析：路线比选与派单入口在「AI 决策分析」面板 -->
     <div class="row actions">
-      <button class="btn primary" @click="analyze">🔍 AI 气象分析并规划路线</button>
+      <button class="btn primary" @click="analyze">
+        <!-- 细线放大镜：不用 emoji（各系统渲染不一致），stroke 用 currentColor 跟随按钮文字色 -->
+        <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="10.5" cy="10.5" r="7" />
+          <line x1="15.9" y1="15.9" x2="21" y2="21" />
+        </svg>
+        AI 气象分析并规划路线
+      </button>
       <button v-if="task" class="btn outline" :disabled="busy" @click="reset">撤销派单</button>
     </div>
 
     <!-- 分析已触发：路线比选与派单入口在「AI 决策分析」面板的『开始导航派单』模板里 -->
     <div v-if="analyzed" class="analyze-box">
       <div class="analyze-head">
-        <span>🌦 出车前 AI 气象分析已触发</span>
+        <span>出车前 AI 气象分析已触发</span>
         <span class="muted od-tag">{{ form.originId }} → {{ form.destinationId }}</span>
       </div>
       <div class="analyze-summary">
@@ -128,9 +135,9 @@ const stateClass = computed(() => {
 // 任务详情区的状态行（含拒单）
 const statusLine = computed(() => {
   const s = task.value?.status;
-  if (s === "ACCEPTED") return "✅ 司机已接单";
-  if (s === "REJECTED") return "❌ 司机已拒单，可改派或撤销";
-  return "⏳ 已派单，等待司机接单";
+  if (s === "ACCEPTED") return "司机已接单";
+  if (s === "REJECTED") return "司机已拒单，可改派或撤销";
+  return "已派单，等待司机接单";
 });
 const statusClass = computed(() => {
   const s = task.value?.status;
@@ -188,6 +195,16 @@ defineExpose({ refresh });
 <style scoped>
 .task-card {
   border: 1px solid rgba(79, 109, 245, 0.35);
+}
+.btn-icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  vertical-align: -2px;
+  margin-right: 4px;
 }
 .note {
   font-size: 11px;

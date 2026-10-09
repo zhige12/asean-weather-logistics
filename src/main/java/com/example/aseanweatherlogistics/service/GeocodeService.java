@@ -189,7 +189,8 @@ public class GeocodeService {
      * @throws IllegalArgumentException 最近节点超过 SNAP_MAX_KM（覆盖范围外）
      */
     public Map<String, Object> snap(String label, double lat, double lng) {
-        var nodes = routeService.getAllNodes();
+        // 只读视图扫描：不再每次拷贝数万节点（getAllNodes 会 new ArrayList）
+        var nodes = routeService.allNodesView();
         var best = routeService.getNode("NN");
         double bestKm = Double.MAX_VALUE;
         for (var n : nodes) {

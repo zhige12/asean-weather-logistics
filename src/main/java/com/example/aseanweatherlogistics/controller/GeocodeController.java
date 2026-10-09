@@ -41,7 +41,7 @@ public class GeocodeController {
 
     /**
      * 坐标 → 最近路网节点（吸附）。手机端把地名编码成坐标后调此接口拿到 nodeId，
-     * 再复用司机端既有的按节点算路/候选/熔断/公水联运流程。
+     * 再复用司机端既有的按节点算路/候选/熔断/陆水联运流程。
      * 超出覆盖范围（最近节点 &gt; 5km）由 GeocodeService 抛 IllegalArgumentException → 400。
      */
     @GetMapping("/snap")

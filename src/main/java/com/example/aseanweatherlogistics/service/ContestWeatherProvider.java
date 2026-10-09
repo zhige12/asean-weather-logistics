@@ -34,6 +34,8 @@ public class ContestWeatherProvider implements WeatherProvider {
     private static final String USER_AGENT = "asean-weather-logistics/1.0 (contest)";
     private static final List<String> OBS_PRIMARY_VARS = List.of("TMP", "RH", "PRE");
     private static final List<String> OBS_SECONDARY_VARS = List.of("WIN_U", "WIN_V", "VIS");
+    /** 气压单独一批：接口单次最多 3 变量，前两批已满；PRS 用于台风/强对流判据 */
+    private static final List<String> OBS_PRESSURE_VARS = List.of("PRS");
 
     @Value("${weather.real.base-url:}")
     private String baseUrl;
@@ -52,10 +54,13 @@ public class ContestWeatherProvider implements WeatherProvider {
             .build();
     private final ObjectMapper mapper = new ObjectMapper();
     /**
-     * 主/次两批气象请求并行拉取线程池：官方接口单次最多 3 个变量，6 个变量必须分两批；
-     * 并发后总耗时≈单批（约 10s）而非两批相加（约 21s），避免现场“刷新气象”让评委干等。
+     * 三批气象请求并行拉取线程池：官方接口单次最多 3 个变量，7 个变量必须分三批；
+     * 并发后总耗时≈单批（约 10s）而非三批相加（约 30s），避免现场“刷新气象”让评委干等。
+     * <p>
+     * 合规：三批是同一轮取数的并发分片，仍落在 {@code RealWeatherService} 的
+     * 60s 最小回源间隔内，不会因加变量而提高对上游的访问频度。
      */
-    private final ExecutorService fetchExecutor = Executors.newFixedThreadPool(2, r -> {
+    private final ExecutorService fetchExecutor = Executors.newFixedThreadPool(3, r -> {
         Thread t = new Thread(r, "contest-weather-fetch");
         t.setDaemon(true);
         return t;
@@ -68,7 +73,7 @@ public class ContestWeatherProvider implements WeatherProvider {
 
     @Override
     public String label() {
-        return "比赛官方接口（CRA40 实况）";
+        return "CRA40";
     }
 
     @Override
@@ -91,16 +96,20 @@ public class ContestWeatherProvider implements WeatherProvider {
                 CompletableFuture.supplyAsync(() -> queryObservations(OBS_PRIMARY_VARS, bbox), fetchExecutor);
         CompletableFuture<ObservationResponse> secondaryFuture =
                 CompletableFuture.supplyAsync(() -> queryObservations(OBS_SECONDARY_VARS, bbox), fetchExecutor);
+        CompletableFuture<ObservationResponse> pressureFuture =
+                CompletableFuture.supplyAsync(() -> queryObservations(OBS_PRESSURE_VARS, bbox), fetchExecutor);
         try {
-            CompletableFuture.allOf(primaryFuture, secondaryFuture)
+            CompletableFuture.allOf(primaryFuture, secondaryFuture, pressureFuture)
                     .get(requestTimeoutSeconds + 5, TimeUnit.SECONDS);
         } catch (Exception e) {
             // 任一批超时/异常不阻塞另一批：下方用 getNow(null) 各取已得结果
             primaryFuture.cancel(true);
             secondaryFuture.cancel(true);
+            pressureFuture.cancel(true);
         }
         ObservationResponse p1 = primaryFuture.getNow(null);
         ObservationResponse p2 = secondaryFuture.getNow(null);
+        ObservationResponse p3 = pressureFuture.getNow(null);
         // 仅主批次（含熔断核心 PRE、温度 TMP、湿度 RH）为硬性必需；
         // 次批次（风/能见度）失败时按默认值降级，不因次要变量缺失而整条链路空返回。
         if (p1 == null) {
@@ -116,6 +125,9 @@ public class ContestWeatherProvider implements WeatherProvider {
         if (p2 != null) {
             merged.putAll(p2.data());
         }
+        if (p3 != null) {
+            merged.putAll(p3.data());
+        }
         long fetchedAt = System.currentTimeMillis();
         List<RealWeatherService.WeatherPoint> out = new ArrayList<>(nodes.size());
         for (RoadNode node : nodes) {
@@ -128,9 +140,11 @@ public class ContestWeatherProvider implements WeatherProvider {
             double windU = read(merged, "WIN_U", lastTime, latIdx, lonIdx, 0);
             double windV = read(merged, "WIN_V", lastTime, latIdx, lonIdx, 0);
             double windKph = Math.hypot(windU, windV) * 3.6;
+            // 气压取不到时填标准海压 1013：等价于"无低气压信号"，不触发台风判据
+            double prs = read(merged, "PRS", lastTime, latIdx, lonIdx, 1013.0);
             out.add(new RealWeatherService.WeatherPoint(
                     node.getId(), node.getLatitude(), node.getLongitude(),
-                    tmp, rh, pre, windKph, visKm * 1000.0, fetchedAt
+                    tmp, rh, pre, windKph, visKm * 1000.0, prs, fetchedAt
             ));
         }
         return out;

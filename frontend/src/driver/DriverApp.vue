@@ -1,5 +1,5 @@
 <template>
-  <div class="phone" :class="{ 'nav-mode': navigating || previewing }">
+  <div class="phone" :class="{ 'nav-mode': navigating || previewing, 'phone-mini': !pcLayout }">
     <!-- ====== HOME PAGE（高德风格：全屏地图 + 悬浮搜索 + 宫格 + 胶囊 Tab）====== -->
     <div v-if="!navigating && !previewing" class="home-page amap">
       <!-- 全屏可交互地图背景 -->
@@ -16,6 +16,15 @@
           </svg>
         </button>
         <button class="hm-ctrl-btn base-btn" title="切换底图" @click="cycleBase">{{ baseName }}</button>
+        <!-- 桌面端专属：布局切换（PC 整窗大屏 ↔ 移动版 420px 手机窄列），手机上不显示 -->
+        <button v-if="isDesktop" class="hm-ctrl-btn layout-btn" :title="pcLayout ? '切换到移动版（手机小屏样式）' : '切换到PC版（整窗大屏样式）'" @click="toggleLayoutMode">
+          <svg v-if="pcLayout" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="7.5" y="2.5" width="9" height="19" rx="2"/><path d="M10.5 18.8h3"/>
+          </svg>
+          <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="2.5" y="4.5" width="19" height="12.5" rx="1.5"/><path d="M8 20.5h8M12 17v3.5"/>
+          </svg>
+        </button>
         <!-- 桌面端专属：一键浏览器全屏（演示大屏态）；手机端不显示 -->
         <button v-if="isDesktop" class="hm-ctrl-btn fs-btn" :title="isFullscreen ? '退出全屏' : '全屏显示'" @click="toggleFullscreen">
           <svg v-if="!isFullscreen" viewBox="0 0 24 24" aria-hidden="true">
@@ -86,9 +95,9 @@
               <span>可选路线（{{ candidates.length }} 条）</span>
               <span class="cand-hint">点选一条进入地图预览</span>
             </div>
-            <div v-for="c in candidates" :key="c.key" class="cand-item" :class="{ sel: c.key === selectedKey }" @click="openPreview(c.key)">
+            <div v-for="c in candidates" :key="c.key" class="cand-item" :class="{ sel: selectedMode === 'road' && c.key === selectedKey }" @click="openPreview(c.key)">
               <div class="cand-left">
-                <span class="cand-radio" :class="{ on: c.key === selectedKey }"></span>
+                <span class="cand-radio" :class="{ on: selectedMode === 'road' && c.key === selectedKey }"></span>
                 <div class="cand-info">
                   <div class="cand-title">{{ c.label }}</div>
                   <div class="cand-via">{{ c.via }}</div>
@@ -100,8 +109,29 @@
                 </div>
               </div>
               <div class="cand-right">
-                <span v-if="c.hazardProbability >= 0" class="prob-pill" :class="probClass(c.hazardProbability)">{{ c.hazardProbability }}%</span>
-                <span class="prob-arrow" v-if="c.key === selectedKey">▶</span>
+                <span v-if="c.hazardProbability >= 0" class="prob-pill" :title="c.hazardProbability < 15 && !c.hazardOccurred ? '灾害概率 ' + c.hazardProbability + '%（低于阈值视为通畅）' : ''" :class="probClass(c.hazardProbability, c.hazardOccurred)">{{ probText(c) }}</span>
+                <span class="prob-arrow" v-if="selectedMode === 'road' && c.key === selectedKey">▶</span>
+              </div>
+            </div>
+            <!-- 可坐船推荐位（平陆运河走廊）：与公路候选并列，不带货也能全程坐船出境；禁航时标红并说明情况 -->
+            <div v-if="canalOption" class="cand-item canal-cand" :class="{ sel: selectedMode === 'canal', 'canal-blocked': canalBlockedNow }" @click="selectCanal">
+              <div class="cand-left">
+                <span class="cand-radio" :class="{ on: selectedMode === 'canal' }"></span>
+                <div class="cand-info">
+                  <div class="cand-title">🚢 {{ canalOption.label }}</div>
+                  <div class="cand-via">{{ canalOption.via }}</div>
+                  <div class="cand-meta">
+                    <span class="meta-tag">{{ canalOption.hours }}h</span>
+                    <span class="meta-tag">{{ canalOption.distanceKm }}km</span>
+                    <span v-if="!canalBlockedNow" class="meta-tag ok">✓ 不受公路熔断影响</span>
+                    <span v-else class="meta-tag blocked">🚫 {{ canalBlockReasonNow }}</span>
+                  </div>
+                </div>
+              </div>
+              <div class="cand-right">
+                <span v-if="!canalBlockedNow" class="canal-badge">可坐船</span>
+                <span v-else class="canal-badge blocked">🚫 已禁航</span>
+                <span class="prob-arrow" v-if="selectedMode === 'canal'">▶</span>
               </div>
             </div>
           </div>
@@ -368,7 +398,7 @@
           <span><i class="lg lg-port"></i>口岸</span>
         </div>
 
-        <!-- 手动切换底图：天地图影像 → 底图4 矢量 → D 盘离线，循环 -->
+        <!-- 手动切换底图：底图1 天地图影像 → 底图2 矢量 → 底图3 OSM → 底图4 D 盘离线，循环 -->
         <button class="base-switch-btn" title="切换底图" @click="cycleBase">🗺 {{ baseName }}</button>
 
         <!-- 顶部状态栏（预览 / 导航共用）-->
@@ -386,7 +416,15 @@
             <span class="status-dot"></span>
             <span>{{ navigating ? statusText : previewStatusText }}</span>
           </div>
-          <!-- 桌面端专属：导航/预览态也能一键全屏 -->
+          <!-- 桌面端专属：导航态同样可切 移动版/PC版 布局与全屏 -->
+          <button v-if="isDesktop" class="nav-fs-btn" :title="pcLayout ? '切换到移动版（手机小屏样式）' : '切换到PC版（整窗大屏样式）'" @click="toggleLayoutMode">
+            <svg v-if="pcLayout" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="7.5" y="2.5" width="9" height="19" rx="2"/><path d="M10.5 18.8h3"/>
+            </svg>
+            <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="2.5" y="4.5" width="19" height="12.5" rx="1.5"/><path d="M8 20.5h8M12 17v3.5"/>
+            </svg>
+          </button>
           <button v-if="isDesktop" class="nav-fs-btn" :title="isFullscreen ? '退出全屏' : '全屏显示'" @click="toggleFullscreen">
             <svg v-if="!isFullscreen" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>
@@ -428,15 +466,15 @@
             </div>
             <div v-show="!previewCollapsed" ref="previewList" class="preview-list">
               <div v-for="(c, i) in candidates" :key="c.key"
-                   class="pv-item" :class="{ sel: c.key === selectedKey, safest: c.key === safestKey, risky: isHighRisk(c) }"
+                   class="pv-item" :class="{ sel: selectedMode === 'road' && c.key === selectedKey, safest: c.key === safestKey, risky: isHighRisk(c) }"
                    :style="{ animationDelay: (i * 60) + 'ms' }"
                    @click="selectCandidate(c.key)">
-                <span class="cand-radio" :class="{ on: c.key === selectedKey }"></span>
+                <span class="cand-radio" :class="{ on: selectedMode === 'road' && c.key === selectedKey }"></span>
                 <div class="pv-info">
                   <div class="pv-title">
                     {{ c.label }}
                     <span v-if="c.key === safestKey" class="pv-flag safest-flag">AI 最安全</span>
-                    <span v-else-if="c.key === selectedKey" class="pv-flag">已选</span>
+                    <span v-else-if="selectedMode === 'road' && c.key === selectedKey" class="pv-flag">已选</span>
                   </div>
                   <div class="pv-via">{{ c.via }}</div>
                   <div class="pv-meta">
@@ -448,14 +486,28 @@
                   </div>
                 </div>
                 <div class="pv-right">
-                  <span v-if="c.hazardProbability >= 0" class="prob-pill glow" :class="probClass(c.hazardProbability)">
-                    {{ c.hazardProbability }}%
+                  <span v-if="c.hazardProbability >= 0" class="prob-pill glow" :class="probClass(c.hazardProbability, c.hazardOccurred)">
+                    {{ probText(c) }}
                   </span>
                   <span v-else class="prob-pill unknown">暂无预测</span>
                   <button class="pv-detail-btn" :disabled="c.hazardProbability < 0"
                           @click.stop="openHazardDetail(c)">
                     展开详情 ▾
                   </button>
+                </div>
+              </div>
+              <!-- 可坐船推荐位（平陆运河走廊）：与公路候选并列，点选后「开始导航」先导航至南宁港六景上船 -->
+              <div v-if="canalOption" class="pv-item canal-cand" :class="{ sel: selectedMode === 'canal', 'canal-blocked': canalBlockedNow }" @click="selectCanal">
+                <span class="cand-radio" :class="{ on: selectedMode === 'canal' }"></span>
+                <div class="pv-info">
+                  <div class="pv-title">🚢 {{ canalOption.label }}<span v-if="!canalBlockedNow" class="pv-flag canal-flag">可坐船</span><span v-else class="pv-flag canal-flag blocked">🚫 已禁航</span></div>
+                  <div class="pv-via">{{ canalOption.via }}</div>
+                  <div class="pv-meta">
+                    <span class="meta-tag">{{ canalOption.hours }}h</span>
+                    <span class="meta-tag">{{ canalOption.distanceKm }}km</span>
+                    <span v-if="!canalBlockedNow" class="meta-tag ok">✓ 不受公路熔断影响</span>
+                    <span v-else class="meta-tag blocked">🚫 {{ canalBlockReasonNow }}，暂不可选</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -477,8 +529,8 @@
           <div class="eta-sheen"></div>
           <div class="nav-info-main">
             <div class="nav-eta">
-              <span class="eta-num">{{ route.estimatedHours ? route.estimatedHours.toFixed(1) : '--' }}</span>
-              <span class="eta-unit">小时</span>
+              <span class="eta-num">{{ navHoursDisplay }}</span>
+              <span class="eta-unit">{{ navEtaUnit }}</span>
             </div>
             <div class="nav-dist">
               <span class="dist-num">{{ route.totalDistanceKm || '--' }}</span>
@@ -492,10 +544,19 @@
             <span class="eta-arrival"><i class="pulse-dot"></i>预计到达 {{ etaArrival }}</span>
             <span class="eta-live" v-if="navigating">导航中</span>
             <span v-if="route.extraHours > 0" class="delay-tag">延误 +{{ route.extraHours }}h</span>
-            <!-- 水运方案：明示公水联运走平陆运河，司机一眼知道自己在哪种运输方式上 -->
-            <span v-if="isCanalPlan" class="canal-tag">🚢 公水联运 · 平陆运河</span>
+            <!-- 水运方案：明示陆水联运走平陆运河，司机一眼知道自己在哪种运输方式上 -->
+            <span v-if="isCanalPlan" class="canal-tag">🚢 陆水联运 · 平陆运河</span>
           </div>
           <div class="eta-bar"><span class="eta-bar-fill"></span></div>
+        </div>
+
+        <!-- 调度方案 C 生效中：明写车辆已停驶，并给司机一个手动解除等待的入口 -->
+        <div v-if="waitHold" class="hold-card">
+          <div class="hold-main">
+            <div class="hold-title">⏸ 原地等待中 · 车辆停驶</div>
+            <div class="hold-sub">已按调度指令停在当前位置，车标不再前进；冷链机组保持运行，待风险解除后恢复行驶。</div>
+          </div>
+          <button class="hold-resume" @click="resumeFromHold">恢复行驶</button>
         </div>
 
         <!-- 操作按钮 -->
@@ -624,7 +685,7 @@
               <span v-else-if="opt.key === safestRerouteKey" class="rz-badge best">风险最低</span>
               <span v-if="isHighRisk(opt)" class="rz-badge danger">高风险 · 不推荐</span>
               <span v-if="opt.hazardProbability >= 0" class="prob-pill" :class="probClass(opt.hazardProbability, opt.hazardOccurred)">
-                {{ opt.hazardProbability }}%
+                {{ probText(opt) }}
               </span>
               <span v-else class="prob-pill unknown">暂无预测</span>
             </div>
@@ -738,8 +799,8 @@ function mercY(latDeg) {
  */
 const BASE_DEGRADE_ERROR_BUDGET = 6
 
-// 底图短名（手动切换按钮显示用）：卫星=天地图影像 / 底图4=天地图矢量 / 底图5=OSM / 离线=D 盘离线瓦片
-const BASE_SHORT_NAMES = { tianditu: '卫星', tdtvec: '底图4', osm: '底图5', vector: '离线' }
+// 底图短名（手动切换按钮显示用，序号制命名，与大屏同序）：底图1=天地图影像 / 底图2=天地图矢量 / 底图3=OSM / 底图4=D 盘离线瓦片
+const BASE_SHORT_NAMES = { tianditu: '底图1', tdtvec: '底图2', osm: '底图3', vector: '底图4' }
 
 // 口岸坐标（真实经纬度），供司机端地图标注
 const PORTS = [
@@ -758,7 +819,7 @@ const NODE_NAMES = {
 }
 
 // 中国境内节点（其余为越南侧）。用于判断这一程是否跨境：
-// 公水联运方案的第一程是「南宁 → 南宁港六景作业区」，属国内段，不能标「跨境」。
+// 陆水联运方案的第一程是「南宁 → 南宁港六景作业区」，属国内段，不能标「跨境」。
 const CN_NODE_IDS = new Set(['NN', 'LJ', 'CZ', 'PX', 'YGG', 'DX', 'HK'])
 
 /**
@@ -850,20 +911,26 @@ export default {
       taskRejecting: false,
       // 订单详情预览弹层（收到派单后查看货物/起终点/AI 分析，并在此接单或拒单）
       showOrderDetail: false,
-      // 当前执行的调度方案：'A'=公路绕行 / 'B'=公水联运 / 'C'=原地等待 / null=非调度（司机自己规划的行程）。
+      // 当前执行的调度方案：'A'=公路绕行 / 'B'=陆水联运 / 'C'=原地等待 / null=非调度（司机自己规划的行程）。
       // 之前 planId 只在 _switchNavForPlan/_autoStartDispatchNav 的参数里用过就丢了，
       // 导致播报和状态卡无从判断"当前是不是水运方案"。改为落库到组件状态，供全流程取用。
       activePlanId: null,
       // 调度方案切换期间的抑制标志：防止 destinationId watcher 触发 _resetCandidates 清空路线
       _switchingPlan: false,
+      // 方案 C「原地等待」生效中：车辆停驶，模拟行驶不许推进、也不许被任何降级/重建路径重新拉起。
+      // 原来收到 C 只弹一条提示、定时器照跑 —— 屏上写「就近停靠等待」，车标却继续沿路线前进。
+      waitHold: false,
       // GPS 定位状态
-      gpsStatus: 'searching', // searching | locked | unavailable | simulating
+      gpsStatus: 'searching', // searching | locked | unavailable | simulating | hold
       // 导航状态
       routeLoading: false,
       candidateLoading: false,
       navigating: false,
       // 本次导航出发时刻：ETA 显示/播报都以此为锚，避免轮询刷新后到达时间被反复重算
       navigationStartedAt: 0,
+      // 实时速度推算的「剩余小时」：null=尚未算出（退回出发锚点）；导航中随行驶进度动态刷新，
+      // 让预计时间从「出发时的一次性全程粗估」变成「按实际快慢不断修正的动态值」
+      navRemainHours: null,
       // 全屏大地图预览（选路线阶段）：预览中尚未开始导航，无 GPS 守护
       previewing: false,
       // 预览面板列表收起：收起后浮层更矮，露出更多底图与路线
@@ -886,6 +953,12 @@ export default {
       // 多路线候选（司机自选）
       candidates: [],
       selectedKey: 'recommended',
+      // 平陆运河走廊的「可坐船」推荐位（常态，与公路候选并列）；null=本 O/D 不能坐船
+      canalOption: null,
+      // 运河禁航实时状态（canal-block/canal-recover SSE 维护）：null=未收到事件，看 canalOption 快照
+      canalBlockLive: null,
+      // 当前选中的出行方式：'road'=公路候选 / 'canal'=坐船（陆水联运）
+      selectedMode: 'road',
       viaText: '',
       // 灾害概率预测（出发前展示百分比 / 途中实时刷新）
       forecast: null,
@@ -899,7 +972,8 @@ export default {
       // 语音播报（抢占式）：新播报立即打断正在播的内容
       _voiceQueue: [],
       _voiceTimer: null,
-      _voiceCooldown: 0,
+      // 语音列表是否曾经就绪（就绪后的瞬时返空不再傻等超时，见 _waitVoicesReady）
+      _voicesSeenOnce: false,
       // === 调度大屏功能对齐（11幕演示）===
       // 任务变更通知（调度下发）：中越双语 + 权益保障 + 确认接收
       taskChange: null,
@@ -917,14 +991,14 @@ export default {
       // AI 方案建议（A/B/C 三方案对比，供司机理解调度决策依据）
       agentPlans: null,
       agentPlansLoading: false,
-      // 底图：默认在线天地图影像，按「天地图 → 底图4 矢量 → D 盘离线瓦片」自动降级，也可手动循环切换。
+      // 底图：默认在线底图1 天地图影像，按「底图1 → 底图2 → 底图3 → 底图4」自动降级，也可手动循环切换。
       // 在线源在探测窗口内无任一瓦片成功（断网/403）即降到下一个；降到末级 D 盘离线时，
       // 因那套 jpg 是 EPSG:4326、与主图 3857 不同系，需整图重建（见 _enterOfflineD）。
       // 网络恢复后自动切回在线天地图。导航图与首页图各持一份降级状态，互不影响。
       // _useOfflineD=true 表示当前处于 D 盘离线（EPSG:4326）模式。
       _useOfflineD: false,
-      // 当前底图短名（手动切换按钮显示）：卫星 / 矢量 / 离线
-      baseName: '卫星',
+      // 当前底图短名（手动切换按钮显示）：底图1 / 底图2 / 底图3 / 底图4
+      baseName: '底图1',
       _navBase: null,
       _homeBase: null,
       // risk-blink 的 JS 脉冲（preferCanvas 后折线无 SVG 元素可挂 CSS 类名）
@@ -969,6 +1043,8 @@ export default {
       // 桌面端（≥900px）标识：显示全屏入口并启用整窗布局；isFullscreen 跟踪 Fullscreen API 状态
       isDesktop: false,
       isFullscreen: false,
+      // 桌面布局模式：true=PC 整窗大屏 / false=移动版 420px 手机窄列（仅 ≥900px 有意义，localStorage 持久化）
+      pcLayout: (() => { try { return localStorage.getItem('driver_pc_layout') !== 'mini' } catch (e) { return true } })(),
       // 首页概览地图独立实例（与导航地图 this.map 互不干扰）
       _homeMap: null,
       // 退出导航二次确认弹层
@@ -1007,11 +1083,26 @@ export default {
     etaDate() {
       if (!this.route.estimatedHours) return null
       if (this.navigating && this.navigationStartedAt) {
+        // 实时 ETA：以「当前时刻 + 按实际速度推算的剩余时间」为准，开得比计划快则提前、
+        // 受阻/绕行则顺延；剩余时间尚未由行驶进度算出时，退回「出发时刻 + 全程计划耗时」的粗估锚点。
+        if (this.navRemainHours != null) {
+          return new Date(Date.now() + this.navRemainHours * 3600 * 1000)
+        }
         return new Date(this.navigationStartedAt + this.route.estimatedHours * 3600 * 1000)
       }
       const backendEta = Date.parse(this.route.estimatedArrival || '')
       if (!Number.isNaN(backendEta)) return new Date(backendEta)
       return new Date(Date.now() + this.route.estimatedHours * 3600 * 1000)
+    },
+    // 导航中大数字改为「实时速度推算的剩余小时」：起步≈全程计划耗时，之后随实际速度提前/顺延
+    navHoursDisplay() {
+      if (this.navigating && this.navRemainHours != null) {
+        return Math.max(0, this.navRemainHours).toFixed(1)
+      }
+      return this.route.estimatedHours ? this.route.estimatedHours.toFixed(1) : '--'
+    },
+    navEtaUnit() {
+      return this.navigating && this.navRemainHours != null ? '小时后到达' : '小时'
     },
     etaArrival() {
       if (!this.etaDate) return '--'
@@ -1107,12 +1198,30 @@ export default {
           ? 'DRIVER_VN' : 'DRIVER'
       } catch (e) { return 'DRIVER' }
     },
-    /** 当前是否在「公水联运（平陆运河）」方案上——播报/状态卡据此提到平陆运河 */
+    /** 当前是否在「陆水联运（平陆运河）」方案上——播报/状态卡据此提到平陆运河 */
     isCanalPlan() { return this.activePlanId === 'B' },
+    /** 运河当前是否禁航：SSE 实时状态优先，其次用后端随 canalOption 下发的静态快照 */
+    canalBlockedNow() {
+      if (this.canalBlockLive) return this.canalBlockLive.blocked
+      return !!(this.canalOption && this.canalOption.canalBlocked)
+    },
+    canalBlockReasonNow() {
+      if (this.canalBlockLive && this.canalBlockLive.blocked && this.canalBlockLive.reason) return this.canalBlockLive.reason
+      return (this.canalOption && this.canalOption.canalBlockedReason) || '平陆运河触发通航安全红线'
+    },
+    /**
+     * 接单闸门：未接单（无任务/待接/已拒）时，调度大屏的任何控制指令
+     * （确认切换方案下发、任务变更、自动导航、改起终点）一律不生效——
+     * 司机先接单，接单才等于把"路线控制权"交给调度；派单本身（task-assigned）
+     * 是待接订单的投递入口，不在此限制之列。
+     */
+    isTaskAccepted() {
+      return this.mode === 'LOGISTICS' && !!this.task && this.task.status === 'ACCEPTED'
+    },
     /** 运输方式简述（中文），供出发播报用。措辞避免与上一句"到南宁港六景作业区"重复 */
     transportBriefZh() {
       return this.isCanalPlan
-        ? '本次为公水联运，车辆在港区交接后，您随船经平陆运河至钦州港，再海运至越南海防港'
+        ? '本次为陆水联运，车辆在港区交接后，您随船经平陆运河至钦州港，再海运至越南海防港'
         : ''
     },
     /** 运输方式简述（越南语）。kênh đào Bình Lục = 平陆运河，与后端触达文案用词一致 */
@@ -1138,6 +1247,8 @@ export default {
       return `${this.originName} → ${this.destinationName}${cross ? '（跨境）' : ''}`
     },
     statusClass() {
+      // 停驶等待优先于路况着色：此刻画面里车辆本来就不该在动
+      if (this.waitHold) return 'hold'
       if (this.route.rerouted) return 'rerouted'
       // 用 pathRisks（已按本路线过滤）：直接用 route.riskSegments 是全网风险，
       // 别处熔断也会让状态条显示"风险预警"，而本程其实全线通畅。
@@ -1145,6 +1256,7 @@ export default {
       return 'ok'
     },
     statusText() {
+      if (this.waitHold) return '原地等待 · 车辆停驶'
       if (this.route.rerouted) return '已熔断 · 自动绕行'
       if (this.pathRisks.length) return '风险预警 · 谨慎驾驶'
       return '全线通畅'
@@ -1195,13 +1307,13 @@ export default {
     gpsClass() {
       return {
         searching: 'gps-searching', locked: 'gps-locked',
-        unavailable: 'gps-unavailable', simulating: 'gps-simulating'
+        unavailable: 'gps-unavailable', simulating: 'gps-simulating', hold: 'gps-hold'
       }[this.gpsStatus] || 'gps-searching'
     },
     gpsLabel() {
       return {
         searching: '搜索中…', locked: '已定位 ✓',
-        unavailable: '不可用 ✗', simulating: '模拟行驶 △'
+        unavailable: '不可用 ✗', simulating: '模拟行驶 △', hold: '停驶等待 ▮'
       }[this.gpsStatus] || '搜索中…'
     },
     quickRoutes() {
@@ -1224,6 +1336,13 @@ export default {
     risks: {
       handler() { this.drawRoute() },
       deep: false
+    },
+    // 开始/结束导航：重置实时 ETA——剩余时间改由模拟行驶 tick 依实际速度重新推算，
+    // 开始时先按全程计划耗时给个粗估，避免首帧空白
+    navigating(v) {
+      this._etaCalcAt = 0
+      this.navRemainHours = null
+      if (v) this._updateLiveEta(true)
     },
     originId(v) {
       this.cargo.from = NODE_NAMES[v] || v
@@ -1262,7 +1381,7 @@ export default {
       this.voiceDebugOn = new URLSearchParams(window.location.search).get('voicedebug') === '1'
     } catch (e) { /* 忽略 */ }
     if (this.voiceDebugOn) this._vdbg('诊断开启 · native=' + this._isNativeShell())
-    // 底图按自动降级链挂载（天地图影像 → 底图4 矢量 → D 盘离线瓦片），
+    // 底图按自动降级链挂载（底图1 天地图影像 → 底图2 矢量 → 底图3 OSM → 底图4 D 盘离线），
     // 直接建图。
     this.$nextTick(() => {
       this.initMap()
@@ -1397,7 +1516,7 @@ export default {
           this._homeMapRO = new ResizeObserver(() => { if (this._homeMap) this._homeMap.invalidateSize() })
           this._homeMapRO.observe(el)
         }
-        // 首页底图与导航地图同一套降级链：天地图影像 → 底图4 矢量 → D 盘离线瓦片。
+        // 首页底图与导航地图同一套降级链：底图1 影像 → 底图2 矢量 → 底图3 OSM → 底图4 D 盘离线。
         this._homeBase = { idx: this._baseStartIdx(), map }
         this._mountBase(map, this._homeBase)
       } catch (e) {
@@ -1426,6 +1545,11 @@ export default {
           if (p && p.catch) p.catch(() => {})
         }
       } catch (e) { /* 浏览器拒绝全屏时静默 */ }
+    },
+    /** 桌面端布局切换：PC 整窗大屏 ↔ 移动版 420px 手机窄列；地图尺寸由 ResizeObserver 自动重测 */
+    toggleLayoutMode() {
+      this.pcLayout = !this.pcLayout
+      try { localStorage.setItem('driver_pc_layout', this.pcLayout ? 'pc' : 'mini') } catch (e) { /* 隐私模式写入失败时静默 */ }
     },
     homeZoom(d) {
       if (this._homeMap) this._homeMap.setZoom(this._homeMap.getZoom() + d)
@@ -1479,7 +1603,7 @@ export default {
     },
     // ---------- 地图（计划书 4.4） ----------
     /**
-     * 底图：天地图影像 → 底图4 天地图矢量 → D 盘离线瓦片，自动降级，可手动循环切换。
+     * 底图：底图1 天地图影像 → 底图2 天地图矢量 → 底图3 OSM → 底图4 D 盘离线，自动降级，可手动循环切换。
      *
      * 这里同时防止「旧 Leaflet 实例绑定到已被 Vue v-if 移除的容器」：
      * 退出导航/预览后 this.map 仍非空，调度确认再次进入导航时若不校验容器，
@@ -1616,7 +1740,7 @@ export default {
       this.map.on('zoomend', redrawOnZoom)
       this.map.on('moveend', redrawOnZoom)
 
-      // 底图：天地图影像 → 底图4 矢量 → D 盘离线瓦片，自动降级。
+      // 底图：底图1 影像 → 底图2 矢量 → 底图3 OSM → 底图4 D 盘离线，自动降级。
       // 遮罩在首个可用底图 ready（首张瓦片成功）时收起，见 _navBase.onReady。
       this._navBase = {
         idx: this._baseStartIdx(),
@@ -1821,12 +1945,23 @@ export default {
      */
     _initSwipeBack() {
       this._swipe = null
+      // 移动版窄列（phone-mini）居中后，列左缘不在视口 0 点：起手区要跟随列左缘，
+      // 否则导航屏缩在手机列里、侧滑手势却还贴在整窗左边缘，两者对不上。
+      // PC 版/真实手机上列左缘本来就是 0，行为不变。
+      const edgeLeft = () => {
+        try {
+          const r = this.$el && this.$el.getBoundingClientRect && this.$el.getBoundingClientRect()
+          if (r && r.left > 0) return r.left
+        } catch (e) { /* 取不到几何时退回视口左缘 */ }
+        return 0
+      }
       this._swipeStartHandler = (e) => {
         const x = e.clientX
         const y = e.clientY
         if (x == null || y == null) { this._swipe = null; return }
-        // 仅左边缘 32px 内起手才算侧滑返回
-        if (x > 32) { this._swipe = null; return }
+        // 仅列左缘 32px 内起手才算侧滑返回（左侧留 6px 容差，列外底色上起手也算）
+        const edge = edgeLeft()
+        if (x < edge - 6 || x > edge + 32) { this._swipe = null; return }
         this._swipe = { x, y, t: Date.now() }
       }
       this._swipeEndHandler = (e) => {
@@ -1879,7 +2014,7 @@ export default {
       if (this.homeSearchOpen) { this.homeSearchOpen = false; return }
       if (this.tab !== 'route') { this.tab = 'route'; return }
     },
-    // ---------- 底图降级链：天地图影像 → 底图4 天地图矢量 → 底图5 OSM → D 盘离线瓦片 ----------
+    // ---------- 底图降级链：底图1 天地图影像 → 底图2 天地图矢量 → 底图3 OSM → 底图4 D 盘离线瓦片 ----------
     /** 起始源下标：显式离线（navigator.onLine=false，如拔网线演示）直接落到本地矢量，省掉在线探测等待 */
     _baseStartIdx() {
       // 已进 D 盘离线模式，或浏览器显式离线 → 直接落到末级（D 盘），跳过在线探测
@@ -1921,12 +2056,12 @@ export default {
         return
       }
 
-      // 在线栅格源（天地图影像 / 底图4 矢量 / 底图5 OSM）
+      // 在线栅格源（底图1 天地图影像 / 底图2 矢量 / 底图3 OSM）
       const def = baseDef(key)
       if (!def) { st.idx = BASE_CHAIN.length - 1; this._mountBase(map, st); return }
       st.kind = 'raster'
       const tileOpts = {
-        // 代理源（天地图/底图4）URL 无 {s} 占位符、def 里没有 subdomains；但 Leaflet 铺瓦时
+        // 代理源（底图1/底图2）URL 无 {s} 占位符、def 里没有 subdomains；但 Leaflet 铺瓦时
         // 无条件读 options.subdomains.length（_getSubdomain），显式传 undefined 会覆盖默认值
         // 并在建图阶段直接抛 TypeError，必须兜底给个占位字符串。
         subdomains: def.subdomains || 'abc',
@@ -2016,8 +2151,8 @@ export default {
       this._mountBase(st.map, st)
     },
     /**
-     * 手动循环切换底图：天地图影像 → 底图4 天地图矢量 → 底图5 OSM → D 盘离线 → 回到影像。
-     * 同为在线 3857 源（影像 ↔ 矢量 ↔ OSM）只重挂瓦片层；进出 D 盘离线（4326↔3857）
+     * 手动循环切换底图：底图1 天地图影像 → 底图2 天地图矢量 → 底图3 OSM → 底图4 D 盘离线 → 回到底图1。
+     * 同为在线 3857 源（底图1 ↔ 底图2 ↔ 底图3）只重挂瓦片层；进出底图4 D 盘离线（4326↔3857）
      * 必须整图重建（与 _enterOfflineD 同一套路，只是方向由用户手动决定，
      * 不挂「网络恢复自动切回」监听——离线是用户主动选的，不该被自动切走）。
      */
@@ -2085,12 +2220,12 @@ export default {
     /**
      * 切到 D 盘离线瓦片：因那套 jpg 是 EPSG:4326、与主图 3857 不同系，无法就地叠层，
      * 只能把对应地图整图重建为 4326 模式（_mapConfig 据 _useOfflineD 返回 4326 配置）。
-     * 网络恢复后自动切回在线天地图。仅在天地图影像 + 底图4 矢量 + 底图5 OSM 三个在线源都探测失败时才走到这里，正常在线不受影响。
+     * 网络恢复后自动切回在线天地图。仅在底图1 影像 + 底图2 矢量 + 底图3 OSM 三个在线源都探测失败时才走到这里，正常在线不受影响。
      */
     _enterOfflineD(st) {
       if (this._useOfflineD) return
       this._useOfflineD = true
-      console.warn('在线底图（天地图影像/矢量/OSM）均不可用，重建为 D 盘离线瓦片（EPSG:4326）')
+      console.warn('在线底图（底图1 影像/底图2 矢量/底图3 OSM）均不可用，重建为底图4 D 盘离线瓦片（EPSG:4326）')
       const isNav = st === this._navBase
       const rebuild = () => {
         if (isNav) { this._rebuildMapForBaseSwitch() }
@@ -2345,7 +2480,7 @@ export default {
       // 风险段额外加发光标记（采样打点，避免密集几何生成上千个 marker）
       this._updateRiskMarkers(riskDraw)
 
-      // 公水联运（方案B）：司机公路段到南宁港为止，但后续「运河→海运→越南公路」要提前规划画出来，
+      // 陆水联运（方案B）：司机公路段到南宁港为止，但后续「运河→海运→越南公路」要提前规划画出来，
       // 让司机在图上看到货物之后的完整去向。仅方案B显示，不参与导航播报与进度计算。
       this._drawCorridor()
 
@@ -2369,6 +2504,8 @@ export default {
       if (pts.length < 2) return
       const start = pts[0]
       const end = pts[pts.length - 1]
+      // 预览选定坐船：主线终点是六景港上船点，旗帜标签不再写行程目的地（如河内），避免图文不符
+      const endName = this._canalCorridorActive() ? '南宁港六景·上船' : (this.destinationName || '')
       if (!this.map.getPane('odPane')) {
         const pane = this.map.createPane('odPane')
         pane.style.zIndex = 350
@@ -2388,7 +2525,7 @@ export default {
       L.marker(end, {
         icon: L.divIcon({
           className: 'od-wrap',
-          html: `<span class="od-end-dot"></span><span class="od-bubble od-bubble-end">🚩 终</span><span class="od-end-name">${this.destinationName || ''}</span>`,
+          html: `<span class="od-end-dot"></span><span class="od-bubble od-bubble-end">🚩 终</span><span class="od-end-name">${endName}</span>`,
           iconSize: [0, 0], iconAnchor: [0, 0]
         }),
         interactive: false, keyboard: false
@@ -2396,7 +2533,7 @@ export default {
       layer.addTo(this.map)
       this._odLayer = layer
     },
-    /** 拉取并缓存公水联运后续走廊几何（一次会话一次请求，失败静默不影响导航） */
+    /** 拉取并缓存陆水联运后续走廊几何（一次会话一次请求，失败静默不影响导航） */
     async _ensureCorridorData() {
       if (this._corridorData || this._corridorFetching) return this._corridorData
       this._corridorFetching = true
@@ -2405,7 +2542,7 @@ export default {
         this._corridorData = data
         return data
       } catch (e) {
-        console.warn('公水联运走廊总览拉取失败', e)
+        console.warn('陆水联运走廊总览拉取失败', e)
         return null
       } finally {
         this._corridorFetching = false
@@ -2419,15 +2556,16 @@ export default {
      */
     _drawCorridor() {
       if (!this.map) return
-      const d = this.activePlanId === 'B' ? this._corridorData : null
+      const corridorActive = this._canalCorridorActive()
+      const d = corridorActive ? this._corridorData : null
       if (this._corridorLayer) {
         try { this.map.removeLayer(this._corridorLayer) } catch (e) { /* 忽略 */ }
         this._corridorLayer = null
       }
-      // 首次进入方案B：异步拉一次走廊几何，到手后补画（不阻塞本帧路线重绘）
-      if (this.activePlanId === 'B' && !this._corridorData && !this._corridorFetching) {
+      // 首次进入上船方案（导航中方案B 或 预览选定坐船）：异步拉一次走廊几何，到手后补画（不阻塞本帧路线重绘）
+      if (corridorActive && !this._corridorData && !this._corridorFetching) {
         this._ensureCorridorData().then(dd => {
-          if (dd && this.activePlanId === 'B') this._drawCorridor()
+          if (dd && this._canalCorridorActive()) this._drawCorridor()
         })
       }
       if (!d) return
@@ -2596,6 +2734,8 @@ export default {
     },
     /** 开启 GPS 实时定位，Capacitor 原生定位优先，降级浏览器 geolocation，再降级模拟行驶 */
     _startRealTimeGPS() {
+      // 停驶等待中不得重开定位/模拟（恢复行驶走 resumeFromHold）
+      if (this.waitHold) return
       this._stopRealTimeGPS()
       const coords = this.route.pathCoords
       if (coords && coords.length > 0) {
@@ -2609,6 +2749,9 @@ export default {
       this._tryCapacitorGPS(coords)
     },
     async _tryCapacitorGPS(coords) {
+      // 停驶等待中直接退出：本方法在 await 权限后才注册 watchPosition，
+      // 若只在 _applyWaitHold 里清旧监听，这个迟到的回调仍会把车标拽到真实定位点
+      if (this.waitHold) return
       this.gpsStatus = 'searching'
       try {
         // 检查权限
@@ -2634,7 +2777,9 @@ export default {
             if (typeof lat !== 'number' || typeof lng !== 'number') return
             // ① 模拟行驶已在跑：车辆位置以路线为准，定位结果不再移动车辆/视野
             if (this._triTimer) return
-            // ② 模拟没跑时（非导航态）仍做合理性校验，避免代理定位到国外把视野拽走
+            // ② 停驶等待中：真实定位同样不许动车（车标只能停在等待位置）
+            if (this.waitHold) return
+            // ③ 模拟没跑时（非导航态）仍做合理性校验，避免代理定位到国外把视野拽走
             if (!this._isNearRoute(lat, lng)) return
             this.gpsStatus = 'locked'
             if (this._meMarker) {
@@ -2674,6 +2819,8 @@ export default {
         && lng >= b.getWest() - padLng && lng <= b.getEast() + padLng
     },
     _tryBrowserGPS(coords) {
+      // 停驶等待中不重开定位（同上：本方法可能由已排队超时的定时器迟到拉起）
+      if (this.waitHold) return
       if (!navigator.geolocation) {
         this.gpsStatus = 'unavailable'
         this.showPush('info', 'GPS 不可用', '浏览器不支持定位，已切换模拟行驶')
@@ -2689,7 +2836,9 @@ export default {
           if (typeof lat !== 'number' || typeof lng !== 'number') return
           // ① 模拟行驶已在跑：车辆位置以路线为准，定位结果不再移动车辆/视野
           if (this._triTimer) return
-          // ② 模拟没跑时（非导航态）仍做合理性校验，避免代理定位到国外把视野拽走
+          // ② 停驶等待中：真实定位同样不许动车
+          if (this.waitHold) return
+          // ③ 模拟没跑时（非导航态）仍做合理性校验，避免代理定位到国外把视野拽走
           if (!this._isNearRoute(lat, lng)) return
           gpsReceived = true
           this.gpsStatus = 'locked'
@@ -2730,6 +2879,8 @@ export default {
       // 而 GPS 探测失败路径（_tryBrowserGPS 的错误分支）也会调它 ——
       // 于是"跑了几秒又被拉回起点再跳一次"，表现为连跳几秒才回来。
       if (this._triTimer) return
+      // 停驶等待中：任何入口（GPS 降级重试、底图重建恢复）都不准把车重新开起来
+      if (this.waitHold) return
       const coords = this.route.pathCoords
       if (!coords || coords.length < 2) return
       this.gpsStatus = 'simulating'
@@ -2753,6 +2904,7 @@ export default {
      */
     _resumeTripSimulation() {
       if (this._triTimer) return
+      if (this.waitHold) return
       const coords = this.route.pathCoords
       // 进度/累计里程缺失（异常路径）时退回从起点重新开始
       if (!coords || coords.length < 2 || !this._simCum) { this._startTripSimulation(); return }
@@ -2764,13 +2916,26 @@ export default {
     /** 模拟行驶推进定时器：_startTripSimulation 从头起、_resumeTripSimulation 续跑，共用同一段逻辑 */
     _runTripTimer() {
       this._triTimer = setInterval(() => {
-        if (!this.navigating) { this._stopTripSimulation(); return }
+        if (!this.navigating || this.waitHold) { this._stopTripSimulation(); return }
         this._simDistM = Math.min(this._simDistM + SIM_SPEED_MPS * SIM_TICK_MS / 1000, this._simTotalM)
         const p = this._simPointAt(this._simDistM)
-        if (p && this._meMarker) {
-          this._meMarker.setLatLng(p)
+        if (p && this.map) {
+          // 车辆标记就地自愈：整图重建（底图降级 / 健康检查硬重建 / 容器失效重建）会走
+          // _destroyMap 把 _meMarker 置空、却不停本定时器，导致重建后 if(_meMarker) 恒假、
+          // 车标永远画不出来 —— 表现就是「开一会儿 / 缩放拖动一下 GPS 标记就消失了」。
+          // 只要发现标记不在当前地图上（null 或已脱离本 map），就用当前里程坐标重新落一枚。
+          if (!this._meMarker || this._meMarker._map !== this.map) {
+            this._placeTriMarker(p[0], p[1])
+          } else {
+            this._meMarker.setLatLng(p)
+          }
           this._followVehicle(p)
         }
+        // 周期把行程进度报给后端：大屏方案生成需要知道车开到哪了，
+        // 否则车已开过南宁港还会被推荐"陆水联运=掉头回港口"
+        this._reportTripProgress()
+        // ETA 随实时速度动态刷新：进度和已用时都在变，剩余时间要跟着修正
+        this._updateLiveEta()
         if (this._simDistM >= this._simTotalM) this._stopTripSimulation()
       }, SIM_TICK_MS)
     },
@@ -2814,6 +2979,86 @@ export default {
     },
     _stopTripSimulation() {
       if (this._triTimer) { clearInterval(this._triTimer); this._triTimer = null }
+    },
+    /**
+     * 执行调度方案 C「原地等待」：车辆必须真的停下来。
+     *
+     * 仅靠 UI 上写一行「请就近停靠」不算执行：模拟行驶定时器仍在每秒推进里程，
+     * 车标与视角照旧沿路线前进。这里停掉 GPS 探测与推进定时器、把车钉在当前里程位置，
+     * 并由 waitHold 拦住后续所有会重新起模拟的入口（GPS 不可用降级、底图跨坐标系重建
+     * 时的 _resumeTripSimulation、健康检查硬重建），否则会看到"停一下又自己动起来"。
+     */
+    _applyWaitHold() {
+      if (this.waitHold) return
+      this.waitHold = true
+      this._stopRealTimeGPS()
+      this.gpsStatus = 'hold'
+      // 车辆留在当前位置；若整图重建把标记弄丢了，用当前里程坐标补一枚（不回路线起点）
+      if (this.map && (!this._meMarker || this._meMarker._map !== this.map)) {
+        const p = this._simPointAt(this._simDistM || 0)
+          || (this.route.pathCoords && this.route.pathCoords[0])
+        if (p) this._placeTriMarker(p[0], p[1])
+      }
+      this.pushLog.unshift({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+        text: '执行调度方案 C：原地等待，车辆停驶（模拟行驶已暂停）' })
+      if (this.voiceOn) this.speakQueue(['已按调度指令停驶等待，车辆位置保持不变，请保持冷链机组运行。'])
+    },
+    /** 解除停驶：从停住的那个里程继续前进（不回起点、不重置进度） */
+    _releaseWaitHold() {
+      if (!this.waitHold) return false
+      this.waitHold = false
+      if (this.navigating) this._resumeTripSimulation()
+      else this.gpsStatus = 'unavailable'
+      return true
+    },
+    /** 「恢复行驶」入口：等待到点 / 风险解除后由司机手动继续 */
+    resumeFromHold() {
+      if (!this._releaseWaitHold()) return
+      this.showPush('ok', '已恢复行驶', '车辆从当前位置沿当前路线继续前进。')
+      this.pushLog.unshift({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+        text: '司机解除原地等待，恢复行驶' })
+      if (this.voiceOn) this.speakQueue(['原地等待结束，已恢复行驶，请按导航继续前进。'])
+    },
+    /**
+     * 实时速度驱动的「剩余时间」估计——预计时间不再钉死在出发时刻。
+     *
+     * 思路：一开始几乎没进度，只能按全程计划耗时给个大概预测；随着车辆真的往前开，
+     * 用「已用时 ÷ 已行驶比例」外推实测平均速度，据此重算剩余时间——开得比计划快 ETA 提前、
+     * 遇堵/绕行顺延。起步阶段样本小、瞬时外推抖动大，故按进度线性加权，约 15% 进度后完全采信实测速度。
+     * 注意：这是「实时速度」而非「计划速度」——estimatedHours 只用于起步粗估与按里程等比缩放。
+     */
+    _updateLiveEta(force) {
+      const now = Date.now()
+      // 模拟 tick 每 100ms 调一次，这里限流到约每秒刷新一次（ETA 只到分钟粒度，无需 10Hz）
+      if (!force && this._etaCalcAt && now - this._etaCalcAt < 1000) return
+      this._etaCalcAt = now
+      const planned = this.route && this.route.estimatedHours
+      if (!this.navigating || !planned) { this.navRemainHours = null; return }
+      const total = this._simTotalM || 0
+      const startedAt = this.navigationStartedAt || 0
+      // 里程表还没标定（刚点开始导航、模拟尚未起来）：先按全程计划耗时粗估
+      if (!total || !startedAt) { this.navRemainHours = planned; return }
+      const p = Math.max(0, Math.min(1, (this._simDistM || 0) / total))
+      // 剩余里程按原计划等比缩放：这是任何时刻都成立的「大概预测」基线
+      const byPlan = planned * (1 - p)
+      const elapsedH = (now - startedAt) / 3600000
+      let remain = byPlan
+      // 已走完一小段且用时可信时，叠加实测平均速度外推（这才是「实时」部分）
+      if (p > 0.02 && elapsedH > 0) {
+        const bySpeed = elapsedH * (1 - p) / p
+        const w = Math.min(1, p / 0.15)
+        remain = byPlan * (1 - w) + bySpeed * w
+      }
+      this.navRemainHours = remain
+    },
+    /** 导航中每 ~30 秒上报一次行程进度（模拟行驶与真实 GPS 共用的位置变化都会经过这里） */
+    _reportTripProgress() {
+      if (!this.navigating || !this._simTotalM) return
+      const now = Date.now()
+      if (this._lastProgressReportAt && now - this._lastProgressReportAt < 30000) return
+      this._lastProgressReportAt = now
+      const ratio = Math.max(0, Math.min(1, (this._simDistM || 0) / this._simTotalM))
+      axios.post('/api/trip/progress', null, { params: { ratio: ratio.toFixed(3) } }).catch(() => {})
     },
     fitRoute(silent) {
       // 行驶中点「全览路线」＝主动接管视角，暂停跟随并给出回到导航视角入口
@@ -3075,6 +3320,8 @@ export default {
       this.dispatchConfirmCollapsed = false
       this._dispatchPreviewPlanId = null
       this._dispatchHandling = false
+      // 停驶等待属于本程状态：退出导航即结束，不能残留到下一程（否则新行程一出发就被卡住）
+      this.waitHold = false
       this.navFollowing = true
       this.navOffView = false
       this.showNavMenu = false
@@ -3093,7 +3340,6 @@ export default {
       // 清空语音队列并打断当前播报（司机主动退出时允许解除最高优先级锁）
       this._cancelVoice(true)
       this._voiceQueue.length = 0
-      this._voiceCooldown = 0
       this._lastVoiceText = ''
       this._lastVoiceAt = 0
       this._lastDepartureAt = 0
@@ -3101,10 +3347,12 @@ export default {
       this._hazardVoiceKey = ''
       this._hazardVoiceAt = 0
       this._stopRealTimeGPS()
-      // 结束本次行程：停止关注这条路线，避免后续无关风险推送打扰（重新规划时会再次注册）
+      // 本次行程结束：一是停止 Agent 关注这条路线，二是清除在途进度信号——
+      // 否则下一单分析会拿着上一单的陈旧进度去禁用陆水联运方案
       axios.post('/api/agent/unregister', null, {
         params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId }
       }).catch(() => {})
+      axios.post('/api/trip/reset').catch(() => {})
       // 导航屏随后会被 v-if 移除：同步销毁 Leaflet，避免下次确认调度任务时复用旧容器白屏
       this._destroyMap()
     },
@@ -3163,6 +3411,9 @@ export default {
         // 后端按边相似度去重，同一走廊的两种走法仍可能返回两条（末端口岸支线不同）；
         // 这里按「途经」指纹再合并一次，杜绝"同一条路两张卡、红绿自相矛盾"
         this.candidates = this._mergeCorridorDuplicates((r.data && r.data.candidates) || [])
+        // 走廊命中时后端会并带回 canalOption：把「坐船出境」作为与公路并列的一条推荐（非风险兜底）
+        this.canalOption = (r.data && r.data.canalOption) || null
+        this.selectedMode = 'road'
         if (!this.candidates.length) throw new Error('当前无可选路线')
         const def = this.candidates.find(c => c.key === 'recommended') || this.candidates[0]
         this.online = true
@@ -3192,6 +3443,7 @@ export default {
     selectCandidate(key, silent) {
       const c = this.candidates.find(x => x.key === key)
       if (!c) return
+      this.selectedMode = 'road'
       this.selectedKey = key
       this.route = {
         pathCoords: c.coords || [],
@@ -3218,11 +3470,80 @@ export default {
         if (this.previewing) this._schedulePrefetch()
       })
     },
+    // 坐船候选点选：切换出行方式为水运，并把地图主线换成「上船公路段 + 后续走廊」——
+    // 否则图上还挂着之前公路候选的线（可能经过芒街），与选定的坐船方案自相矛盾
+    selectCanal() {
+      if (!this.canalOption) return
+      // 禁航中不再可选：标红卡片同时阻断点选，避免司机把注定走不了的方案选上
+      if (this.canalBlockedNow) {
+        this.showPush('warn', '平陆运河禁航中', `${this.canalBlockReasonNow}，水运方案暂不可选，请选一条公路路线`)
+        return
+      }
+      this.selectedMode = 'canal'
+      this._drawCanalPreviewRoute()
+      this.showPush('info', '已选陆水联运',
+        `可全程坐船经平陆运河出境：${this.canalOption.via}，约 ${this.canalOption.hours} 小时。地图已切换到上船方案（实线为公路段至南宁港六景，虚线为运河/海运走廊），点「开始导航」即按此行驶。`)
+    },
+    /**
+     * 预览选定坐船：把地图主线换成 起点→南宁港六景 的上船公路段（真实算路，带风险着色），
+     * 后续运河/海运/越方公路由 _drawCorridor 以虚线走廊补全。
+     * 不碰 destinationId/候选列表：司机改选公路候选时 selectCandidate 会直接覆盖 route 并清除走廊。
+     */
+    async _drawCanalPreviewRoute() {
+      const cacheKey = `${this.resolvedOriginId}→LJ`
+      if (this._canalRoadKey === cacheKey && this._canalRoadRoute) {
+        this.route = this._canalRoadRoute
+        this.$nextTick(() => { this.drawRoute(); this.fitRoute(false) })
+        return
+      }
+      try {
+        const r = await axios.get('/api/route/plan-with-weather', {
+          params: { originId: this.resolvedOriginId, destinationId: 'LJ', cargoType: 'cold', withAi: false },
+          timeout: 30000
+        })
+        const resp = r.data.route || r.data
+        // 请求期间司机可能已改选公路候选：过期结果不覆盖地图
+        if (this.selectedMode !== 'canal' || !this.previewing) return
+        if (!resp.pathCoords || !resp.pathCoords.length) return
+        this._canalRoadKey = cacheKey
+        this._canalRoadRoute = resp
+        this.route = resp
+        this.risks = r.data.risks || this.risks
+        this.$nextTick(() => { this.drawRoute(); this.fitRoute(false) })
+      } catch (e) {
+        // 上船段拉取失败不阻断选定：至少走廊照常画出，主线维持原样
+        console.warn('canal preview road leg failed', e)
+        this.$nextTick(() => { this.drawRoute() })
+      }
+    },
+    /** 走廊是否应展示：导航中的方案B，或预览中已点选坐船（与 _drawCorridor 共用） */
+    _canalCorridorActive() {
+      return this.activePlanId === 'B' || (this.previewing && this.selectedMode === 'canal')
+    },
     // 3) 按司机所选路线开始导航（choice 贯穿导航轮询，路线不再被系统推荐强制替换）
     async startNavigation() {
       // 调度路线预览态下点「开始导航」= 确认接收调度指令，走确认流程（保留调度方案与导航开始播报）
       if (this._dispatchPreviewPlanId || this.showDispatchConfirm) { return this.confirmTaskChange() }
       if (this.routeLoading || this.candidateLoading) return
+      // 坐船（陆水联运）：普通导航下司机主动选择去越南的方式，复用方案B的已验证导航链路
+      // （先规划并导航到南宁港六景、图上画出后续运河/海运/越南公路走廊）。
+      if (this.selectedMode === 'canal' && this.canalOption) {
+        this._warmUpSpeech()
+        this.routeLoading = true
+        try {
+          axios.post('/api/trip/start', null, {
+            params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId }
+          }).catch(() => {})
+          await this._switchNavForPlan('B')
+          await this._autoStartDispatchNav('B')
+        } catch (e) {
+          console.error('canal nav failed', e)
+          this.showPush('warn', '水运导航启动失败', '请重试，或改选一条公路路线。')
+        } finally {
+          this.routeLoading = false
+        }
+        return
+      }
       if (!this.candidates.length) {
         await this.searchRoutes()
         if (!this.candidates.length) return
@@ -3231,10 +3552,12 @@ export default {
       // 司机自行规划出发 = 非调度行程，清掉方案标记，
       // 否则上一单是水运（B）时会把"经平陆运河"残留到这一次播报里
       this.activePlanId = null
+      // 司机自己出发 = 新的一程，上一轮的「原地等待」停驶态不能带过来
+      this.waitHold = false
       this.routeLoading = true
       try {
-        // 注册为 Agent 活跃任务（灾害触发时自动重算并推送）
-        axios.post('/api/agent/register', null, { params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId } }).catch(() => {})
+        // 注册为 Agent 活跃任务（灾害触发时自动重算并推送）；公路模式
+        axios.post('/api/agent/register', null, { params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, mode: 'road' } }).catch(() => {})
         // 行程启动信号：调度大屏据此自动触发一次 AI 六维分析（常态方案对比），
         // 由调度员人工确认路线后再下发任务指令给司机
         axios.post('/api/trip/start', null, { params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId } }).catch(() => {})
@@ -3343,9 +3666,10 @@ export default {
     },
     // 拉取所选路线最新版本（带天气与风险；choice 保持一致）
     async fetchRoute() {
-      // 已选好这条线（含未开始导航）→ 注册关注，风险注入后该路线会被重算推送
+      // 已选好这条线（含未开始导航）→ 注册关注，风险注入后该路线会被重算推送；
+      // mode 标记当前出行方式，运河禁航事件据此点名受影响在途对象
       axios.post('/api/agent/register', null, {
-        params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId }
+        params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, mode: this._isCanalCommuting() ? 'canal' : 'road' }
       }).catch(() => {})
       // withAi=false：本方法不消费 aiWarning，而 AI 文案要秒级生成，
       // 它同时挂在 15 秒轮询和灾害触发的重取路径上，开着会让路线更新明显滞后。
@@ -3387,6 +3711,8 @@ export default {
       this.navOffView = false
       this.candidates = []
       this.selectedKey = 'recommended'
+      this.canalOption = null
+      this.selectedMode = 'road'
       this.viaText = ''
       this.route = {}
       // 起终点变化会让预览容器一起消失，旧地图不能留到下一次复用
@@ -3448,10 +3774,21 @@ export default {
       // 用全量列表会把别处的风险报成"本路线前方风险"，南宁→六景那一程就误报过「暴雨」。
       const segs = this._risksOnRoute(r)
       if (r.rerouted && !this.lastRerouted) {
-        // 灾害真的发生并触发绕行：语音播报具体灾害 + 弹出替代路线供司机点选
-        const reason = segs.length ? segs[segs.length - 1].reason : '路段风险'
+        // 灾害真的发生并触发绕行：语音播报具体灾害 + 弹出替代路线供司机点选。
+        // 绕行成功时新路线上已无风险段，segs 必为空——致灾原因要从被绕开的
+        // 原路线(baseline)边集上找，否则标题永远兜底成笼统的「路段风险」。
+        let reason = segs.length ? segs[segs.length - 1].reason : ''
+        if (!reason) {
+          const baseIds = new Set((r.baselinePathEdgeIds || []).map(String))
+          const pool = (this.risks && this.risks.length) ? this.risks : (r.riskSegments || [])
+          const onBase = pool.filter(x => x && baseIds.has(String(x.edgeId)))
+          if (onBase.length) reason = onBase[onBase.length - 1].reason
+        }
+        reason = reason || '路段风险'
+        // 面板可能因「当前已在最优绕行线」被取消（见 loadRerouteOptions），
+        // 推送文案不再引导「点选其他方案」，有得选时面板自己会出来
         this.showPush('success', '路线已绕行',
-          `${reason}，已切换绕行路线，预计延误 ${r.extraHours}h。请按新路线行驶，或点选其他方案。`)
+          `${reason}，已切换绕行路线，预计延误 ${r.extraHours}h。请按新路线行驶。`)
         this.loadRerouteOptions(reason).catch(() => {})
         this.lastRerouted = r.rerouted
         this.lastRiskCount = segs.length
@@ -3495,6 +3832,15 @@ export default {
           if (!data.route) {
             // 硬熔断：所有路线均不可通行，红色告知司机停车等待调度指令
             this.showPush('danger', '无可用路径', data.advice || '所有路线均不可通行，请停车等待调度指令。')
+            return
+          }
+          // 未接单的普通用户：气象/调度控制不得自动改变其导航路线。
+          // 灾害到达时只弹出可绕行路线面板，由司机自行点选是否换线——绝不自动换线。
+          if (!this.isTaskAccepted) {
+            const reason = (data.risks && data.risks.length)
+              ? data.risks[data.risks.length - 1].reason
+              : '前方路段风险'
+            this.loadRerouteOptions(reason)
             return
           }
           // 司机选了备选/最快路线：Agent 推送（系统推荐线）不强制覆盖其选择，
@@ -3541,6 +3887,14 @@ export default {
           const status = JSON.parse(ev.data)
           const hadTask = !!this.taskChange
           this.outreachStatus = status
+          // 未接单闸门：调度员在大屏点"确认切换方案·下发任务变更指令"，
+          // 对还没接单的司机不应产生任何效果——不提醒、不切路线、不自动导航。
+          // 顺带清掉旧的 taskChange，避免"待接单阶段残留的变更卡片"被误确认。
+          if (!this.isTaskAccepted) {
+            this.taskChange = null
+            this.showDispatchConfirm = false
+            return
+          }
           // 找本人角色对应的目标（越方司机窗口取 DRIVER_VN），
           // 拉取任务变更消息（含越南语与权益保障包）
           const driver = (status.targets || []).find(t => t.role === this.driverRole)
@@ -3554,6 +3908,16 @@ export default {
         } catch (e) {
           console.error('outreach-update parse failed', e)
         }
+      })
+      // === 平陆运河禁航反馈（双向切换场景 B 闭环）===
+      // 沙盘禁航状态翻转时后端广播 canal-block / canal-recover：
+      // 物流任务司机只提示「等调度大屏换线」（换线控制权在调度，经 outreach-update 到达）；
+      // 普通用户自助弹出公路替代路线面板（点选即换）
+      this._agentEs.addEventListener('canal-block', (ev) => {
+        try { this._onCanalBlock(JSON.parse(ev.data)) } catch (e) { console.error('canal-block parse failed', e) }
+      })
+      this._agentEs.addEventListener('canal-recover', (ev) => {
+        try { this._onCanalRecover(JSON.parse(ev.data)) } catch (e) { console.error('canal-recover parse failed', e) }
       })
       this._agentEs.onerror = () => {
         // EventSource 自动重连，仅记录
@@ -3674,29 +4038,41 @@ export default {
     async _startTaskNavigation() {
       const t = this.task
       if (!t) return
+      this.canalOption = null
+      this.selectedMode = 'road'
       if (t.originId) this.originId = t.originId
       if (t.destinationId) this.destinationId = t.destinationId
       this.routeLoading = true
+      let canalOpt = null
       try {
         const r = await axios.get('/api/route/candidates', {
           params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, cargoType: 'cold' },
           timeout: 30000
         })
         this.candidates = this._mergeCorridorDuplicates((r.data && r.data.candidates) || [])
-        const want = t.routeChoice || 'recommended'
-        const hit = this.candidates.find(c => c.key === want)
-          || this.candidates.find(c => c.key === 'recommended')
-          || this.candidates[0]
-        if (hit) this.selectCandidate(hit.key, true)
+        canalOpt = (r.data && r.data.canalOption) || null
       } catch (e) {
         console.error('task route preload failed', e)
       } finally {
         this.routeLoading = false
       }
+      // 调度员派的是「坐船出境」（陆水联运）：复用普通导航下司机主动选 canal 的同一条已验证链路
+      // （先导航到南宁港六景上船，图上画出运河/海运/越南公路走廊）
+      if (t.routeChoice === 'canal' && canalOpt) {
+        this.canalOption = canalOpt
+        this.selectedMode = 'canal'
+        await this.startNavigation()
+        return
+      }
       if (!this.candidates.length) {
         this.showPush('warn', '路线数据异常', '未获取到调度路线，请在首页手动规划。')
         return
       }
+      const want = t.routeChoice || 'recommended'
+      const hit = this.candidates.find(c => c.key === want)
+        || this.candidates.find(c => c.key === 'recommended')
+        || this.candidates[0]
+      if (hit) this.selectCandidate(hit.key, true)
       // 复用已验证的预览→导航路径（enterPreview 建图，startNavigation 带 choice 贯穿）
       await this.enterPreview()
       await this.startNavigation()
@@ -3757,6 +4133,12 @@ export default {
     /** 司机点击「确认接收」（第五幕）：确认即按调度方案自动进入导航 */
     async confirmTaskChange() {
       if (!this.taskChange || this.taskConfirming) return
+      // 未接单闸门（防御式二重校验）：任务页残留的确认按钮同样不允许绕过接单去切路线
+      if (!this.isTaskAccepted) {
+        this.showDispatchConfirm = false
+        this.taskChange = null
+        return
+      }
       // 在点击事件内预热：后续等待派单确认/路线计算后再播报时，浏览器仍允许语音输出
       this._warmUpSpeech()
       this.taskConfirming = true
@@ -3865,7 +4247,7 @@ export default {
         edgeIds: this.route.pathEdgeIds || [],
         edgeSpans: this.route.pathEdgeSpans || [],
         nodeIds: this.route.pathNodeIds || [],
-        label: planId === 'B' ? '公水联运（调度路线）' : '公路方案（调度路线）',
+        label: planId === 'B' ? '陆水联运（调度路线）' : '公路方案（调度路线）',
         via: this.viaText,
         hours: this.route.estimatedHours,
         distanceKm: this.route.totalDistanceKm,
@@ -3892,7 +4274,7 @@ export default {
     },
     /**
      * 按调度方案联动导航（双向切换闭环）：
-     * B=公水联运 → 导航目标切到南宁港六景作业区（路网节点 LJ，南宁以东郁江畔）；
+     * B=陆水联运 → 导航目标切到南宁港六景作业区（路网节点 LJ，南宁以东郁江畔）；
      * A=公路绕行 → 恢复原目的地重规划（友谊关熔断已注入，Dijkstra 自动绕行芒街）；
      * C=原地等待 → 保持当前路线，仅提示。
      *
@@ -3907,8 +4289,14 @@ export default {
       if (!this._planSavedDestination) this._planSavedDestination = this.destinationId
       if (planId === 'C') {
         this.showPush('info', '调度指令', '双线风险，请就近停靠安全区域等待，保持冷链机组运行。')
+        // 派的是「原地等待」：导航不换线，但车必须真的停下，否则车标继续沿路线爬
+        this._applyWaitHold()
         return
       }
+      // 改派 A/B：只清停驶标记，不在此恢复模拟行驶 —— 下面会换线重算并由
+      // _autoStartDispatchNav 重新起模拟；此时若先 resume，定时器会带着旧路线的
+      // _simCum 跳新路线（长度不匹配 → _simPointAt 返回 null → 车反而永久卡住）
+      this.waitHold = false
       const target = planId === 'B' ? 'LJ' : this._planSavedDestination
       // 抑制 destinationId watcher 中的 _resetCandidates：
       // 调度切方案会改目的地，但不应清空已有路线/销毁地图，
@@ -3918,10 +4306,16 @@ export default {
       this._switchingPlan = true
       this.destinationId = target
       try {
-        // 重新注册 Agent 活跃任务（目的地已变，守护目标同步切换）
+        // 重新注册 Agent 活跃任务（目的地已变，守护目标同步切换）；
+        // 切公路方案时顺手停掉去六景港的运河模式关注，避免禁航事件误点名已换线的行程
         axios.post('/api/agent/register', null, {
-          params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId }
+          params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, mode: planId === 'B' ? 'canal' : 'road' }
         }).catch(() => {})
+        if (planId !== 'B') {
+          axios.post('/api/agent/unregister', null, {
+            params: { originId: this.resolvedOriginId, destinationId: 'LJ' }
+          }).catch(() => {})
+        }
         const plan = await axios.get('/api/route/plan-with-weather', {
           params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, cargoType: 'cold', withAi: false },
           timeout: 30000
@@ -3940,7 +4334,7 @@ export default {
         this.$nextTick(() => { if (this.map && resp.pathCoords) this.fitRoute(false) })
         if (planId === 'B') {
           this.showPush('info', '导航已更新',
-            '公水联运（平陆运河）：请按新路线前往南宁港六景作业区交接车辆，之后随船经平陆运河转海运至越南海防港。')
+            '陆水联运（平陆运河）：请按新路线前往南宁港六景作业区交接车辆，之后随船经平陆运河转海运至越南海防港。')
           this.pushLog.unshift({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text: '导航目标已切换：南宁港六景作业区' })
         } else {
           this.showPush('info', '导航已更新', `公路方案：新路线已下发（${this.routeTitle}），按导航行驶。`)
@@ -3971,7 +4365,7 @@ export default {
           coords: this.route.pathCoords,
           edgeIds: this.route.pathEdgeIds || [],
           edgeSpans: this.route.pathEdgeSpans || [],
-          label: planId === 'B' ? '公水联运（调度路线）' : '公路方案（调度路线）'
+          label: planId === 'B' ? '陆水联运（调度路线）' : '公路方案（调度路线）'
         }]
         this.navigationStartedAt = Date.now()
         this._mapHardRecovered = false
@@ -4015,11 +4409,11 @@ export default {
         })
         this.loadWeatherForRoute().catch(() => {})
         this.showPush('success', '已按调度路线导航',
-          planId === 'B' ? '目标：南宁港六景作业区（公水联运·平陆运河），Agent 已实时守护' : `路线：${this.routeTitle}，Agent 已实时守护`)
+          planId === 'B' ? '目标：南宁港六景作业区（陆水联运·平陆运河），Agent 已实时守护' : `路线：${this.routeTitle}，Agent 已实时守护`)
         if (this.riskTimer) clearInterval(this.riskTimer)
         this.riskTimer = setInterval(() => { this.refreshForecast(false) }, 480000)
         this.pushLog.unshift({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-          text: planId === 'B' ? '已确认调度指令，自动导航至南宁港六景作业区（公水联运·平陆运河）' : '已确认调度指令，自动导航公路绕行路线' })
+          text: planId === 'B' ? '已确认调度指令，自动导航至南宁港六景作业区（陆水联运·平陆运河）' : '已确认调度指令，自动导航公路绕行路线' })
       } catch (e) {
         console.error('auto dispatch nav failed', e)
       }
@@ -4062,7 +4456,7 @@ export default {
       this._hazardNotifyKey = key
       const risks = data.risks || []
       const reason = risks.length ? risks[risks.length - 1].reason : '检测到路段气象风险'
-      this.showPush('danger', '⚠ 前方灾害', `${reason}。正在为您重新规划路线…`)
+      this.showPush('danger', '⚠ 前方灾害', `${reason}。正在为您评估可绕行路线…`)
       this._hazardNotifiedAt = Date.now()
       // 强提醒：司机在路上主要靠听，震动 + 语音与任务变更提醒保持同一套处理
       if (navigator.vibrate) navigator.vibrate([200, 100, 200])
@@ -4079,6 +4473,13 @@ export default {
     _watchPreviewRisk(data) {
       // 没规划过路线（纯粹停在首页/导航页没选目的地）→ 不打扰
       if (!this.route || !this.route.pathCoords || !this.route.pathCoords.length) return
+      // 预览已选定坐船：推送的更新路线是公路 O/D 的，不能把上船方案图覆盖回公路线（可能经芒街）；
+      // 同时作废上船段缓存，下次点选时按最新风险重拉
+      if (this.previewing && this.selectedMode === 'canal') {
+        this._canalRoadKey = null
+        this._canalRoadRoute = null
+        return
+      }
       const hasRisk = !!(data.risks && data.risks.length) || !!(data.hazardEdgeIds && data.hazardEdgeIds.length)
       if (hasRisk && data.route && data.route.pathCoords) {
         const reason = (data.risks && data.risks.length ? data.risks[data.risks.length - 1].reason : '') || '沿线出现气象风险'
@@ -4234,7 +4635,11 @@ export default {
       // 非最高优先级播报连取消当前播报的权利都没有，确保导航开始播报不被任何预警抢走。
       this._cancelPromise = this._cancelVoice(o.force)
       this._voiceQueue.length = 0
-      this._voiceQueue.push(list)
+      // 拆句播报：Web Speech 引擎（尤其 Android WebView / Chrome）对单条长文本常在念到一半时
+      // 提前触发 onend，把后半段整个丢掉 —— 出发播报表现为「只念了‘导航开始…’就跳到越南语」，
+      // 里程 / 耗时 / 到达时间没读出来。按句末标点切成短句逐条读可规避；
+      // 去重键与上锁时长仍按整段（list）计，只改真正入队朗读的粒度，跨语言顺序不变。
+      this._voiceQueue.push(this._expandToSentences(list))
       // 高优先级：锁住语音通道，直到本条念完（或超时兜底）
       let lockSec = 0
       if (o.lock) {
@@ -4243,7 +4648,7 @@ export default {
       }
       this._vdbg('入队 ' + list.length + ' 条' + (lockSec ? '（上锁 ' + lockSec + 's）' : '')
         + '｜首条：' + String(list[0]).slice(0, 18))
-      this._flushVoice(true)
+      this._flushVoice()
     },
     /**
      * 估算朗读时长（毫秒），用于高优先级播报的占用超时。
@@ -4257,6 +4662,23 @@ export default {
         ms += (cjk / 4.5 + (s.length - cjk) / 13) * 1000
       }
       return Math.min(120000, Math.max(8000, Math.round(ms) + 4000))
+    },
+    /**
+     * 把待播文本按句末标点 / 逗号展开成短句序列，逐条喂给 TTS。
+     *
+     * 为什么要拆：Web Speech（Android WebView / Chrome）对单条长 utterance 会在没念完时就
+     * 提前抛 onend，导致后半段被整个丢弃（出发播报只听得到“导航开始”，里程/ETA 没读）。
+     * 切成短句后每条都在引擎能完整读完的长度内，彻底规避截断。
+     * 切点：。！？；，（中文）直接在其后切；拉丁语系的 . 与 , 必须紧跟空白才算切点，
+     * 以保护 “270.5” 这类小数不被拆坏。
+     */
+    _expandToSentences(list) {
+      const out = []
+      for (const t of list) {
+        const parts = String(t).split(/(?<=[。！？；，])|(?<=[.,])[ \t\n]+/)
+        for (let p of parts) { p = (p || '').trim(); if (p) out.push(p) }
+      }
+      return out.length ? out : list.slice()
     },
     /**
      * 锁定语音通道：期间 speakQueue 的普通播报一律丢弃（导航开始播报专用）。
@@ -4352,12 +4774,9 @@ export default {
       })
     },
 
-    /** immediate=true：不等冷却，立刻起播（抢占场景）。留 80ms 让浏览器 cancel 生效，否则新语音会被吞掉 */
-    _flushVoice(immediate) {
+    /** 段间不再固定冷却（原 1500ms，连续预警念起来太拖沓）；防串音靠起播前等引擎真正空闲，见 _waitSpeechIdle */
+    _flushVoice() {
       if (this._voiceTimer) return // 正在播报或等待
-      const since = Date.now() - this._voiceCooldown
-      // 抢占时不再靠固定延时（原来 80ms），改为起播前等引擎真正空闲，见下
-      const delay = immediate ? 0 : Math.max(0, 1500 - since)
       const seq = this._voiceSeq
       this._voiceTimer = setTimeout(async () => {
         this._voiceTimer = null
@@ -4375,20 +4794,20 @@ export default {
         if (seq !== this._voiceSeq) { this._vdbg('放弃起播：等空闲期间被抢占'); return }
         this._vdbg('开始起播（校验通过）')
         this._doSpeak(texts, 0, seq)
-      }, delay)
+      }, 0)
     },
     _doSpeak(texts, i, seq) {
       if (seq !== this._voiceSeq) return // 已被抢占，整条旧播报链路作废
       this._voiceActiveSeq = seq
       if (i >= texts.length) {
-        this._voiceCooldown = Date.now()
         // 整条念完：只释放本次最高优先级锁，旧播报回调不能误开新播报的锁
         this._unlockVoice(this._criticalVoiceSeq)
         if (this._voiceQueue.length) {
+          // 队列里还有整段要连读：不再等 1500ms 冷却，接上立刻续播
           this._voiceTimer = setTimeout(() => {
             this._voiceTimer = null
             this._flushVoice()
-          }, 1500)
+          }, 0)
         }
         return
       }
@@ -4421,6 +4840,15 @@ export default {
       const c = window.Capacitor
       return !!(c && typeof c.isNativePlatform === 'function' && c.isNativePlatform())
     },
+    /** 按 rate=0.95 估算单条短文本的实际朗读时长（ms），不设下限/上限，用于 onend 早到判定。
+     *  速度按主流 TTS 引擎实测校准（中文≈ 6 字/秒、拉丁≈ 16 字符/秒）：
+     *  原先 4.5/13 估得比真实语速慢，导致每句都被判“早到”并补等差值，句间空隔拉得很长。 */
+    _estimateChunkMs(text) {
+      const s = String(text)
+      const cjk = (s.match(/[\u4e00-\u9fff]/g) || []).length
+      const raw = (cjk / 6 + (s.length - cjk) / 16) * 1000
+      return raw / 0.95 // 除以 rate
+    },
     /** Web Speech 播报一条；1.2 秒未确认出声会自动重试一次，再退回原生 TTS */
     async _speakWeb(clean, lang, next, attempt = 0, voiceSeq = this._voiceSeq) {
       const synth = window.speechSynthesis
@@ -4435,6 +4863,8 @@ export default {
       if (synth.paused) synth.resume()
       let finished = false
       let started = false
+      let speakStartAt = 0 // onstart 时记录真实开始时间，用于判定 onend 是否早到
+      const estMs = this._estimateChunkMs(clean) // 本条预估朗读时长（无 floor）
       const finish = () => {
         if (finished) return
         finished = true
@@ -4455,7 +4885,7 @@ export default {
       // 「导航开始被读好几遍」的主因。
       const startTimer = setTimeout(() => {
         if (finished || started) return
-        if (synth.speaking || synth.pending) { started = true; return }
+        if (synth.speaking || synth.pending) { started = true; speakStartAt = Date.now(); return }
         this._vdbg('Web 1.2s 未开始发声，尝试恢复')
         finished = true
         try { synth.cancel() } catch (e) { /* 忽略 */ }
@@ -4473,7 +4903,7 @@ export default {
         this._vdbg('单条播报超时，强制推进下一条')
         try { synth.cancel() } catch (e) { /* 忽略 */ }
         finish()
-      }, this._estimateSpeechMs([clean]) + 6000)
+      }, estMs + 8000)
       const u = new SpeechSynthesisUtterance(clean)
       u.lang = lang
       u.rate = 0.95
@@ -4481,12 +4911,29 @@ export default {
       u.onstart = () => {
         if (finished) return
         started = true
+        speakStartAt = Date.now()
         clearTimeout(startTimer)
-        this._voiceLastStartAt = Date.now()
+        this._voiceLastStartAt = speakStartAt
         this._voiceLastStartSeq = voiceSeq
         this._vdbg('Web 已开始发声')
       }
-      u.onend = () => { this._vdbg('Web 播完'); finish() }
+      // ===== onend 早到守卫 =====
+      // Chrome/Android WebView 的已知 bug：utterance 的 onend 会在音频还没播完时就提前触发。
+      // 但只有实际耗时连估算 3/4 都不到才可能是真截断；且补时封顶 400ms：
+      // 原先每句都补等到估算值，估算偏慢时句句白等，听起来就是“念完半天才出下一句”。
+      // 下一句的 speak() 本身会进引擎队列串行续播，不需要靠干等护尾音。
+      u.onend = () => {
+        if (finished) return
+        const elapsed = speakStartAt ? (Date.now() - speakStartAt) : 0
+        const remaining = estMs - elapsed
+        if (started && remaining > 300 && elapsed < estMs * 0.75) {
+          this._vdbg('Web onend 早到（' + elapsed + 'ms < 预估 ' + Math.round(estMs) + 'ms），补尾 ' + Math.min(remaining, 400) + 'ms')
+          setTimeout(() => { finish() }, Math.min(remaining, 400))
+        } else {
+          this._vdbg('Web 播完')
+          finish()
+        }
+      }
       u.onerror = (e) => {
         if (finished) return
         const err = (e && e.error) || '未知'
@@ -4501,17 +4948,20 @@ export default {
     /**
      * 等 Web Speech 的语音列表就绪。
      * Chrome 里 getVoices() 首帧常为空，需等 voiceschanged；等不到就超时放行（不做无限等待）。
+     * 一旦见过非空列表就永久放行：部分 WebView 引擎轮询时会瞬时返空，
+     * 不加这个标记的话每句都要白等满 1.5s 超时，句间空隔被拉得很长。
      */
     _waitVoicesReady(maxMs) {
       const synth = window.speechSynthesis
-      if (!synth || !synth.getVoices || synth.getVoices().length) return Promise.resolve()
+      if (!synth || !synth.getVoices || synth.getVoices().length) { this._voicesSeenOnce = true; return Promise.resolve() }
+      if (this._voicesSeenOnce) return Promise.resolve()
       const limit = maxMs || 1500
       const t0 = Date.now()
       return new Promise(resolve => {
         const done = () => { try { synth.removeEventListener('voiceschanged', done) } catch (e) {} resolve() }
         try { synth.addEventListener('voiceschanged', done) } catch (e) {}
         const tick = () => {
-          if (synth.getVoices().length || Date.now() - t0 >= limit) return done()
+          if (synth.getVoices().length || Date.now() - t0 >= limit) { this._voicesSeenOnce = synth.getVoices().length > 0; return done() }
           setTimeout(tick, 100)
         }
         tick()
@@ -4576,6 +5026,14 @@ export default {
       if (occurred) return 'high'
       if (p == null || p < 0) return 'unknown'
       return p >= 50 ? 'high' : 'low'
+    },
+    /** 低阈值不显示百分比：平静天气下各候选都堆在同一地板值（如 9%）没有区分度，
+     * 直接标「通畅」更诚实；已发生灾害或达阈值才显示具体数字（与大屏 AgentPanel 一致） */
+    probText(c) {
+      const p = c && c.hazardProbability
+      if (p == null || p < 0) return '暂无预测'
+      if (!c.hazardOccurred && p < 15) return '通畅'
+      return p + '%'
     },
     /** 是否为高风险（已发生灾害 / 沿线有风险段 / 综合概率达阈值）——预览卡片与绕行候选项共用红色标记 */
     isHighRisk(opt) {
@@ -4674,7 +5132,7 @@ export default {
       const parts = []
       // 运输方式：水运方案要点明「平陆运河」。状态播报同时用于出发播报和灾害播报，
       // 放这里可以让三处播报都带上，不必各写一遍。
-      if (this.isCanalPlan) parts.push('本程为公水联运，经平陆运河')
+      if (this.isCanalPlan) parts.push('本程为陆水联运，经平陆运河')
       // 延误
       const extra = r.extraHours || 0
       if (extra > 0) {
@@ -4908,7 +5366,16 @@ export default {
      * 灾害发生时的语音播报：说清"什么灾害 + 在哪 + 延误 + 天气 + 替代路线"
      */
     announceHazard(reason, optionCount) {
-      const where = this.viaText || this.routeTitle
+      // 标题/播报里的「在哪」必须是风险真正所在的走廊，绝不能用 viaText：
+      // viaText 是当前选中候选的途经摘要，绕行后它往往正是那条避险安全线，
+      // 于是「友谊关出灾、推荐改走芒街」会被错标成「路段风险 · 东兴 → 芒街口岸」——
+      // 把避险线当成了风险点，与下方推荐卡自相矛盾。
+      // 绕行场景风险落在原路线(baseline)上，故优先取 baseline 命中的口岸；
+      // 尚未绕行(新增风险)时 baseline 即当前线，取其口岸同样正确；
+      // 无明确口岸(风险在途中路段而非口岸)时退回整条行程起讫点 routeTitle。
+      const where = this.inferPortFromNodeIds(this.route.baselinePathNodeIds)
+        || this.inferPortFromNodeIds(this.route.pathNodeIds)
+        || this.routeTitle
       const hazard = this.extractHazardKeyword(reason)
       this.announceText = `${hazard} · ${where}`
       // 同一起灾害事件只播报一遍：以「灾害类型 + 起讫点」作为事件标识，
@@ -4938,8 +5405,77 @@ export default {
         `Cảnh báo khẩn cấp: ${hazardVN} tại ${where}。Dự kiến chậm ${this.route.extraHours || 0} giờ。${vnAdvice}`
       ])
     },
-    /** 拉取当前 O/D 的可选路线（含灾害概率），作为灾害发生后的绕行方案 */
-    async loadRerouteOptions(reason) {
+    /** 当前是否「走平陆运河」通勤态：选定坐船方案 / 联运导航中（目的地=六景港） */
+    _isCanalCommuting() {
+      return this.isCanalPlan || this.selectedMode === 'canal' || this.resolvedDestinationId === 'LJ'
+    },
+    /**
+     * 平陆运河禁航反馈（canal-block）：只对正在走去平陆运河方向的在途用户生效。
+     * 物流任务司机：只提示 + 播报「调度将换线」，实际换线由调度大屏下发任务变更后
+     * 走既有 outreach-update 编排（未接单不受大屏控制的产品不变量同样不受影响）；
+     * 普通用户：恢复原行程目的地并弹出公路替代路线面板，自助点选即换。
+     */
+    async _onCanalBlock(data) {
+      // 先记实时禁航态（无论是否在去运河途中）：首页/路线预览的坐船推荐位据此标红
+      this.canalBlockLive = { blocked: true, reason: (data && data.reason) || '' }
+      if (!this._isCanalCommuting()) return
+      const reason = (data && data.reason) || '平陆运河触发通航安全红线'
+      const time = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+      if (this.mode === 'LOGISTICS') {
+        this.showPush('danger', '平陆运河禁航',
+          `${reason}。车辆滚装航段暂停，调度中心将在大屏为您改换公路方案，请留意调度任务变更通知并确认接收。`)
+        this.pushLog.unshift({ time, text: '平陆运河禁航：等待调度大屏换线' })
+        if (this.voiceOn) {
+          this._interruptAndSpeak([`紧急提示。平陆运河禁航，${reason}。调度中心将为您改换公路路线，请留意调度通知。`])
+        }
+        return
+      }
+      // 普通用户自助换线
+      this.showPush('danger', '平陆运河禁航',
+        `${reason}，船舶航段暂停行驶。已为您规划公路替代路线，点选即可切换。`)
+      this.pushLog.unshift({ time, text: '平陆运河禁航：已弹出公路替代路线供选择' })
+      if (this.voiceOn) {
+        this.speakQueue([
+          `紧急提示。平陆运河禁航，${reason}。已为您规划公路替代路线，请在屏幕上选择。`,
+          `Cảnh báo khẩn cấp: kênh đào Bình Lục cấm hành. Đã lên phương án đường bộ thay thế, vui lòng chọn trên màn hình。`
+        ])
+      }
+      // 回到公路出行方式：清掉坐船选定与运河方案标记，不再展示「可坐船」选项
+      this.selectedMode = 'road'
+      this.activePlanId = null
+      this.canalOption = null
+      if (this._planSavedDestination && this.resolvedDestinationId === 'LJ') {
+        // 导航中把目的地从六景港改回原行程目的地：抑制 watcher 清路线/销毁地图
+        // （Vue watcher 异步刷新，必须等一个 tick 后再解除抑制标志）
+        this._switchingPlan = true
+        const oldDest = this.resolvedDestinationId
+        this.destinationId = this._planSavedDestination
+        this._planSavedDestination = null
+        // 去港口的运河模式关注不再需要，停掉避免下次禁航误点名
+        axios.post('/api/agent/unregister', null, {
+          params: { originId: this.resolvedOriginId, destinationId: oldDest }
+        }).catch(() => {})
+        await this.$nextTick()
+        this._switchingPlan = false
+      }
+      // 复用灾害绕行面板：按恢复后的公路 O/D 拉候选并弹出（点选即换）。
+      // 禁弹判据在这里不适用：人在运河水运方案上，公路候选都是新选项
+      this.loadRerouteOptions('平陆运河禁航', false).catch(() => {})
+    },
+    /** 运河恢复通航（canal-recover）：仍在运河方案上或执行物流任务的在途用户收到提示 */
+    _onCanalRecover(data) {
+      // 清除实时禁航态：推荐位回到正常「可坐船」展示（新搜索的后端快照也已是未禁航）
+      this.canalBlockLive = { blocked: false, reason: '' }
+      if (this.mode !== 'LOGISTICS' && !this._isCanalCommuting()) return
+      const time = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+      this.showPush('ok', '平陆运河恢复通航',
+        (data && data.reason) || '通航条件回到禁航红线之上，陆水联运方案恢复可用（如需坐船请重新选择水运方案）')
+      this.pushLog.unshift({ time, text: '平陆运河恢复通航' })
+    },
+    /** 拉取当前 O/D 的可选路线（含灾害概率），作为灾害发生后的绕行方案。
+     *  suppressIfOnBest：当前已走在风险最低的一条上时不再弹面板（默认开）；
+     *  运河禁航传 false——人在水运方案上，公路候选全是新选项，必须弹。 */
+    async loadRerouteOptions(reason, suppressIfOnBest = true) {
       if (this.rerouteLoading) return
       // 绕行面板已经开着：同一事件不再重复拉取与播报，等司机点选或关闭后再响应新事件
       if (this.rerouteOptions.length) return
@@ -4951,8 +5487,18 @@ export default {
         })
         const list = r.data.candidates || []
         // 展示所有候选走廊（按途经指纹合并同走廊重复项），司机自行选择
-        this.rerouteOptions = this._mergeCorridorDuplicates(list)
-        this.announceHazard(reason, this.rerouteOptions.length)
+        const merged = this._mergeCorridorDuplicates(list)
+        // 自动绕行后当前线本身就是排序置顶的那条（与面板「风险最低」同一套判据）：
+        // 没有更值得换的方案，弹面板只会打扰司机——不弹，只语音告知灾害本身
+        // （optionCount 传 0，播报不会引导「请在屏幕上选择」）。
+        const rank = p => (p == null || p < 0) ? Infinity : p
+        const top = [...merged].sort((a, b) => rank(a.hazardProbability) - rank(b.hazardProbability))[0]
+        if (suppressIfOnBest && top && top.key === this.selectedKey) {
+          this.announceHazard(reason, 0)
+          return
+        }
+        this.rerouteOptions = merged
+        this.announceHazard(reason, merged.length)
       } catch (e) {
         this.announceHazard(reason, 0)
       } finally {
@@ -5153,7 +5699,7 @@ export default {
      * 将用户输入的起终点归一到路网节点 id（就地回写 this.originId/destinationId）。
      * - 已是内置节点 id / 中越文节点名 / 地名库带 nodeId 的条目 → _resolveNodeId 直接命中；
      * - 其余（冷门地名、只在地名库里但无 nodeId 的口岸/枢纽）→ 地理编码 + 吸附拿 nodeId。
-     * 回写后所有依赖 resolvedOriginId/resolvedDestinationId 的下游调用（候选/算路/熔断/公水联运）全部一致。
+     * 回写后所有依赖 resolvedOriginId/resolvedDestinationId 的下游调用（候选/算路/熔断/陆水联运）全部一致。
      * @throws 查无此地名或超出路网覆盖范围（由调用方转提示）
      */
     async _normalizeOD() {
@@ -5294,6 +5840,16 @@ export default {
 .cand-item { padding: 14px; border-radius: 12px; margin-bottom: 8px; cursor: pointer; background: #fff; border: 2px solid #eef2f6; transition: all .2s; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 4px rgba(0,0,0,.03); }
 .cand-item:active { transform: scale(.99); }
 .cand-item.sel { border-color: var(--prism-1); background: #f0f6ff; box-shadow: 0 0 0 3px rgba(99,102,241,.08); }
+/* 可坐船推荐位（平陆运河）：与公路候选并列，蓝色水运系区分 */
+.canal-cand { border-color: rgba(14,165,233,.30); background: linear-gradient(135deg, #f0f9ff 0%, #ecfeff 100%); }
+.canal-cand.sel { border-color: #0ea5e9; box-shadow: 0 0 0 3px rgba(14,165,233,.14); background: linear-gradient(135deg, #e0f2fe 0%, #cffafe 100%); }
+/* 禁航态：整卡标红，与正常 cyan 推荐位形成一眼可辨的反差 */
+.canal-cand.canal-blocked { border-color: rgba(225,29,72,.55); background: linear-gradient(135deg, #fff1f2 0%, #ffe4e6 100%); opacity: .92; }
+.canal-badge { background: linear-gradient(135deg, #0ea5e9, #06b6d4); color: #fff; padding: 3px 10px; border-radius: 10px; font-weight: 700; font-size: 12px; white-space: nowrap; }
+.canal-badge.blocked { background: linear-gradient(135deg, #e11d48, #be123c); }
+.meta-tag.blocked { color: #e11d48; background: rgba(225,29,72,.10); border-color: rgba(225,29,72,.35); font-weight: 700; }
+.pv-flag.canal-flag.blocked { background: rgba(225,29,72,.12); color: #e11d48; border: 1px solid rgba(225,29,72,.4); }
+.canal-flag { background: rgba(14,165,233,.14); color: #0369a1; }
 .cand-left { display: flex; align-items: flex-start; gap: 10px; flex: 1; min-width: 0; }
 .cand-radio { width: 18px; height: 18px; border-radius: 50%; border: 2px solid #c8d6e5; flex-shrink: 0; margin-top: 2px; transition: all .2s; }
 .cand-radio.on { border-color: var(--brand); background: var(--brand); box-shadow: inset 0 0 0 3px #fff; }
@@ -5303,6 +5859,7 @@ export default {
 .cand-meta { display: flex; gap: 6px; margin-top: 6px; }
 .meta-tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #f0f2f5; color: #666; font-weight: 600; }
 .meta-tag.warn { background: #fff3e0; color: #c2410c; }
+.meta-tag.ok { background: #e7f6ec; color: #16a34a; }
 .cand-right { display: flex; flex-direction: column; align-items: center; gap: 4px; flex-shrink: 0; }
 .prob-arrow { font-size: 12px; color: var(--prism-1); }
 .home-bottom { padding: 16px; padding-bottom: 24px; }
@@ -5427,10 +5984,13 @@ export default {
 .nav-status.ok { background: rgba(232,245,233,.85); color: #16a34a; }
 .nav-status.warn { background: rgba(255,248,225,.85); color: #c2410c; }
 .nav-status.rerouted { background: rgba(252,228,236,.85); color: #c62828; }
+/* 原地等待（方案 C）：与「风险预警」拉开色调，表示这是人为停驶态而不是路况差 */
+.nav-status.hold { background: rgba(226,232,240,.9); color: #475569; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; }
 .nav-status.ok .status-dot { background: #4caf50; }
 .nav-status.warn .status-dot { background: #ea7a2e; }
 .nav-status.rerouted .status-dot { background: #f44336; }
+.nav-status.hold .status-dot { background: #64748b; }
 .nav-legend { position: absolute; top: 90px; right: 12px; z-index: 10; display: flex; flex-direction: column; gap: 4px; background: rgba(255,255,255,.85); backdrop-filter: blur(10px); padding: 8px 10px; border-radius: 10px; font-size: 10px; color: #666; }
 .base-switch-btn { position: absolute; top: 178px; right: 12px; z-index: 10; padding: 8px 12px; border: none; border-radius: 999px; background: rgba(255,255,255,.9); backdrop-filter: blur(10px); box-shadow: 0 2px 10px rgba(0,0,0,.15); font-size: 12px; font-weight: 700; color: #374151; cursor: pointer; transition: transform .15s; }
 .base-switch-btn:active { transform: scale(.95); }
@@ -5472,9 +6032,10 @@ export default {
 .nav-risk-badge.ok { background: #e8f5e9; color: #16a34a; }
 .nav-risk-badge.warn { background: #fff3e0; color: #c2410c; }
 .nav-risk-badge.rerouted { background: #fce4ec; color: #c62828; }
+.nav-risk-badge.hold { background: #eef2f7; color: #475569; }
 .nav-info-sub { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: #888; }
 .delay-tag { background: #fce4ec; color: #c62828; padding: 2px 8px; border-radius: 8px; font-weight: 600; font-size: 11px; }
-/* 水运方案标签：用棱彩主色，与"公水联运·平陆运河"呼应 */
+/* 水运方案标签：用棱彩主色，与"陆水联运·平陆运河"呼应 */
 .canal-tag { background: linear-gradient(135deg, rgba(99,102,241,.16), rgba(56,189,248,.16) 45%, rgba(168,85,247,.16)); color: var(--prism-1); padding: 2px 8px; border-radius: 8px; font-weight: 700; font-size: 11px; }
 
 /* ===== ETA 卡片：浮在地图之上的导航信息卡（配色 + 流光 + 呼吸特效）===== */
@@ -5504,6 +6065,16 @@ export default {
   .eta-sheen, .eta-bar-fill, .badge-dot, .pulse-dot::after, .eta-card, .start-btn { animation: none !important; }
 }
 .nav-actions { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end; flex-wrap: wrap; }
+/* 停驶等待提示条：导航底部、操作按钮上方，一眼看到「车为什么不动」以及怎么恢复 */
+.hold-card { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 10px 12px;
+  border-radius: 14px; background: rgba(238,242,247,.96); border: 1px solid rgba(100,116,139,.35);
+  box-shadow: 0 2px 10px rgba(0,0,0,.06); }
+.hold-main { flex: 1; min-width: 0; }
+.hold-title { font-size: 13px; font-weight: 700; color: #334155; }
+.hold-sub { font-size: 11px; color: #64748f; line-height: 1.4; margin-top: 2px; }
+.hold-resume { flex: none; padding: 8px 14px; border: none; border-radius: 20px; font-size: 12px;
+  font-weight: 700; color: #fff; background: linear-gradient(135deg, #16a34a, #22c55e); cursor: pointer;
+  box-shadow: 0 2px 8px rgba(22,163,74,.3); }
 /* 路线预览（浮在地图底图之上的选路面板，路线留白由 fitRoute 计算，避免被面板遮挡） */
 .preview-card { position: relative; overflow: hidden; display: flex; flex-direction: column; padding: 14px; background: linear-gradient(150deg, rgba(255,255,255,.96) 0%, rgba(237,247,255,.94) 58%, rgba(226,242,250,.95) 100%); backdrop-filter: blur(18px); border: 1px solid rgba(99,102,241,.16); box-shadow: 0 16px 38px rgba(12,26,45,.24), inset 0 1px 0 rgba(255,255,255,.9); animation: eta-in .45s cubic-bezier(.2,.9,.3,1.2) both; }
 .preview-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; flex-shrink: 0; }
@@ -5769,26 +6340,46 @@ export default {
 .touch-fill { height: 100%; background: linear-gradient(90deg, #34d399, #66bb6a); border-radius: 4px; transition: width 0.5s; }
 .touch-text { font-size: 11px; color: #7c8ca6; margin-top: 6px; }
 /* 全屏按钮：与地图控件同套白底圆角风格，图标用细线 SVG（展开/收起四角） */
-.fs-btn svg { width: 20px; height: 20px; fill: none; stroke: #3d4450; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.fs-btn svg, .layout-btn svg { width: 20px; height: 20px; fill: none; stroke: #3d4450; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .nav-fs-btn { margin-left: auto; flex: 0 0 auto; width: 34px; height: 34px; border: none; border-radius: 10px; background: rgba(255,255,255,.92); box-shadow: 0 1px 6px rgba(0,0,0,.12); display: flex; align-items: center; justify-content: center; cursor: pointer; }
 .nav-fs-btn svg { width: 18px; height: 18px; fill: none; stroke: #3d4450; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* 顶栏里布局键 + 全屏键并排：只有第一个吃 margin-left:auto，第二个紧跟其后 */
+.nav-fs-btn ~ .nav-fs-btn { margin-left: 8px; }
 
 /* ============================================================
-   桌面端（≥900px）：司机端铺满整窗（配合全屏按钮做演示大屏），
-   悬浮层限宽对齐，避免手机布局被宽屏拉变形
+   桌面端（≥900px）：默认 PC 版铺满整窗（配合全屏按钮做演示大屏），
+   悬浮层限宽对齐，避免手机布局被宽屏拉变形；
+   切到「移动版」（.phone-mini，原 420px 手机窄列）时以下整窗规则
+   全部不生效，各悬浮层自动落回基础手机样式
    ============================================================ */
 @media (min-width: 900px) {
-  .phone { max-width: 100%; box-shadow: none; }
+  .phone:not(.phone-mini) { max-width: 100%; box-shadow: none; }
   /* 搜索框 / 去X 卡：左对齐限宽；宫格 / Tab 栏 / 抽屉：居中限宽 */
-  .hm-search { left: 16px; right: auto; width: min(440px, calc(100vw - 32px)); }
-  .hm-gocard { left: 16px; right: auto; width: min(440px, calc(100vw - 32px)); }
-  .hm-grid { left: 16px; right: auto; width: min(680px, calc(100vw - 32px)); }
-  .hm-tabbar { left: 50%; right: auto; transform: translateX(-50%); width: min(680px, calc(100vw - 32px)); }
-  .hm-sheet { left: 50%; right: auto; transform: translateX(-50%); width: min(820px, 100vw); }
-  .hm-ctrl { right: 16px; top: 16px; }
+  .phone:not(.phone-mini) .hm-search { left: 16px; right: auto; width: min(440px, calc(100vw - 32px)); }
+  .phone:not(.phone-mini) .hm-gocard { left: 16px; right: auto; width: min(440px, calc(100vw - 32px)); }
+  .phone:not(.phone-mini) .hm-grid { left: 16px; right: auto; width: min(680px, calc(100vw - 32px)); }
+  .phone:not(.phone-mini) .hm-tabbar { left: 50%; right: auto; transform: translateX(-50%); width: min(680px, calc(100vw - 32px)); }
+  .phone:not(.phone-mini) .hm-sheet { left: 50%; right: auto; transform: translateX(-50%); width: min(820px, 100vw); }
+  .phone:not(.phone-mini) .hm-ctrl { right: 16px; top: 16px; }
   /* 导航底部面板：卡片居中限宽，宽屏下不拉伸满屏 */
-  .nav-bottom > * { max-width: 860px; margin-left: auto; margin-right: auto; }
-  .nav-topbar { padding-left: 16px; padding-right: 16px; }
+  .phone:not(.phone-mini) .nav-bottom > * { max-width: 860px; margin-left: auto; margin-right: auto; }
+  .phone:not(.phone-mini) .nav-topbar { padding-left: 16px; padding-right: 16px; }
+  /* 移动版窄列两侧留出让位阴影，整窗底色与手机列区分 */
+  .phone.phone-mini { box-shadow: 0 0 40px rgba(0,0,0,.08); }
+
+  /* ===== 移动版（phone-mini）导航/预览态：整屏也要缩回手机尺寸 =====
+     首页是 420px 居中窄列，但进入导航后有三处会突破这个窄列，与首页观感不一致：
+       1) .phone.nav-mode { max-width:100% }（不分 mini/PC）把整窗撑满；
+       2) .nav-screen { position:fixed; inset:0 } 相对视口铺满，脱离手机列；
+       3) .hazard-panel（绕行详情）{ fixed; left:0; right:0 } 通栏横跨整窗。
+     这里逐项收回 420px 手机列内：nav-mode 保持窄列、nav-screen 改 absolute 落入列中、
+     hazard-panel 用 max-width + margin auto 居中（不能用 transform 居中，会与 rz-up 动画冲突）。 */
+  .phone.phone-mini.nav-mode { max-width: 420px; }
+  .phone.phone-mini .nav-screen { position: absolute; }
+  .phone.phone-mini .hazard-panel { max-width: 420px; margin-left: auto; margin-right: auto; }
+  /* 侧滑返回指示条同样对齐手机列左缘（列宽 420 居中 → 左缘在 50vw - 210px），
+     与 _initSwipeBack 里按列矩形算的起手区保持一致 */
+  .phone.phone-mini .swipe-edge { left: calc(50vw - 210px); }
 }
 </style><style>
 /* Leaflet 全局防护：调度确认进入导航时，确保地图层不被任何主题样式隐藏 */
@@ -5816,7 +6407,7 @@ export default {
 .port-label-text { position: absolute; left: 0; top: -26px; transform: translateX(-50%); white-space: nowrap;
   background: rgba(0,0,0,.78); color: #fff; font-size: 11px; font-weight: 700;
   padding: 2px 7px; border-radius: 6px; pointer-events: none; }
-/* 公水联运后续走廊节点（方案B）：与口岸标记同套路的 divIcon 常驻标签，深色底区别于公路口岸橙色标 */
+/* 陆水联运后续走廊节点（方案B）：与口岸标记同套路的 divIcon 常驻标签，深色底区别于公路口岸橙色标 */
 .corridor-label-wrap { background: none !important; border: none !important; }
 .corridor-dot { position: absolute; left: -5px; top: -5px; width: 10px; height: 10px; border-radius: 50%;
   border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35); }

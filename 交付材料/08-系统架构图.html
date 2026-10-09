@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>系统架构图 · 气象驱动的智能调度闭环</title>
+<style>
+  /* 打印向：白底、宽度写死，保证截图尺寸可复现。 */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #fff; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: #17222e; }
+  #fig { width: 1560px; padding: 20px 26px 16px; }
+
+  .cap { border-bottom: 2px solid #17457c; padding-bottom: 9px; margin-bottom: 12px;
+         display: flex; align-items: flex-end; justify-content: space-between; }
+  .cap h1 { font-size: 24px; color: #17457c; letter-spacing: .4px; }
+  .cap .sub { font-size: 13px; color: #4a5b6b; margin-top: 5px; }
+  .cap .no { font-size: 13px; color: #17457c; border: 1px solid #9db6cf; border-radius: 3px;
+             padding: 3px 9px; white-space: nowrap; }
+
+  /* 四个因果段，横向推进 */
+  .chain { display: flex; align-items: stretch; gap: 0; }
+  .stage { flex: 1 1 auto; display: flex; flex-direction: column; }
+  .link { flex: 0 0 66px; display: flex; flex-direction: column; justify-content: center;
+          align-items: center; color: #17457c; }
+  .link .tri { font-size: 26px; line-height: 1; }
+  .link .cap2 { font-size: 10px; color: #6b7d8f; text-align: center; line-height: 1.35; margin-top: 3px; }
+
+  .head { color: #fff; border-radius: 4px 4px 0 0; padding: 7px 10px; }
+  .head b { font-size: 15px; }
+  .head span { display: block; font-size: 11px; opacity: .9; margin-top: 2px; }
+  .h1c { background: #b35215; } .h2c { background: #146b5f; }
+  .h3c { background: #2f6fa8; } .h4c { background: #5b3f8c; }
+  .pane { flex: 1 1 auto; border: 1px solid #c6d2dd; border-top: none; border-radius: 0 0 4px 4px;
+          padding: 8px; display: flex; flex-direction: column; gap: 6px; background: #fbfcfd; }
+
+  .bx { border: 1px solid #c6d2dd; border-radius: 3px; padding: 5px 8px; background: #fff; }
+  .bx h4 { font-size: 12.8px; color: #17222e; margin-bottom: 2px; }
+  .bx p { font-size: 11.3px; color: #4a5b6b; line-height: 1.45; }
+  .bx code { font-family: Consolas, monospace; font-size: 10.8px; color: #17457c; background: #eef3f8;
+             padding: 0 3px; border-radius: 2px; }
+  .src h4 { color: #b35215; } .src { border-left: 3px solid #b35215; }
+  .src.alt { border-left-color: #9db6cf; } .src.alt h4 { color: #4a5b6b; }
+  .eng h4 { color: #146b5f; } .eng { border-left: 3px solid #146b5f; background: #f5faf9; }
+  .ag h4 { color: #2f6fa8; } .ag { border-left: 3px solid #2f6fa8; }
+  .act h4 { color: #5b3f8c; } .act { border-left: 3px solid #5b3f8c; background: #faf8fd; }
+  .innov { border: 1.5px dashed #2e8b57; background: #f1faf3; position: relative; border-left-width: 1.5px; }
+  .innov h4 { color: #1f6f45; }
+  .badge { position: absolute; top: -8px; right: 7px; background: #2e8b57; color: #fff;
+           font-size: 10px; padding: 0 7px; border-radius: 8px; }
+
+  /* 实例小表：把"熔断谁、不熔断谁"摆出来 */
+  table { width: 100%; border-collapse: collapse; font-size: 11.2px; }
+  th, td { border: 1px solid #c9d6d0; padding: 3px 5px; text-align: left; }
+  th { background: #eaf4f1; color: #146b5f; font-weight: 600; }
+  td.bad { color: #b3261e; font-weight: 600; } td.good { color: #146b5f; font-weight: 600; }
+
+  .split { border: 1px solid #c6d2dd; border-radius: 3px; padding: 5px 8px; background: #fff; }
+  .split h4 { font-size: 12.5px; color: #17457c; margin-bottom: 3px; }
+  .duo { display: flex; gap: 5px; }
+  .duo > div { flex: 1 1 0; border-top: 2px solid #2f6fa8; padding-top: 3px; }
+  .duo p { font-size: 11.2px; color: #4a5b6b; line-height: 1.45; }
+  .duo b { font-size: 11.8px; color: #22303d; }
+  .no-line { text-decoration: line-through; color: #b3261e; }
+
+  /* 底座与贯穿带 */
+  .base { margin-top: 10px; display: flex; gap: 10px; }
+  .band { flex: 1 1 0; border: 1px solid #c6d2dd; border-radius: 4px; padding: 7px 10px; background: #f6f8fa; }
+  .band h3 { font-size: 13px; color: #17457c; margin-bottom: 4px; }
+  .band p { font-size: 11.2px; color: #4a5b6b; line-height: 1.5; }
+  .band .row { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  .band .row span { font-size: 11.2px; color: #4a5b6b; }
+  .band .row b { color: #22303d; }
+
+  .foot { margin-top: 9px; border-top: 1px solid #c6d2dd; padding-top: 7px; font-size: 11.2px;
+          color: #55687a; line-height: 1.5; }
+  .foot b { color: #17222e; }
+</style>
+</head>
+<body spellcheck="false">
+<div id="fig">
+
+  <div class="cap">
+    <div>
+      <h1>面向东盟跨境物流的突发气象预警与多路线协同调度平台 · 系统架构图</h1>
+      <div class="sub">气象数据从哪里来 → 变成什么判据 → 如何与 AI 智能体交互 → 最终指导了哪些调度动作（公路为主线，水运为互备创新点）</div>
+    </div>
+    <div class="no">图 1　气象驱动的调度闭环</div>
+  </div>
+
+  <div class="chain">
+
+    <!-- ① 气象来源 -->
+    <div class="stage">
+      <div class="head h1c"><b>① 气象数据从哪来</b><span>三源可切换 · 官方接口为主 · 频度合规</span></div>
+      <div class="pane">
+        <div class="bx src"><h4>大赛官方气象接口（默认主源）</h4>
+          <p>CRA40 实况与预报格点，凭组委会令牌回源；令牌<b>只存服务端环境变量</b>，前端与交付产物零密钥。界面标签原文：「比赛官方接口（CRA40 实况）」</p></div>
+        <div class="bx src alt"><h4>公开气象服务（备源）</h4>
+          <p>免令牌，用于与官方源跑同一条路线做比对。界面标签原文：「真实气象接口（Open-Meteo 公网实况）」</p></div>
+        <div class="bx src alt"><h4>包内模拟数据（离线兜底）</h4>
+          <p>断网时接管，界面标签同步变为「离线模拟数据（不联网）」，不假装在线</p></div>
+        <div class="bx"><h4>频度合规闸门</h4>
+          <p>结果缓存 <b>10 min</b> ＋ <b>每个数据源各自</b>最小回源间隔 <b>60 s</b> ＋ 跨源最小间隔 <b>5 s</b> ＋ 同一源连续 <b>3</b> 次失败仅静默该源 <b>300 s</b>；<b>切换数据源换不来免费额度</b>，杜绝重试轰炸</p></div>
+        <div class="bx"><h4>当场可核验（不是嘴上说说）</h4>
+          <p><code>GET /api/weather/real</code> 同时回传 <code>selectedSource</code>（用户选的源）与 <code>servedSource</code>（这批数字真正来自谁）＋ <code>servedFresh</code>；<code>GET /api/weather/rate-stats</code> 回传真实回源 / 被拦截 / 熔断次数与逐源窗口</p></div>
+        <div class="bx"><h4>两种进入方式，评委都能亲手试</h4>
+          <p>后端定时拉取官方接口；或在大屏点「模拟官方气象推送」，直接注入友谊关 85mm / 芒街 62mm 两个断面，立刻看熔断联动</p></div>
+      </div>
+    </div>
+
+    <div class="link"><div class="tri">▶</div><div class="cap2">格点观测<br>→ 路径边</div></div>
+
+    <!-- ② 风险转换 -->
+    <div class="stage">
+      <div class="head h2c"><b>② 气象有什么用</b><span>把雨量转成"这条路还能不能走"</span></div>
+      <div class="pane">
+        <div class="bx eng"><h4>两条判据链路（不要混为一谈）</h4>
+          <p><b>实时联动</b>：逐边取两端较差天气，小时雨强 ≥ 50mm/h → 惩罚 100，≥ 20 → 20；风速 ≥ 60km/h → 50；能见度 &lt; 100m → 50、&lt; 500m → 20；气温 ≥ 35℃ → 8。<b>官方预报/沙盘</b>：口岸断面取未来 6h 累计降雨达阈值即注入 penalty=100。<b>惩罚系数 ≥ 100 即判定该边"等效道路中断"</b></p></div>
+        <div class="bx eng"><h4>阈值随企业风险容忍度浮动（改动即重估）</h4>
+          <div class="row" style="display:flex;gap:12px;font-size:11.2px;color:#4a5b6b;margin-top:2px;">
+            <span>保守 <b>80mm</b></span><span>平衡 <b>100mm</b></span><span>激进 <b>120mm</b></span></div>
+          <p style="margin-top:3px">仅适用于友谊关断面的预报档；芒街固定 <b>70mm</b>。熔断后需降到阈值 − 5mm 以下方恢复（滞后线，防来回翻）；降雨 50mm 只作"关注"叙事，不注入软惩罚</p></div>
+        <div class="bx eng"><h4>同一次降雨，为什么只封友谊关</h4>
+          <table>
+            <tr><th>断面</th><th>降雨</th><th>适用阈值</th><th>判定</th></tr>
+            <tr><td>友谊关口岸段</td><td>85 mm</td><td>保守档 80 mm</td><td class="bad">越限 → 熔断</td></tr>
+            <tr><td>芒街口岸段</td><td>62 mm</td><td>固定 70 mm</td><td class="good">未越限 → 可通行</td></tr>
+          </table></div>
+        <div class="bx eng"><h4>熔断后剩余图重算 ＋ 全要素代价</h4>
+          <p>毫秒级、可重复执行；输出里程 / 耗时 / 绕行延误 / 油耗 / 通行费 / 通关时效 / 货损金额 / 碳排放</p></div>
+        <div class="bx eng innov"><span class="badge">创新点</span><h4>公—水双向互备评估</h4>
+          <p>公路熔断 → 即刻评估运河水运可执行性；水运禁航（能见度 &lt; 1000m）→ 反向核算公路绕行成本</p></div>
+        <div class="bx eng"><h4>水运断面独立建模</h4>
+          <p>运河每条支流按自身特征向量单独输出风险概率，不做全线一刀切；通航观测可由水运平台回传或模拟推送</p></div>
+      </div>
+    </div>
+
+    <div class="link"><div class="tri">▶</div><div class="cap2">熔断清单<br>→ 决策边界</div></div>
+
+    <!-- ③ 与 AI 智能体交互 -->
+    <div class="stage">
+      <div class="head h3c"><b>③ 怎么与 AI 智能体交互</b><span>引擎给边界，模型给文字</span></div>
+      <div class="pane">
+        <div class="split"><h4>职责严格分离（本图最关键的一条线）</h4>
+          <div class="duo">
+            <div><b>引擎 → 智能体</b><p>下传结构化熔断清单与决策边界（哪条边熔断、绕行代价、货损金额），作为提示上下文</p></div>
+            <div><b>智能体 → 引擎</b><p>只回文字：风险解释、方案研判陈述、中越双语预警文案；<span class="no-line">模型生成数字</span>一律不采信</p></div>
+          </div></div>
+        <div class="bx ag"><h4>三个智能体顺序接力</h4>
+          <p>风险研判（为什么封友谊关而不封芒街）→ 方案生成（对可比方案集做取舍建议）→ 协同触达（按角色出双语文案）</p></div>
+        <div class="bx ag"><h4>知识库提供依据，抑制无根据表述</h4>
+          <p>通航安全规定 / 跨境物流规范 / 企业作业规则，按标题 / 关键词 / 正文<b>加权匹配</b>，命中条目注入上下文</p></div>
+        <div class="bx ag"><h4>推理通道逐级兜底，且如实回报</h4>
+          <p>本地大模型 → 企业内网网关 → 在线大模型 → 规则模板；结果面板标签显示本次<b>真正走了哪一档</b>，断网重试即变"规则模板"</p></div>
+        <div class="bx ag"><h4>任一通道不可用都不断流程</h4>
+          <p>只影响文字表述，<b>数值结果与推荐方案不变</b>；预生成文案仅在"缓存模式"出现并单独标注</p></div>
+        <div class="bx ag"><h4>输出落点</h4>
+          <p>解释文字回到大屏方案卡与司机端预警条，并连同当次通道标识写入决策日志，事后能回溯"当时为什么说这句话"</p></div>
+      </div>
+    </div>
+
+    <div class="link"><div class="tri">▶</div><div class="cap2">建议<br>→ 人工确认</div></div>
+
+    <!-- ④ 指导了什么 -->
+    <div class="stage">
+      <div class="head h4c"><b>④ 最终指导了什么</b><span>调度员确认后落到执行末端</span></div>
+      <div class="pane">
+        <div class="bx act"><h4>换线绕行 · 切换口岸 / 走廊</h4>
+          <p>友谊关封了改走芒街；地图上同时画原路线（灰虚线）与新路线，并标注绕行增加的时长与费用</p></div>
+        <div class="bx act"><h4>局部绕行避灾</h4>
+          <p>车已开到中途前方成灾：从当前位置绕开灾害段，再归回原路线，不推倒重来</p></div>
+        <div class="bx act innov"><span class="badge">创新点</span><h4>改走水运 / 反向回公路</h4>
+          <p>车辆滚装上船经平陆运河转海运出境；运河禁航时反向给出公路方案</p></div>
+        <div class="bx act"><h4>原地等待 · 延迟发车</h4>
+          <p>公路与水运同时受阻时不强推绕行；司机端进入停驶待命，条件恢复后一键复驶</p></div>
+        <div class="bx act"><h4>行驶进度闸门：砍掉做不到的方案</h4>
+          <p>已越过装货港的车不再被推荐"回港口坐船"，避免给出看起来最优却已无法执行的建议</p></div>
+        <div class="bx act"><h4>分级叫应到五类人 ＋ 回执闭环</h4>
+          <p>调度员 / 货车司机 / 越南司机 / 船东船员 / 沿岸百姓，中越双语播报；未确认自动升级触达渠道</p></div>
+        <div class="bx act"><h4>货损与到达时间随之改写</h4>
+          <p>冷链火龙果延误超 4h 起按每小时 2.4% 计损（电子元件超 2h 起按 1.8%）；司机端到达时间按在途进度动态修正</p></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 底座 -->
+  <div class="base">
+    <div class="band">
+      <h3>支撑底座（服务与接入层 ＋ 数据层）</h3>
+      <div class="row">
+        <span><b>同步接口</b> 路径计算 / 方案查询 / 数据源切换 / 来源核验</span>
+        <span><b>实时推送</b> 熔断事件 · 换线指令 · 回执状态</span>
+        <span><b>瓦片同源代理</b> 地图凭据后端代管</span>
+        <span><b>公网演示护栏</b> 危险接口屏蔽 ＋ 写操作按来源限流</span>
+      </div>
+      <div class="row" style="margin-top:4px;">
+        <span><b>中越跨境公路路网</b>（开源数据自主清洗 ＋ 口岸断边补全）</span>
+        <span><b>通关时效</b>（公开公报整理）</span>
+        <span><b>行业知识库</b></span>
+        <span><b>底图瓦片两级缓存</b>（内存＋磁盘，离线可出图）</span>
+      </div>
+    </div>
+    <div class="band" style="flex:0 0 380px;">
+      <h3>贯穿全链 · 可核验</h3>
+      <p>人在回路确认，系统不越权执行　·　AI 通道与气象来源逐档如实标注　·　阈值与判据界面可查　·　官方接口频度统计端点供第三方复核　·　决策日志留痕，风险变化即标记旧结论过期并重算</p>
+    </div>
+  </div>
+
+  <div class="foot">
+    <b>读图要点</b>　横向四段即本项目的因果主张：<b>气象观测量被直接转换为路径可通行性</b>（第②段），<b>大模型只承担文字、数字全部由确定性引擎产出</b>（第③段），因此第④段的每一个动作都能回溯到具体雨量与阈值、可现场复算。水运不作为并列第二主线，只在公路受阻时被触发评估，故以虚线框表示。本图只划分职责与数据流向，不体现具体框架选型；接口清单见《01-技术文档》，带技术标注的展开版与数据溯源表见《02-系统架构与数据使用说明》。
+  </div>
+
+</div>
+</body>
+</html>

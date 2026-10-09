@@ -35,10 +35,12 @@ public class RouteAgentService {
     private final List<SseEmitter> emitters = new CopyOnWriteArrayList<>();
 
     /**
-     * 关注的路线集合（origin|destination → origin,destination）：
+     * 关注的路线集合（origin|destination → origin,destination,mode）：
      * 任何一方注册关注即加入——正在导航的司机、已选线但未开始的司机、
      * 目的地是越南端的调度/司机、调度大屏本身。风险变化时对集合内每条路线重算并广播。
      * 已停止导航的司机通过 unregister 移除，避免被无关路线打扰。
+     * mode = road（公路导航）/ canal（陆水联运，正在导航去平陆运河六景港或选定了坐船方案），
+     * 运河禁航时据此识别受影响的在途对象。
      */
     private final Map<String, String[]> watchedRoutes = new ConcurrentHashMap<>();
 
@@ -77,11 +79,24 @@ public class RouteAgentService {
      * 一旦风险变化，该路线会随其它关注路线一起被重算并广播。
      */
     public void registerActiveRoute(String originId, String destinationId) {
+        registerActiveRoute(originId, destinationId, null);
+    }
+
+    /**
+     * 带出行方式的注册：mode=canal 表示该关注方正在走陆水联运（导航去平陆运河六景港），
+     * 运河禁航事件会点名推送给调度大屏。mode 传 null 时保留已有标记（轮询重复注册不丢模式），
+     * 新注册默认 road。
+     */
+    public void registerActiveRoute(String originId, String destinationId, String mode) {
         if (originId != null && destinationId != null
                 && !originId.isBlank() && !destinationId.isBlank()) {
             this.activeOrigin = originId;
             this.activeDestination = destinationId;
-            watchedRoutes.put(key(originId, destinationId), new String[]{originId, destinationId});
+            watchedRoutes.compute(key(originId, destinationId), (k, old) -> {
+                String m = mode != null && !mode.isBlank() ? mode
+                        : (old != null && old.length > 2 ? old[2] : "road");
+                return new String[]{originId, destinationId, m};
+            });
         }
     }
 
@@ -101,6 +116,31 @@ public class RouteAgentService {
         Map<String, String[]> merged = new LinkedHashMap<>(watchedRoutes);
         merged.putIfAbsent(key(activeOrigin, activeDestination), new String[]{activeOrigin, activeDestination});
         return new ArrayList<>(merged.values());
+    }
+
+    /**
+     * 供后台气象守护取当前关注的走廊清单（含兜底主路线）：{origin, destination} 数组列表。
+     * 只读快照，不影响本服务自身的重算/广播逻辑。
+     */
+    public List<String[]> watchedCorridors() {
+        return watchedSnapshot();
+    }
+
+    /**
+     * 当前正处于「陆水联运（去平陆运河）」模式的关注路线清单。
+     * 运河禁航时随 SSE 事件下发，调度大屏据此判断是否有在途司机/用户需要换线。
+     */
+    public List<Map<String, Object>> canalWatchersSnapshot() {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (String[] od : watchedRoutes.values()) {
+            if (od.length > 2 && "canal".equals(od[2])) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("origin", od[0]);
+                m.put("destination", od[1]);
+                out.add(m);
+            }
+        }
+        return out;
     }
 
     public Map<String, Object> status() {

@@ -1,8 +1,11 @@
 <template>
   <div class="app-root" :class="{ 'panel-dragging': panelDragging }">
     <header class="app-header">
-      <h1>东盟跨境物流气象导航平台 · 调度大屏</h1>
+      <h1>面向东盟跨境物流的突发气象预警与多路线协同调度平台 · 调度大屏</h1>
       <div class="header-right">
+        <button class="btn small" :class="perfLite ? 'primary' : 'outline'"
+                :title="perfLite ? (perfAuto ? '本机帧率自检未达阈值，已自动关掉毛玻璃与逐帧重绘的装饰特效（功能、数据、红绿分段均不变）；点一下可强制恢复满特效' : '轻界面模式已开启：关掉毛玻璃与流光等逐帧重绘的装饰特效（功能、数据、红绿分段均不变），再点一次恢复满特效') : '当前为满特效。若这台机器不只拖图卡、点按钮也发滞，点这里关掉装饰特效'"
+                @click="togglePerfLite">{{ perfLite ? (perfAuto ? '轻界面（自动）' : '轻界面已开') : '轻界面' }}</button>
         <button class="btn small outline-light" @click="openDriver">司机端 ↗</button>
         <button class="btn small" @click="getStatus">OSM 状态</button>
         <span class="status-badge" :class="{ready: status && status.loaded}">{{ status && status.loaded ? 'OSM 已加载' : 'OSM 未加载' }}</span>
@@ -10,7 +13,7 @@
     </header>
 
     <div v-if="agentNotice" class="agent-banner" :class="agentNotice.level || 'info'">
-      <span class="agent-banner-title">🤖 Agent 实时守护</span>
+      <span class="agent-banner-title">Agent 实时守护</span>
       <span class="agent-banner-text">{{ agentNotice.reason }} {{ agentNotice.advice }}</span>
       <span class="agent-banner-time">{{ agentNotice.time }}</span>
     </div>
@@ -36,7 +39,7 @@
             </div>
             <div class="row">
               <button class="btn" :class="pickMode ? 'pick-on' : 'outline'" @click="togglePickMode">
-                {{ pickMode ? '取消地图选点' : '地图选点 ⚡' }}
+                {{ pickMode ? '取消地图选点' : '地图选点' }}
               </button>
               <span class="muted" style="align-self:center">{{ pickMode ? (pickOriginNode ? '已选起点，点地图选终点' : '点击地图任意位置选起点') : '选择起终点后点击「确认选择并规划」' }}</span>
             </div>
@@ -48,6 +51,28 @@
 
         <!-- 第四幕：公司派单（司机端收到后自动切物流任务模式） -->
         <TaskDispatchPanel ref="taskPanelRef" :task-status="taskStatus" @refresh="refreshTask" @analyze="onPreDispatchAnalysis" />
+
+        <!-- 平陆运河禁航：点名影响在途水运对象。
+             物流司机换线必须由大屏下发任务变更（司机端只等确认）；
+             普通用户在司机端自助弹窗换线，这里只做知会 -->
+        <section v-if="canalAlert" class="card">
+          <h3>平陆运河禁航 · 影响在途对象</h3>
+          <div class="muted">{{ canalAlert.reason }}
+            <span v-if="canalAlert.trigger" class="canal-trigger">· 来源：{{ canalAlert.trigger }}</span>
+          </div>
+          <div v-if="canalAlert.driverOnCanal" class="row" style="margin-top:6px">
+            <span style="align-self:center">司机 {{ canalAlert.driverName }} 正在以陆水联运导航去平陆运河，应为其改换公路方案：</span>
+            <button v-if="!canalAlert.dispatched" class="btn primary" :disabled="canalAlert.dispatching"
+                    @click="switchDriverToRoad">{{ canalAlert.dispatching ? '下发中…' : '为司机换公路方案' }}</button>
+            <span v-else class="muted">已下发：司机端将预览新公路路线并确认接收</span>
+          </div>
+          <div v-if="canalAlert.watcherCount" class="muted" style="margin-top:4px;font-size:12px">
+            {{ canalAlert.watcherCount }} 条在途路线处于坐船方案，普通用户司机端已自动弹出公路替代路线供自助切换
+          </div>
+          <div class="row" style="margin-top:6px">
+            <button class="btn outline tiny" @click="canalAlert = null">知道了</button>
+          </div>
+        </section>
 
         <!-- 第一/二幕：决策沙盘（官方推送熔断 + 滑块观察决策边界） -->
         <DecisionSandbox ref="sandboxRef" @sandbox-change="onSandboxChange" />
@@ -116,6 +141,10 @@
                 {{ opt.label }}{{ opt.configured ? '' : '（未配置）' }}
               </option>
             </select>
+          </div>
+          <!-- 选了哪个源与数字实际来自哪个源是两回事，这一行把后者说清楚 -->
+          <div class="muted source-note" :class="{ warn: weatherSourceMismatch }" :title="weatherSourceNote">
+            {{ weatherSourceNote }}
           </div>
           <div class="row">
             <button class="btn" :disabled="weatherLoading" @click="refreshRealWeather">
@@ -198,32 +227,6 @@
             <span class="compare-label">是否绕行</span>
             <span>{{ routeResult.route.rerouted ? '是（自动切换口岸）' : '否' }}</span>
           </div>
-        </section>
-
-        <section v-if="candidates.length" class="card">
-          <h3>候选路线
-            <span class="route-state">{{ candidates.length }} 条可选</span>
-          </h3>
-          <div class="candidate-list">
-            <div v-for="c in candidates" :key="c.key"
-                 class="candidate-item"
-                 :class="{active: c.key === selectedCandidateKey, recommended: c.key === 'recommended', softened: c.softened}"
-                 @click="selectCandidate(c.key)">
-              <div class="candidate-head">
-                <span class="candidate-label">{{ c.label || c.key }}</span>
-                <span v-if="c.key === 'recommended'" class="candidate-badge rec">推荐</span>
-                <span v-if="c.softened" class="candidate-badge soften" title="硬熔断降级为软惩罚，兜底路径">降级</span>
-              </div>
-              <div class="candidate-meta">
-                <span>⏱ {{ c.hours != null ? c.hours + 'h' : '-' }}</span>
-                <span>📏 {{ c.distanceKm != null ? c.distanceKm + 'km' : '-' }}</span>
-                <span :class="{warn: c.riskCount > 0}">⚠ {{ c.riskCount || 0 }} 风险</span>
-              </div>
-              <div v-if="c.note" class="candidate-note">{{ c.note }}</div>
-              <div v-if="c.via && c.via.length" class="candidate-via">途经：{{ Array.isArray(c.via) ? c.via.join(' → ') : c.via }}</div>
-            </div>
-          </div>
-          <div class="muted" style="margin-top:6px;font-size:11px">点击切换主线，备选线在地图上以浅蓝虚线展示。</div>
         </section>
 
         <section class="card">
@@ -352,6 +355,7 @@
           :selected-edge="selectedEdgeId"
           :candidates="candidates"
           :selected-candidate-key="selectedCandidateKey"
+          :corridor="showCorridor ? corridorData : null"
           @candidate-pick="selectCandidate"
           @edge-click="onEdgeClick"
           @map-click="onMapClick"
@@ -377,6 +381,7 @@ import PlatformConfigurator from './components/PlatformConfigurator.vue';
 import GrowthPath from './components/GrowthPath.vue';
 import DecisionLogTimeline from './components/DecisionLogTimeline.vue';
 import RoutePlanner from './components/RoutePlanner.vue';
+import { isLite, isAutoLite, onLiteChange, toggleLite } from './utils/perfMode.js';
 
 // 左侧面板拖拽缩放边界：1=默认 360px；上限约 2.2 倍（≈790px，投影仪/后排也能看清）
 const PANEL_ZOOM_MIN = 0.85;
@@ -390,6 +395,14 @@ const PANEL_BASE_WIDTH = 360;
  */
 const ZOOM_SUPPORTED = typeof CSS !== 'undefined' && typeof CSS.supports === 'function'
   && CSS.supports('zoom', '1.5');
+
+// 气象数据源简称（标题与来源说明共用）：id 与后端 WeatherProvider.id() 一一对应
+const WEATHER_SOURCE_SHORT = {
+  'contest-observation': 'CRA40',
+  'open-meteo': 'Open-Meteo',
+  simulated: '离线模拟',
+  none: '待拉取'
+};
 
 export default {
   components: {
@@ -431,7 +444,12 @@ export default {
       knowledgeLoaded: false,
       weatherPoints: [],
       weatherSource: 'unknown',
+      // 下拉框的选择：只跟“后端当前选中的数据源”走，不被实际取数结果反向覆盖
       weatherSourceId: 'contest-observation',
+      // 屏幕上这批数字实际来自哪个源（可能是上一个源留下的缓存）
+      weatherServed: 'none',
+      // 这批数据是不是本次真实回源拿到的（false = 节流窗口内的缓存）
+      weatherFresh: false,
       weatherSourceOptions: [],
       sourceSwitching: false,
       weatherLoading: false,
@@ -442,6 +460,14 @@ export default {
       hazardTimeline: [],
       // 候选路线：每次规划后由 /api/routes/candidates 拉回，最多 10 条
       candidates: [],
+      // 平陆运河「可坐船出境」推荐位：后端 candidates 接口在公路候选外并列返回的 canalOption
+      // （起点中国侧、终点越南侧时非空）。大屏此前只读 candidates、把它丢了。
+      canalOption: null,
+      // 运河禁航实时状态（canal-block/canal-recover SSE 维护）：null=未收到事件，看 canalOption 快照
+      canalBlockLive: null,
+      // 坐船走廊几何（/api/canal/corridor 懒拉缓存）与地图高亮开关
+      corridorData: null,
+      showCorridor: false,
       // 当前主线对应的候选 key（默认 = 后端返回的 "recommended"，选中后变为对应 key）
       // 预先写 'recommended' 是为了让候选到达后 drawAlternates 能直接跳过它，避免与主线红绿分层重叠
       selectedCandidateKey: 'recommended',
@@ -452,12 +478,27 @@ export default {
       // 公司派单面板递来的订单信息（车牌/司机/货物/重量/起终点）：
       // 「AI 决策分析」面板的开始导航模板派单时与选定路线合并后下发
       dispatchForm: null,
+      // 平陆运河禁航告警卡（canal-block SSE 事件驱动）：点名受影响在途对象并支持一键换线
+      canalAlert: null,
       // 左侧面板缩放系数（1=默认360px）：拖动右边缘手柄整体等比放大，字号随之变大
       panelZoom: 1,
-      panelDragging: false
+      panelDragging: false,
+      // 轻界面开关当前状态（入口已按机器自动判定，这里只是给按钮做回显）
+      perfLite: isLite(),
+      // 是否由帧率自检自动开的（区别于手点）：文案上让评委知道这不是他误触
+      perfAuto: isAutoLite()
     };
   },
   computed: {
+    /** 运河当前是否禁航：SSE 实时状态优先，其次用后端随 canalOption 下发的静态快照 */
+    canalBlockedNow() {
+      if (this.canalBlockLive) return this.canalBlockLive.blocked;
+      return !!(this.canalOption && this.canalOption.canalBlocked);
+    },
+    canalBlockReasonNow() {
+      if (this.canalBlockLive && this.canalBlockLive.blocked && this.canalBlockLive.reason) return this.canalBlockLive.reason;
+      return (this.canalOption && this.canalOption.canalBlockedReason) || '平陆运河触发通航安全红线';
+    },
     // 面板用 zoom 整体等比放大：宽度与字号一同变化。
     // 只改 width 的话卡片内字号仍写死 px，会变成"更宽但字没大"的空旷版式
     panelStyle() {
@@ -493,24 +534,40 @@ export default {
       return 'clear';
     },
     weatherSourceLabel() {
-      const m = {
-        'contest-observation': '比赛接口 CRA40',
-        'open-meteo': '真实气象 Open-Meteo',
-        simulated: '离线模拟',
-        none: '待拉取'
-      };
-      return m[this.weatherSourceId] || '多数据源';
+      return WEATHER_SOURCE_SHORT[this.weatherSourceId] || '多数据源';
+    },
+    /** 展示中数据的真实来源（与下拉框选了谁是两件事） */
+    weatherServedLabel() {
+      return WEATHER_SOURCE_SHORT[this.weatherServed] || this.weatherServed;
+    },
+    /** 选中的源与实际取数的源不一致（典型场景：刚切完源、还在节流窗口里） */
+    weatherSourceMismatch() {
+      return this.weatherServed !== 'none' && this.weatherServed !== this.weatherSourceId;
+    },
+    /** 一行说清“这些数字到底从哪来”，不拿上一个源的数据冒充新选的源 */
+    weatherSourceNote() {
+      const selected = WEATHER_SOURCE_SHORT[this.weatherSourceId] || this.weatherSourceId;
+      if (!this.weatherServed || this.weatherServed === 'none') {
+        return '尚未取到数据，点下方按钮拉取';
+      }
+      const served = this.weatherServedLabel;
+      if (this.weatherSourceMismatch) {
+        return `已选「${selected}」，当前显示的是「${served}」的缓存，下一轮回源改用「${selected}」`;
+      }
+      return this.weatherFresh
+        ? `数据来自「${served}」本次回源`
+        : `数据来自「${served}」缓存（60 秒节流窗口内不重复请求上游）`;
     },
     weatherSourceText() {
       const m = {
-        live: '实时', 'live-alt': '实时(备用源)',
+        live: '实时', cached: '缓存', stale: '旧源缓存',
         fallback: '模拟降级', offline: '离线', unknown: '未拉取'
       };
       return m[this.weatherSource] || '未拉取';
     },
     weatherSourceClass() {
       const m = {
-        live: 'ok', 'live-alt': 'ok',
+        live: 'ok', cached: 'ok', stale: 'warn',
         fallback: 'warn', offline: 'off', unknown: 'pending'
       };
       return m[this.weatherSource] || 'pending';
@@ -547,6 +604,14 @@ export default {
   methods: {
     fmtKm(nodeIds) {
       return (nodeIds || []).length;
+    },
+    /**
+     * 一键切轻界面：去掉 backdrop-filter 与逐帧重绘的装饰动画。
+     * 开关变化由 perfMode 广播，MapView 监听后重建路线特效层，这里只负责按钮回显。
+     */
+    togglePerfLite() {
+      this.perfLite = toggleLite();
+      this.perfAuto = false;
     },
     fmtYuan(v) {
       return Number(v || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 });
@@ -695,11 +760,7 @@ export default {
         });
         const pts = r.data.points || [];
         this.weatherPoints = pts;
-        // 后端返回实际生效数据源：contest-observation / open-meteo / simulated / none
-        const src = r.data.source;
-        this.weatherSourceId = src || 'contest-observation';
-        this.weatherSource = isLiveSource(src) ? 'live'
-          : pts.length ? 'fallback' : 'offline';
+        this.applyWeatherSourceState(r.data, pts.length);
       } catch (e) {
         console.error(e);
         this.weatherSource = 'offline';
@@ -707,11 +768,36 @@ export default {
         this.weatherLoading = false;
       }
     },
-    /** 加载可选气象数据源清单（比赛官方 / 真实气象 / 离线模拟） */
+    /**
+     * 把一份气象响应翻译成界面状态。后端在这里有两个不同的概念，必须分开回显：
+     * selectedSource = 当前选中的数据源（下拉框的唯一真相）；
+     * servedSource   = 屏幕上这批数字实际来自哪个源（可能是上一个源留下的缓存）。
+     * 早先直接用后者写下拉框，于是“切到 CRA40”会被上一轮缓存里的 Open-Meteo 顶回去，
+     * 看起来像“拉完官方数据马上又自动切回实时气象”，现在只按 selectedSource 回显。
+     */
+    applyWeatherSourceState(payload, pointCount) {
+      const selected = (payload && (payload.selectedSource || payload.current)) || '';
+      if (selected) this.weatherSourceId = selected;
+      const served = (payload && payload.servedSource) || 'none';
+      this.weatherServed = served;
+      this.weatherFresh = !!(payload && payload.servedFresh);
+      const liveName = this.isLiveSource(served);
+      if (served === 'simulated') this.weatherSource = 'fallback';
+      else if (liveName && this.weatherFresh) this.weatherSource = 'live';
+      else if (liveName && served === this.weatherSourceId) this.weatherSource = 'cached';
+      else if (liveName) this.weatherSource = 'stale';
+      else this.weatherSource = pointCount > 0 ? 'fallback' : 'offline';
+    },
+    /** 数据源 id → 界面简称（说明文案与日志共用） */
+    sourceShort(id) {
+      return WEATHER_SOURCE_SHORT[id] || id || '未定';
+    },
+    /** 加载可选气象数据源清单（CRA40 / Open-Meteo / 离线模拟） */
     async loadWeatherSource() {
       try {
         const r = await axios.get('/api/weather/source', { timeout: 8000 });
         this.weatherSourceOptions = r.data.options || [];
+        // 下拉框以“后端选中的源”为准（另一个页面/评委切了也能跟上）
         if (r.data.current) this.weatherSourceId = r.data.current;
       } catch (e) {
         console.error('load weather source failed', e);
@@ -731,6 +817,12 @@ export default {
         this.weatherSourceOptions = (this.weatherSourceOptions || []).map(o => ({ ...o, active: o.id === r.data.source }));
         this.pushTimeline('气象数据源切换', `已切换为「${r.data.sourceLabel}」，正在按新数据源重新拉取`, 'info');
         await this.refreshRealWeather();
+        // 节流窗口挡住的场景要当场说清楚，不能让调度员自己猜“是不是没切过来”
+        if (this.weatherSourceMismatch) {
+          this.pushTimeline('气象数据源待回源',
+            `当前数字仍来自「${this.sourceShort(this.weatherServed)}」缓存，下一轮回源改用「${r.data.sourceLabel}」`, 'warn');
+          this.scheduleSourceSettleRetry();
+        }
       } catch (e) {
         console.error('switch weather source failed', e);
         alert('切换气象数据源失败');
@@ -738,16 +830,51 @@ export default {
         this.sourceSwitching = false;
       }
     },
+    /**
+     * 切源后屏幕上还是上一个源的数据（被按源 60 秒节流或跨源最小间隔挡住）时补拉。
+     * 等待时长不写死：直接问本机后端「这个源距下次允许回源还要等多久」，多留 2 秒再去，
+     * 这样冷启动刚回过源的场景也能在窗口一开就落到新源，不用调度员反复点。最多补两次，不循环骚扰上游。
+     */
+    async scheduleSourceSettleRetry() {
+      if (this._sourceSettleTimer) { clearTimeout(this._sourceSettleTimer); this._sourceSettleTimer = null; }
+      this._sourceSettleLeft = 2;
+      const step = async () => {
+        this._sourceSettleTimer = null;
+        if (!this.weatherSourceMismatch) return;
+        await this.refreshRealWeather();
+        if (!this.weatherSourceMismatch) {
+          this.pushTimeline('气象数据源已生效', `已按「${this.sourceShort(this.weatherSourceId)}」取到实况`, 'ok');
+          return;
+        }
+        this._sourceSettleLeft -= 1;
+        if (this._sourceSettleLeft <= 0) return;
+        this._sourceSettleTimer = setTimeout(step, await this.sourceSettleWaitMs());
+      };
+      this._sourceSettleTimer = setTimeout(step, await this.sourceSettleWaitMs());
+    },
+    /** 本源还要等多久才允许回源（只查本机后端统计，不碰上游）；拿不到就按 18 秒兜底，封顶 75 秒 */
+    async sourceSettleWaitMs() {
+      let ms = 18000;
+      try {
+        const r = await axios.get('/api/weather/rate-stats', { timeout: 5000 });
+        const d = r.data || {};
+        const per = (d.sources || {})[this.weatherSourceId] || {};
+        const minInterval = d.minIntervalSeconds || 60;
+        const remain = per.secondsSinceLastUpstream == null ? 0 : minInterval - per.secondsSinceLastUpstream;
+        ms = (remain > 0 ? remain + 2 : 6) * 1000;
+      } catch (e) {
+        console.warn('rate-stats 不可用，按默认等待时间补拉', e);
+      }
+      return Math.min(75000, Math.max(6000, ms));
+    },
     async loadRealWeather() {
       try {
         const r = await axios.get('/api/weather/real', {
           params: { originId: this.originId, destinationId: this.destinationId }
         });
-        this.weatherPoints = r.data.points || [];
-        const src = r.data.source;
-        this.weatherSourceId = src || 'contest-observation';
-        this.weatherSource = isLiveSource(src) ? 'live'
-          : (r.data.points && r.data.points.length) ? 'fallback' : 'offline';
+        const pts = r.data.points || [];
+        this.weatherPoints = pts;
+        this.applyWeatherSourceState(r.data, pts.length);
       } catch (e) {
         // 离线模拟天气数据
         this.weatherSource = 'fallback';
@@ -803,6 +930,9 @@ export default {
         });
         const list = (r.data && r.data.candidates) || [];
         this.candidates = list;
+        // 公路候选之外的「可坐船出境」推荐位：一并接住，供坐船卡片与地图走廊高亮使用
+        this.canalOption = (r.data && r.data.canalOption) || null;
+        if (!this.canalOption) this.showCorridor = false;
         // 默认主线 = 后端标记的 recommended；找不到就第一条
         const rec = list.find(c => c.key === 'recommended');
         const nextKey = (rec || list[0] || {}).key || '';
@@ -811,6 +941,8 @@ export default {
       } catch (e) {
         console.warn('loadCandidates failed', e);
         this.candidates = [];
+        this.canalOption = null;
+        this.showCorridor = false;
       }
     },
     // 切换主线：直接把候选的几何替换为主线数据，无需再次请求后端（候选已含 coords/edgeIds/edgeSpans）
@@ -843,6 +975,21 @@ export default {
       }
       this.bilingualWarning = '';
       this.pushTimeline('主线切换', `${c.label || c.key} · ${c.hours != null ? c.hours + 'h' : '-'} · 风险 ${c.riskCount || 0} 段`, c.softened ? 'warn' : 'info');
+    },
+    // 坐船卡片：点击在地图上高亮/收起「平陆运河陆水联运走廊」。几何懒拉一次后缓存复用。
+    toggleCanalCorridor() {
+      if (!this.canalOption) return;
+      this.showCorridor = !this.showCorridor;
+      if (this.showCorridor && !this.corridorData) this.ensureCorridor();
+      this.pushTimeline('出行方式', this.showCorridor ? '查看陆水联运（坐船）走廊' : '收起坐船走廊', 'info');
+    },
+    async ensureCorridor() {
+      try {
+        const r = await axios.get('/api/canal/corridor', { timeout: 15000 });
+        this.corridorData = r.data;
+      } catch (e) {
+        console.warn('陆水联运走廊拉取失败', e);
+      }
     },
     // 确认下拉选择的起终点：提交草稿并触发规划，同时注册关注（风险时该路线会被重算推送）
     confirmSelection() {
@@ -980,6 +1127,13 @@ export default {
         // EventSource 会自动重连，此处仅日志
         console.warn('agent SSE disconnected, will retry');
       };
+      // === 平陆运河禁航/恢复：在途水运对象点名反馈（双向切换场景 B）===
+      this._agentEs.addEventListener('canal-block', (ev) => {
+        try { this.onCanalBlock(JSON.parse(ev.data)); } catch (e) { console.error('canal-block parse failed', e); }
+      });
+      this._agentEs.addEventListener('canal-recover', (ev) => {
+        try { this.onCanalRecover(JSON.parse(ev.data)); } catch (e) { console.error('canal-recover parse failed', e); }
+      });
     },
     showAgentNotice(data) {
       const rerouted = data.route && data.route.rerouted;
@@ -1036,7 +1190,7 @@ export default {
             data.water.blocked ? '水运禁航' : '恢复通航',
             data.water.blocked
               ? `${data.water.blockedReason || '通航条件超限'}，平陆运河禁航，系统已自动分析公路方案`
-              : '平陆运河通航条件恢复红线之上，公水联运方案恢复可用',
+              : '平陆运河通航条件恢复红线之上，陆水联运方案恢复可用',
             data.water.blocked ? 'danger' : 'ok'
           );
         }
@@ -1054,6 +1208,71 @@ export default {
       this.pushTimeline('任务变更下发', '调度员确认方案，任务变更指令已推送至司机/船东/沿岸百姓', 'warn');
       this.refreshDecisionLog();
     },
+    /**
+     * 平陆运河禁航（canal-block SSE）：判定是否有在途对象受影响。
+     * 已接单且调度选的是联运（routeChoice=canal / 路线名含「联运」）的司机 →
+     * 展示一键换线卡片（下发后司机端走既有任务变更编排）；
+     * canalWatchers 是后端登记的运河模式在途路线（含普通用户）。
+     * 时间线与 onSandboxChange 共用 _lastWaterBlocked 去重，跨窗口触发也不遗漏。
+     */
+    onCanalBlock(data) {
+      // 先记实时禁航态：候选路线里的水运卡据此标红（与是否有在途受影响对象无关）
+      this.canalBlockLive = { blocked: true, reason: (data && data.reason) || '' };
+      const watchers = (data && data.canalWatchers) || [];
+      const t = (this.taskStatus && this.taskStatus.task) || null;
+      const driverOnCanal = !!(t && t.status === 'ACCEPTED'
+        && (t.routeChoice === 'canal' || (t.routeLabel || '').includes('联运')));
+      if (this._lastWaterBlocked !== true) {
+        this._lastWaterBlocked = true;
+        this.pushTimeline('水运禁航', `${(data && data.reason) || '平陆运河禁航'}，运河模式在途路线 ${watchers.length} 条`
+          + (driverOnCanal ? `，司机 ${t.driverName} 正前往平陆运河，请点名换线` : ''), 'danger');
+      }
+      if (!driverOnCanal && !watchers.length) return;
+      this.canalAlert = {
+        reason: (data && data.reason) || '平陆运河触发通航安全红线',
+        // 事件来源（支流风险联动/调度员调整运河通航条件等）——支流卡联动时大屏能看出是谁推的
+        trigger: (data && data.trigger) || '',
+        driverOnCanal,
+        driverName: t ? `${t.driverName}（${t.plate}）` : '',
+        watcherCount: watchers.length,
+        dispatched: false,
+        dispatching: false
+      };
+    },
+    /** 运河恢复通航：收起换线卡片，时间线去重同上 */
+    onCanalRecover(data) {
+      // 清除实时禁航态：水运卡回到正常「可坐船」展示
+      this.canalBlockLive = { blocked: false, reason: '' };
+      if (this._lastWaterBlocked !== false) {
+        this._lastWaterBlocked = false;
+        this.pushTimeline('恢复通航', (data && data.reason) || '平陆运河通航条件恢复红线之上，陆水联运方案恢复可用', 'ok');
+      }
+      this.canalAlert = null;
+    },
+    /**
+     * 一键为在途联运司机换线：等价于调度员在 AI 面板确认「公路绕行」并下发任务变更
+     * （POST /api/outreach/dispatch，planId=A）；司机端收到 outreach-update 后
+     * 自行完成「预览新路线 → 确认接收 → 切公路导航」编排。
+     */
+    async switchDriverToRoad() {
+      if (!this.canalAlert || this.canalAlert.dispatching) return;
+      this.canalAlert.dispatching = true;
+      try {
+        const { data } = await axios.post('/api/outreach/dispatch', {
+          planId: 'A',
+          planName: '公路绕行（平陆运河禁航换线）'
+        });
+        this.outreachStatus = data;
+        this.canalAlert.dispatched = true;
+        this.pushTimeline('调度换线', '平陆运河禁航：已向联运在途司机下发公路方案，待司机确认后生效', 'warn');
+        this.refreshDecisionLog();
+      } catch (e) {
+        console.error('canal reroute dispatch failed', e);
+        alert('换线下发失败，请重试');
+      } finally {
+        if (this.canalAlert) this.canalAlert.dispatching = false;
+      }
+    },
     /** 派单前出车分析完成：记住订单信息、同步起终点并触发多智能体「派单前·常态」决策分析（版本一） */
     onPreDispatchAnalysis(payload) {
       this.dispatchForm = payload || null;
@@ -1067,22 +1286,26 @@ export default {
     /** 开始导航模板派单：订单信息（公司派单面板）+ 选定路线快照（AI 决策分析面板）合并下发司机端 */
     async onDispatchTask(payload) {
       const route = (payload && payload.route) || null;
-      if (!route) return;
+      // done：AI 面板按钮的完成回调（恢复可点/亮「已派单」），无论成败必须调，否则按钮卡在「派单中…」
+      const done = payload && typeof payload.done === 'function' ? payload.done : () => {};
+      if (!route) { done(false); return; }
       const body = { ...(this.dispatchForm || {}), ...route };
       // 空值剔掉，让后端剧本默认值生效
       Object.keys(body).forEach(k => {
         if (body[k] === undefined || body[k] === null || body[k] === '') delete body[k];
       });
       try {
-        const { data } = await axios.post('/api/task/dispatch', body);
+        const { data } = await axios.post('/api/task/dispatch', body, { timeout: 30000 });
         this.refreshTask(data);
         const t = data && data.task;
         this.pushTimeline('公司派单',
           t ? `${t.plate} ${t.driverName}承运 ${t.cargoName} ${t.weightT}t，路线「${t.routeLabel || t.routeChoice}」已下发，等待司机接单`
             : '派单指令已下发',
           'warn');
+        done(true);
       } catch (e) {
         console.error(e);
+        done(false);
         alert('派单失败，请重试');
       }
     },
@@ -1302,7 +1525,7 @@ export default {
     onEdgeClick(edgeId) {
       this.selectedEdgeId = edgeId;
     },
-    /** 判断数据源是否为真实联网源（比赛官方 / Open-Meteo） */
+    /** 判断数据源是否为真实联网源（CRA40 / Open-Meteo） */
     isLiveSource(src) {
       return src === 'contest-observation' || src === 'open-meteo';
     },
@@ -1337,6 +1560,8 @@ export default {
     this.refreshRisks();
     this.loadScenarios();
     this.loadCustoms();
+    // 先拿“选了哪个源”，再拉数据：反过来会让拉数据回包临时顶掉下拉框
+    this.loadWeatherSource();
     this.loadRealWeather();
     // Agent 实时守护：订阅 SSE，灾害发生后立即收到新路线（毫秒级），轮询仅作兜底
     this.connectAgent();
@@ -1349,9 +1574,15 @@ export default {
     // 司机端"开始导航"信号：车一动就自动触发一次 AI 六维分析（常态方案对比），
     // 由调度员人工确认路线后再下发，分析不再只在熔断后才做
     this._tripTimer = setInterval(() => { this.pollTripSignal(); }, 2500);
-    this.loadWeatherSource();
+    // 帧率自检是在首屏画完后异步跑的，它判定要降级时得把按钮文案带起来
+    this._offLiteChange = onLiteChange(() => {
+      this.perfLite = isLite();
+      this.perfAuto = isAutoLite();
+    });
   },
   beforeUnmount() {
+    if (this._offLiteChange) { this._offLiteChange(); this._offLiteChange = null; }
+    if (this._sourceSettleTimer) { clearTimeout(this._sourceSettleTimer); this._sourceSettleTimer = null; }
     if (this._riskTimer) clearInterval(this._riskTimer);
     if (this._tripTimer) clearInterval(this._tripTimer);
     if (this._agentEs) this._agentEs.close();
@@ -1413,7 +1644,9 @@ export default {
   from { background-position: 0% 0; }
   to { background-position: 200% 0; }
 }
-.app-header h1 { margin:0; font-size:18px; font-weight:700; letter-spacing: .5px;
+/* 项目全称 24 个字，拼上「 · 调度大屏」在 1366 宽的屏上刚好一行；
+   这里强制不换行，否则标题折行会把头部顶高，而 .main 的高度是 calc(100vh - 65px) 写死的 */
+.app-header h1 { margin:0; font-size:17px; font-weight:700; letter-spacing: .5px; white-space:nowrap;
   background: linear-gradient(120deg, #4f6df5 10%, #22b8cf 50%, #7c5cff 90%);
   -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 .header-right { display:flex; align-items:center; gap:12px; }
@@ -1705,7 +1938,16 @@ export default {
 
 .weather-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px; }
 .source-switch-row {
-  margin-bottom: 8px;
+  margin-bottom: 4px;
+}
+/* 数据来源说明：比 .muted 再小一号，不把数据格子挤下去 */
+.source-note {
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 0 0 8px;
+}
+.source-note.warn {
+  color: #b45309;
 }
 .source-select {
   flex: 1;
@@ -1748,6 +1990,11 @@ export default {
 .timeline-item::before { content:''; position:absolute; left:29px; top:16px; bottom:-10px; width:1px; background:#dbe3f2; }
 .timeline-item:last-child::before { display:none; }
 .timeline-time { font-size:10px; color:#93a2ba; width:58px; flex-shrink:0; margin-top:2px; font-variant-numeric:tabular-nums; }
+.canal-trigger { color:#4f6df5; font-size:11px; margin-left:4px; }
+/* 禁航中的水运推荐卡：整卡标红 + 红色徽章 + 情况说明，不再呈现「可坐船」推荐态 */
+.canal-item.canal-blocked { border-color: rgba(225,29,72,.55); background: linear-gradient(135deg,#fff1f2 0%,#ffe4e6 100%); opacity:.95; }
+.candidate-badge.blocked { background:#e11d48; color:#fff; }
+.canal-block-note { margin-top:6px; font-size:12px; line-height:1.6; color:#e11d48; font-weight:600; }
 .timeline-dot { width:10px; height:10px; border-radius:50%; margin-top:4px; background:#93a2ba; flex-shrink:0; z-index:1; }
 .timeline-dot.ok { background:#16a34a; box-shadow:0 0 8px rgba(22,163,74,0.4); }
 .timeline-dot.warn { background:#ea7a2e; box-shadow:0 0 8px rgba(234,122,46,0.4); }

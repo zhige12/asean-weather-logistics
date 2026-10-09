@@ -55,6 +55,8 @@ public class WeatherController {
         out.put("current", weatherSourceService.source());
         out.put("currentLabel", weatherSourceService.labelOf(weatherSourceService.source()));
         out.put("lastSource", realWeatherService.lastSource());
+        out.put("servedSource", realWeatherService.servedSource());
+        out.put("servedFresh", realWeatherService.servedFresh());
         out.put("options", weatherSourceService.options());
         return out;
     }
@@ -64,17 +66,28 @@ public class WeatherController {
     public Map<String, Object> switchWeatherSource(@PathVariable String sourceId) {
         boolean ok = weatherSourceService.setSource(sourceId);
         if (ok) {
-            // 重置节流/熔断，让新数据源立刻可拉一次（否则被上个源的节流窗口挡住）
-            realWeatherService.resetThrottle();
+            // 清掉「新源自己」的失败/静默状态，让它能马上被试一次；
+            // 节流窗口按源各自计算，切源不再被上一个源的窗口挡住
+            realWeatherService.resetThrottle(sourceId);
+            // 屏幕上的数字属于另一个上游，不能再用 5 分钟 TTL 挡住 15 秒轮询
+            routeService.invalidateRealSync();
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ok", ok);
         out.put("source", weatherSourceService.source());
         out.put("sourceLabel", weatherSourceService.labelOf(weatherSourceService.source()));
+        out.put("lastSource", realWeatherService.lastSource());
+        out.put("servedSource", realWeatherService.servedSource());
         if (!ok) {
             out.put("message", "unknown weather source: " + sourceId);
         }
         return out;
+    }
+
+    /** 频度合规自检：真实气象链路（RealWeatherService）的回源计数与节流状态，不含密钥信息 */
+    @GetMapping("/rate-stats")
+    public Map<String, Object> rateStats() {
+        return realWeatherService.rateStats();
     }
 
     /** 实时气象：返回起点→终点沿线城市天气与当前风险；未传起终点则回退全量；网络失败自动降级模拟 */
@@ -97,10 +110,18 @@ public class WeatherController {
 
     private Map<String, Object> realWeatherView(List<Map<String, Object>> points) {
         Map<String, Object> out = new LinkedHashMap<>();
-        // 实际生效的数据源：contest-observation / open-meteo / simulated / none（接口失败且无缓存）
+        // selectedSource：当前选中的数据源（下拉框该回显它）
+        // source：最近一次成功回源的数据源（none 表示这次没拉到新数据）
+        // servedSource：屏幕上这些数字真正来自哪里（可能是上一个源留下的缓存）
+        out.put("selectedSource", weatherSourceService.source());
         String src = realWeatherService.lastSource();
         out.put("source", src);
         out.put("sourceLabel", weatherSourceService.labelOf(src));
+        String served = realWeatherService.servedSource();
+        out.put("servedSource", served);
+        out.put("servedSourceLabel", weatherSourceService.labelOf(served));
+        // 这批数据是本次真实回源拿到的，还是节流窗口内的缓存（界面负责把话说清楚）
+        out.put("servedFresh", realWeatherService.servedFresh());
         out.put("points", points);
         out.put("risks", weatherSimulator.currentRisks());
         return out;

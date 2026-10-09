@@ -105,7 +105,7 @@ public class OutreachService {
     /**
      * 调度员确认方案后下发任务变更指令（第四幕）。
      *
-     * @param planId   A=公路绕行芒街 / B=公水联运 / C=原地等待
+     * @param planId   A=公路绕行芒街 / B=陆水联运 / C=原地等待
      * @param planName 方案名（日志用）
      */
     public synchronized Map<String, Object> dispatch(String planId, String planName) {
@@ -330,12 +330,20 @@ public class OutreachService {
      * r 取友谊关、芒街两断面「预报降雨 / 各自熔断阈值」的最大值。
      */
     private String computeAlertLevel() {
-        if (sandbox.roadBlocked() || sandbox.waterBlocked()) {
+        // 任一断面熔断即红色：除公路/水运断链外，还必须覆盖"台风致芒街熔断"——
+        // roadBlocked() 只认友谊关，而台风打在芒街，降雨又是 0mm，
+        // 若只看这两者，台风熔断时叫应等级会错判成 NORMAL，语音播报完全无感。
+        if (sandbox.roadBlocked() || sandbox.waterBlocked()
+                || sandbox.ygg().fused || sandbox.mc().fused) {
             return "RED";
         }
         double r = Math.max(
                 ratio(sandbox.ygg().forecastMm, config.fuseThresholdMm()),
                 ratio(sandbox.mc().forecastMm, DecisionSandboxService.MC_THRESHOLD_MM));
+        // 台风未达熔断级（仅强对流）时降雨可能仍是 0，至少给橙色，避免漏报
+        if (sandbox.ygg().typhoonActive || sandbox.mc().typhoonActive) {
+            return "ORANGE";
+        }
         if (r >= 0.8) {
             return "ORANGE";
         }
@@ -399,7 +407,7 @@ public class OutreachService {
         if ("B".equals(planId)) {
             // 装船时刻跟真实时钟走（原写死 15:30，与演示实际时间脱节）
             return "🚢 装船准备通知\n"
-                    + "友谊关公路熔断，调度中心已切换公水联运方案，改走平陆运河。\n"
+                    + "友谊关公路熔断，调度中心已切换陆水联运方案，改走平陆运河。\n"
                     + "请做好装船准备：车辆滚装预计" + DemoClock.boarding().start() + "开始，港口已安排六景作业区泊位。\n"
                     + "请检查冷链恒温舱供电接口，装船完成后回报离泊时间。";
         }
@@ -448,7 +456,7 @@ public class OutreachService {
             // 抵达截止时刻用同一次计算结果，中越两版文案随之统一（原写死 15:30）
             DemoClock.Boarding boarding = DemoClock.boarding();
             zh = "📱 任务变更通知\n"
-                    + "原路线友谊关段因暴雨熔断，调度中心已切换公水联运方案，改走平陆运河。\n"
+                    + "原路线友谊关段因暴雨熔断，调度中心已切换陆水联运方案，改走平陆运河。\n"
                     + "请于" + boarding.arriveBy() + "前抵达南宁港六景作业区，将车辆交由代驾上船。\n"
                     + "您本人作为乘客随船，经平陆运河至越南海防港，船上已安排休息舱位。\n\n"
                     + "您的权益保障：\n"

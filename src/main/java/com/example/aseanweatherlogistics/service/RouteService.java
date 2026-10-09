@@ -12,12 +12,15 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -55,6 +58,8 @@ public class RouteService {
 
     /** 冷链示例货值（元）：计划书 5.2 货损模型基数（约 18 吨火龙果/凤梨） */
     private static final double CARGO_VALUE_YUAN = 100_000;
+
+    // 台风 / 强对流判据已集中到 TyphoonRiskRule（真实气象与沙盘模拟共用同一套阈值）
     /** 最近一次 planRoute 的货类型，供 Agent 毫秒级重算(planRouteFast)沿用，冷链货损计算需要 */
     private volatile String lastCargoType;
 
@@ -65,6 +70,16 @@ public class RouteService {
     private Map<String, RoadEdge> edgeById = Map.of();
     /** 邻接表默认空桶，避免每次 getOrDefault 新建空 List */
     private static final List<RoadEdge> NO_EDGES = List.of();
+
+    /** 全图最高限速（km/h）：A* 启发式的分母，启动时算一次；启发式 = 直线距离/最快限速，保证不高估剩余代价 */
+    private double maxEdgeSpeedKmh = DEFAULT_SPEED_KMH;
+
+    /**
+     * 越南侧节点集合（懒算并缓存）：从河内(HN)出发、只沿非口岸(customs)边可达的节点。
+     * 中越两侧路网仅由口岸虚拟边相连，故此集合与「中国侧」天然互斥——用于判断某目的地是否位于越南，
+     * 进而决定普通导航是否并列推荐「坐船出境」（见 IntermodalService.serves）。
+     */
+    private volatile Set<String> vietnamSideNodes;
 
     private static final long REAL_SYNC_TTL_MS = 5 * 60_000L;
     private volatile long lastRealSyncAt = 0;
@@ -99,6 +114,12 @@ public class RouteService {
             adjacencyBuilder.computeIfAbsent(edge.getToNodeId(), ignored -> new ArrayList<>()).add(reverse(edge));
         }
         this.adjacency = adjacencyBuilder;
+        // A* 启发式基准：全图最大限速（启发式用它折算剩余时间下界，必然可采纳）
+        double ms = DEFAULT_SPEED_KMH;
+        for (RoadEdge e : edges) {
+            if (e.getSpeedKmh() != null && e.getSpeedKmh() > ms) ms = e.getSpeedKmh();
+        }
+        this.maxEdgeSpeedKmh = ms;
         // 中国侧为手工建模的虚拟走廊（无 OSM 源几何），补上贴合真实高速/国道的走向折线，
         // 否则司机端画线在城市间直连（看似"穿山"）；越南侧 OSM 抽稀边已自带 c 几何
         patchVirtualChinaEdges();
@@ -138,12 +159,63 @@ public class RouteService {
         return new ArrayList<>(nodeById.values());
     }
 
+    /** 节点只读视图（不拷贝）：供全量扫描场景（如坐标吸附）避免每次 new ArrayList 复制数万节点 */
+    public java.util.Collection<RoadNode> allNodesView() {
+        return nodeById.values();
+    }
+
     public List<RoadEdge> getAllEdges() {
         return new ArrayList<>(edges);
     }
 
     public RoadNode getNode(String nodeId) {
         return nodeById.get(nodeId);
+    }
+
+    /**
+     * 该节点是否在越南侧：以「从河内(HN)出发、不跨越任何口岸边可达」定义。
+     * 中越两侧路网只靠口岸虚拟边(customs)相连，故越南侧与中国侧互斥——据此判断「本程是否要去越南」，
+     * 比按城市名枚举或按经纬度卡国界都稳（边境城市如东兴↔芒街、凭祥↔同登纬度几乎贴着）。
+     */
+    public boolean isInVietnam(String nodeId) {
+        return nodeId != null && vietnamSide().contains(nodeId);
+    }
+
+    private Set<String> vietnamSide() {
+        Set<String> s = vietnamSideNodes;
+        if (s == null) {
+            synchronized (this) {
+                if (vietnamSideNodes == null) {
+                    vietnamSideNodes = floodNoCustoms("HN");
+                }
+                s = vietnamSideNodes;
+            }
+        }
+        return s;
+    }
+
+    /** 从 anchor 出发、只沿非口岸(customs)边做 BFS，返回可达节点集合（用于标定一侧国境） */
+    private Set<String> floodNoCustoms(String anchor) {
+        Set<String> seen = new HashSet<>();
+        if (!nodeById.containsKey(anchor)) {
+            return seen;
+        }
+        java.util.Deque<String> queue = new java.util.ArrayDeque<>();
+        queue.add(anchor);
+        seen.add(anchor);
+        while (!queue.isEmpty()) {
+            String cur = queue.poll();
+            for (RoadEdge e : adjacency.getOrDefault(cur, NO_EDGES)) {
+                if (e.isCustoms()) {
+                    continue; // 口岸虚拟边两侧分属不同国家，不跨越
+                }
+                String next = e.getToNodeId();
+                if (seen.add(next)) {
+                    queue.add(next);
+                }
+            }
+        }
+        return seen;
     }
 
     public RouteResponse planRoute(RouteRequest request) {
@@ -212,7 +284,7 @@ public class RouteService {
 
         List<Map<String, Object>> out = new ArrayList<>();
         for (CandidatePath c : buildCandidates(originId, destinationId, baseline, riskMap)) {
-            out.add(toCandidate(c.key, c.label, c.path, riskMap, c.note));
+            out.add(toCandidate(c.key, c.label, c.path, riskMap, c.note, originId, destinationId));
         }
         return out;
     }
@@ -450,7 +522,9 @@ public class RouteService {
         return resp;
     }
 
-    /** 多级绕行：多比例禁边 + 强制经由中间节点 + 局部权重扰动 + 强制不同口岸，最大限度生成不同走廊备选 */
+    /** 多级绕行：多比例禁边 + 强制经由中间节点 + 局部权重扰动 + 强制不同口岸，最大限度生成不同走廊备选。
+     *  各策略的搜索互相独立且只读（邻接表/风险图不可变），并行提交 planExecutor 后按原顺序收集，
+     *  addIfNew 去重的输入序与原串行版一致 → 候选池输出完全不变，只是把 ~30 次 Dijkstra 摊到多核。 */
     private List<PathResult> findMultiAlternates(String originId, String destinationId,
                                                   Map<String, RiskSegment> riskMap, PathResult base) {
         List<PathResult> results = new ArrayList<>();
@@ -458,36 +532,41 @@ public class RouteService {
         List<String> nodes = base.pathNodeIds();
         int n = ids.size();
         if (n < 2) return results;
-
+    
+        List<Callable<PathResult>> tasks = new ArrayList<>();
+    
         // 策略组 1: 禁走推荐路线全部边（找完全不同的走廊）
-        addIfNew(results, tryAlternate(originId, destinationId, riskMap, new HashSet<>(ids)));
-
+        tasks.add(() -> tryAlternate(originId, destinationId, riskMap, new HashSet<>(ids)));
+    
         // 策略组 2: 多种比例禁走前缀（从起点侧绕开）——比例越细，越容易凑出不同走廊
         for (double ratio : new double[]{0.3, 0.5, 0.2, 0.7, 0.4, 0.6}) {
             int cut = Math.max(1, Math.min(n - 1, (int) Math.round(n * ratio)));
-            addIfNew(results, tryAlternate(originId, destinationId, riskMap, new HashSet<>(ids.subList(0, cut))));
+            Set<String> forbidden = new HashSet<>(ids.subList(0, cut));
+            tasks.add(() -> tryAlternate(originId, destinationId, riskMap, forbidden));
         }
-
+    
         // 策略组 3: 多种比例禁走后缀（从终点侧绕开）
         for (double ratio : new double[]{0.3, 0.5, 0.2, 0.4}) {
             int cut = Math.max(1, Math.min(n - 1, (int) Math.round(n * ratio)));
-            addIfNew(results, tryAlternate(originId, destinationId, riskMap, new HashSet<>(ids.subList(n - cut, n))));
+            Set<String> forbidden = new HashSet<>(ids.subList(n - cut, n));
+            tasks.add(() -> tryAlternate(originId, destinationId, riskMap, forbidden));
         }
-
-        // 策略组 4: 两端同时禁走（保留中段），逼出"两头都换走廊"的方案
+    
+        // 策略组 4: 两端同时禁走（保留中段），逼出“两头都换走廊”的方案
         for (double ratio : new double[]{0.3, 0.45}) {
             int cut = Math.max(1, Math.min(n / 2, (int) Math.round(n * ratio)));
             Set<String> combo = new HashSet<>(ids.subList(0, cut));
             combo.addAll(ids.subList(n - cut, n));
-            addIfNew(results, tryAlternate(originId, destinationId, riskMap, combo));
+            tasks.add(() -> tryAlternate(originId, destinationId, riskMap, combo));
         }
-
-        // 策略组 5: 强制经由推荐路径上的中间节点（每 ~12% 采一个），逼出"同口岸不同走廊"的变体
+    
+        // 策略组 5: 强制经由推荐路径上的中间节点（每 ~12% 采一个），逼出“同口岸不同走廊”的变体
         int step = Math.max(1, n / 8);
         for (int i = step; i < n; i += step) {
-            addIfNew(results, pathVia(originId, nodes.get(i), destinationId, riskMap));
+            String via = nodes.get(i);
+            tasks.add(() -> pathVia(originId, via, destinationId, riskMap));
         }
-
+    
         // 策略组 6: 局部权重扰动（把路径中段的边权放大），让算法自行寻找局部替代走廊
         int[][] perturbRanges = {{(int) (n * 0.15), (int) (n * 0.85)}, {(int) (n * 0.3), (int) (n * 0.7)}};
         for (int[] range : perturbRanges) {
@@ -496,10 +575,10 @@ public class RouteService {
                 perturb.put(ids.get(i), 8.0);
             }
             if (!perturb.isEmpty()) {
-                addIfNew(results, tryAlternate(originId, destinationId, riskMap, Set.of(), perturb));
+                tasks.add(() -> tryAlternate(originId, destinationId, riskMap, Set.of(), perturb));
             }
         }
-
+    
         // 策略组 7: 强行走不同口岸。中越边境三大口岸：友谊关(E4)、芒街(E9)、河口(E36)
         // 惩罚其他口岸关联边、吸引目标口岸边，迫使路径改走指定口岸
         String[] portNodes = {"E4", "E9", "E36"};
@@ -509,26 +588,46 @@ public class RouteService {
         }
         for (String targetPort : portNodes) {
             if (basePorts.contains(targetPort) && basePorts.size() <= 1) continue; // 唯一口岸，无需绕
-            Map<String, Double> portWeights = new HashMap<>();
-            for (RoadEdge e : edges) {
-                String from = e.getFromNodeId();
-                String to = e.getToNodeId();
-                boolean touchesTarget = from.equals(targetPort) || to.equals(targetPort)
-                        || (e.getName() != null && e.getName().contains(targetPort));
-                if (touchesTarget) {
-                    portWeights.put(e.getId(), 0.5); // 目标口岸：减权吸引
-                    continue;
-                }
-                for (String pn : portNodes) {
-                    if (from.equals(pn) || to.equals(pn) || (e.getName() != null && e.getName().contains(pn))) {
-                        portWeights.put(e.getId(), portWeights.getOrDefault(e.getId(), 1.0) * 5.0);
-                        break;
+            // 全量扫边构建口岸权重表也放进了并行任务（纯读，与搜索串行依赖无关）
+            tasks.add(() -> {
+                Map<String, Double> portWeights = new HashMap<>();
+                for (RoadEdge e : edges) {
+                    String from = e.getFromNodeId();
+                    String to = e.getToNodeId();
+                    boolean touchesTarget = from.equals(targetPort) || to.equals(targetPort)
+                            || (e.getName() != null && e.getName().contains(targetPort));
+                    if (touchesTarget) {
+                        portWeights.put(e.getId(), 0.5); // 目标口岸：减权吸引
+                        continue;
+                    }
+                    for (String pn : portNodes) {
+                        if (from.equals(pn) || to.equals(pn) || (e.getName() != null && e.getName().contains(pn))) {
+                            portWeights.put(e.getId(), portWeights.getOrDefault(e.getId(), 1.0) * 5.0);
+                            break;
+                        }
                     }
                 }
-            }
-            addIfNew(results, tryAlternate(originId, destinationId, riskMap, Set.of(), portWeights));
+                return tryAlternate(originId, destinationId, riskMap, Set.of(), portWeights);
+            });
         }
-
+    
+        // 并行执行 + 按原顺序收集：单任务异常/不可达视为 null（与原 tryAlternate 内部 catch 语义一致）
+        List<Future<PathResult>> futures = new ArrayList<>(tasks.size());
+        for (Callable<PathResult> t : tasks) {
+            futures.add(planExecutor.submit(t));
+        }
+        for (Future<PathResult> f : futures) {
+            PathResult r = null;
+            try {
+                r = f.get();
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (ExecutionException ignored) {
+                // 该策略搜索失败：与串行版返回 null 同样跳过
+            }
+            addIfNew(results, r);
+        }
         return results;
     }
 
@@ -601,12 +700,13 @@ public class RouteService {
     }
 
     private Map<String, Object> toCandidate(String key, String label, PathResult p,
-                                            Map<String, RiskSegment> riskMap, String note) {
+                                            Map<String, RiskSegment> riskMap, String note,
+                                            String originId, String destinationId) {
         Map<String, Object> m = new HashMap<>();
         m.put("key", key);
         m.put("label", label);
         m.put("note", note);
-        m.put("via", routeVia(p.pathNodeIds()));
+        m.put("via", routeVia(p.pathNodeIds(), originId, destinationId));
         m.put("hours", round(p.hours()));
         m.put("distanceKm", round(p.totalDistanceKm()));
         m.put("riskCount", countRisksOnPath(p.pathEdgeIds(), riskMap));
@@ -621,18 +721,19 @@ public class RouteService {
     }
 
     /** 途经摘要：取路径上全部中文名城市/口岸，压缩为前 6 个展示（排除起终点自身） */
-    private String routeVia(List<String> nodeIds) {
+    private String routeVia(List<String> nodeIds, String originId, String destinationId) {
         List<String> named = new ArrayList<>();
         for (String id : nodeIds) {
+            // 排除起终点自身：此前按「南宁/河内」名称写死排除，
+            // 换成 凭祥→河内、南宁→海防 等其它起终点时，起点/终点会漏进「途经」摘要卡。
+            if (id.equals(originId) || id.equals(destinationId)) {
+                continue;
+            }
             RoadNode n = nodeById.get(id);
             if (n == null || n.getName() == null || n.getName().isBlank()) {
                 continue;
             }
-            String name = n.getName().trim();
-            if (name.equals("南宁") || name.equals("河内")) {
-                continue;
-            }
-            named.add(name);
+            named.add(n.getName().trim());
         }
         if (named.isEmpty()) {
             return "直达";
@@ -950,6 +1051,17 @@ public class RouteService {
         return realWeatherView(pathNodeIds);
     }
 
+    /**
+     * 切换气象数据源后作废“最近一次实时同步”时间戳。
+     * <p>
+     * 屏幕上的数字属于另一个上游，不能再被 5 分钟 TTL 挡住 15 秒轮询；
+     * 这里只放开 RouteService 这一层的 TTL，不绕过 RealWeatherService 的
+     * 按源节流窗口与熔断（真正发不发请求仍由那两道闸决定）。
+     */
+    public void invalidateRealSync() {
+        lastRealSyncAt = 0;
+    }
+
     /** 气象按钮：按起终点沿线城市拉取；未提供起终点时回退全量 */
     public List<Map<String, Object>> syncRealWeatherForRoute(boolean force, String originId, String destinationId) {
         if (originId == null || originId.isBlank() || destinationId == null || destinationId.isBlank()) {
@@ -961,6 +1073,41 @@ public class RouteService {
         } catch (Exception e) {
             return syncRealWeather(force);
         }
+    }
+
+    /**
+     * 后台气象守护用：把多条关注走廊的沿线节点取并集，只发起一次实时气象同步。
+     *
+     * <p>为什么要合并：{@link #syncRealWeather} 开头会 clearRealRisks() 清掉全部实时风险再按
+     * 本次拉取的节点重填。若逐条走廊各调一次，后一条会把前一条刚写入的风险清空——
+     * 多条不同走廊之间会互相“抹掉”。这里取节点并集、一次性写全，规避该问题。</p>
+     *
+     * <p>单个 O/D 求路径失败（起终点不在路网等）时跳过该走廊，不影响其余；
+     * 一条都解析不出来时退回全量有名节点拉取作兜底。</p>
+     */
+    public List<Map<String, Object>> syncRealWeatherForCorridors(boolean force, List<String[]> odPairs) {
+        LinkedHashSet<String> union = new LinkedHashSet<>();
+        if (odPairs != null) {
+            for (String[] od : odPairs) {
+                if (od == null || od.length < 2) {
+                    continue;
+                }
+                String o = od[0];
+                String d = od[1];
+                if (o == null || o.isBlank() || d == null || d.isBlank()) {
+                    continue;
+                }
+                try {
+                    union.addAll(shortestPath(o, d, Map.of()).pathNodeIds);
+                } catch (Exception ignored) {
+                    // 该走廊暂不可解析：跳过，保留其余走廊的检测
+                }
+            }
+        }
+        if (union.isEmpty()) {
+            return syncRealWeather(force);
+        }
+        return syncRealWeather(force, new ArrayList<>(union));
     }
 
     /** 全量有名字节点（页面首载、未规划路径时的兜底） */
@@ -1066,6 +1213,12 @@ public class RouteService {
             penalty = Math.max(penalty, 8);
             reasons.add("高温(" + w.temperatureC() + "°C，冷链货损风险)");
         }
+        // 台风/强对流：低气压 + 大风同时成立才算（判据集中在 TyphoonRiskRule，与沙盘模拟共用）
+        TyphoonRiskRule.Verdict typhoon = TyphoonRiskRule.evaluate(w.pressureHpa(), w.windKph());
+        if (typhoon.triggered()) {
+            penalty = Math.max(penalty, typhoon.penalty());
+            reasons.add(typhoon.reason());
+        }
         if (penalty <= 0) {
             return null;
         }
@@ -1143,15 +1296,21 @@ public class RouteService {
         return shortestPath(originId, destinationId, riskMap, forbiddenEdgeIds, Map.of());
     }
 
-    /** Dijkstra 带边权重乘数：对指定边乘以 weightOverrides 中的系数，用于吸引/排斥特定口岸 */
+    /** Dijkstra 带边权重乘数：对指定边乘以 weightOverrides 中的系数，用于吸引/排斥特定口岸。
+     *  实现上为 A*：队列按 f = 已走时间 + 剩余时间下界排序。启发式可采纳（不高估），
+     *  因此出队终点时的最优路径与原纯 Dijkstra 完全一致，只是剪掉大部分无向扩散探索。 */
     private PathResult shortestPath(String originId, String destinationId, Map<String, RiskSegment> riskMap,
                                     Set<String> forbiddenEdgeIds, Map<String, Double> weightOverrides) {
+        // 启发式缩放因子：本轮搜索可能遇到的最小权重乘数（口岸吸引 0.5 / 理论上的 <1 惩罚），
+        // 不除回去会高估剩余代价、破坏可采纳性
+        double minFactor = minWeightFactor(riskMap, weightOverrides);
+        RoadNode destNode = nodeById.get(destinationId);
         Map<String, Double> distance = new HashMap<>();
         Map<String, String> previous = new HashMap<>();
         Map<String, RoadEdge> prevEdge = new HashMap<>();
-        PriorityQueue<NodeDistance> queue = new PriorityQueue<>(Comparator.comparingDouble(NodeDistance::distance));
+        PriorityQueue<NodeDistance> queue = new PriorityQueue<>(Comparator.comparingDouble(NodeDistance::priority));
         distance.put(originId, 0.0);
-        queue.add(new NodeDistance(originId, 0.0));
+        queue.add(new NodeDistance(originId, 0.0, heuristic(originId, destNode, minFactor)));
 
         while (!queue.isEmpty()) {
             NodeDistance current = queue.poll();
@@ -1172,7 +1331,8 @@ public class RouteService {
                     distance.put(edge.getToNodeId(), candidate);
                     previous.put(edge.getToNodeId(), current.nodeId());
                     prevEdge.put(edge.getToNodeId(), edge);
-                    queue.add(new NodeDistance(edge.getToNodeId(), candidate));
+                    queue.add(new NodeDistance(edge.getToNodeId(), candidate,
+                            candidate + heuristic(edge.getToNodeId(), destNode, minFactor)));
                 }
             }
         }
@@ -1251,8 +1411,8 @@ public class RouteService {
             }
         }
         if (firstHazardIdx < 0) {
-            // 没有灾害边在当前路线上 → 返回当前路线
-            return planRouteFast(currentRouteNodeIds.get(0), destinationId);
+            // 没有灾害边在当前路线上 → 从当前位置重算（不再从行程起点算，已走过的半截不该再出现在新路线里）
+            return planRouteFast(currentNodeId, destinationId);
         }
 
         // 灾害段起点：第一个 hazard 边的 fromNode
@@ -1277,6 +1437,7 @@ public class RouteService {
 
         // 3a. preSegment（走原路线的 already-passed + 安全部分）
         boolean foundCurrent = false;
+        boolean hitHazardStart = false;
         for (int i = 0; i < currentRouteNodeIds.size(); i++) {
             String nid = currentRouteNodeIds.get(i);
             if (nid.equals(currentNodeId)) foundCurrent = true;
@@ -1285,8 +1446,16 @@ public class RouteService {
                 if (i < currentRouteEdgeIds.size()) {
                     combinedEdgeIds.add(currentRouteEdgeIds.get(i));
                 }
-                if (nid.equals(hazardStartNode)) break;
+                if (nid.equals(hazardStartNode)) {
+                    hitHazardStart = true;
+                    break;
+                }
             }
+        }
+        // 防御：灾害段整段在车背后（推送延迟，车已开过灾害边）时，
+        // 拼接会出现"先到终点再瞬移回背后绕行"的畸形路线；直接从当前位置全程重算。
+        if (!hitHazardStart) {
+            return planRouteFast(currentNodeId, destinationId);
         }
 
         // 3b. detourSegment（Dijkstra 绕行）
@@ -1301,8 +1470,8 @@ public class RouteService {
         try {
             detourPath = shortestPath(hazardStartNode, rejoinNode, riskMap, forbidden, Map.of());
         } catch (IllegalStateException e) {
-            // 绕行失败 → 退化为全程重算
-            return planRouteFast(currentRouteNodeIds.get(0), destinationId);
+            // 绕行失败 → 退化为从当前位置全程重算（原实现用行程起点，车在半路会拿到一条从起点出发的线）
+            return planRouteFast(currentNodeId, destinationId);
         }
 
         // 追加 detour 段（跳过与 preSegment 末点重复的衔接点）
@@ -1415,6 +1584,32 @@ public class RouteService {
                 && risk.getPenaltyMultiplier() >= IMPASSABLE_PENALTY;
     }
 
+    /** 本轮搜索可能遇到的最小权重乘数（口岸吸引可给 0.5，惩罚理论上也可 <1）：启发式必须乘它才不高估 */
+    private double minWeightFactor(Map<String, RiskSegment> riskMap, Map<String, Double> weightOverrides) {
+        double f = 1.0;
+        for (Double v : weightOverrides.values()) {
+            if (v != null && v > 0 && v < f) f = v;
+        }
+        for (RiskSegment r : riskMap.values()) {
+            Double p = r == null ? null : r.getPenaltyMultiplier();
+            if (p != null && p > 0 && p < f) f = p;
+        }
+        return f;
+    }
+
+    /** 剩余时间下界（h）：到终点的直线距离按全图最快限速折算再乘最小乘数；无坐标时返回 0 退化为纯 Dijkstra */
+    private double heuristic(String nodeId, RoadNode destNode, double minFactor) {
+        if (destNode == null || minFactor <= 0) {
+            return 0;
+        }
+        RoadNode n = nodeById.get(nodeId);
+        if (n == null) {
+            return 0;
+        }
+        return GeocodeService.haversineKm(n.getLatitude(), n.getLongitude(),
+                destNode.getLatitude(), destNode.getLongitude()) / maxEdgeSpeedKmh * minFactor;
+    }
+
     /**
      * 边权重（小时）= 距离/限速 + 口岸通关时间，再乘以气象惩罚系数。
      * 惩罚系数含义（与计划书一致）：
@@ -1443,7 +1638,8 @@ public class RouteService {
         return Math.round(value * 100.0) / 100.0;
     }
 
-    private record NodeDistance(String nodeId, double distance) {
+    /** 队列元素：distance = 已走时间（g），priority = g + 剩余时间下界（f，排序键） */
+    private record NodeDistance(String nodeId, double distance, double priority) {
     }
 
     private record PathResult(List<String> pathNodeIds, List<String> pathEdgeIds, double totalDistanceKm, double hours) {

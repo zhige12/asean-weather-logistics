@@ -109,7 +109,7 @@ public class BriefingService {
         }
 
         sb.append("\n═══════════════════════════════════════\n");
-        sb.append("  东盟跨境物流气象导航平台\n");
+        sb.append("  面向东盟跨境物流的突发气象预警与多路线协同调度平台\n");
         sb.append("═══════════════════════════════════════\n");
 
         return sb.toString();

@@ -297,6 +297,10 @@ export function createRouteFlow(map, options = {}) {
    */
   function layoutStaticArrows() {
     const bounds = map.getBounds().pad(0.25);
+    // 每次都重量 pxPerM：它只依赖当前缩放与几何、开销很小（按 ~40 个采样点）。
+    // 之前经 onStaticMove（moveend）直接进来时不重量，会沿用上一缩放级别的陈旧比例，
+    // 导致 spacingM 算小、箭头铺得过密、spots 数量暴涨，再叠加下面的封顶就整段丢箭头。
+    if (tracks.length) measurePxPerM();
     const spacingM = opts.spacingPx / pxPerM;
     for (const t of tracks) {
       const pool = t.arrows;
@@ -309,7 +313,15 @@ export function createRouteFlow(map, options = {}) {
           spots.push([p, bearing(p, pointAt(t, ahead))]);
         }
       }
-      const need = Math.min(spots.length, opts.maxArrows);
+      // 超预算时沿「可见路线」等间隔抽稀，而不是截断前 N 个——
+      // 截断会把箭头全堆在路线起点一侧（左下），后半段整条没箭头（司机端实测现象）。
+      let shown = spots;
+      if (spots.length > opts.maxArrows) {
+        shown = [];
+        const stride = spots.length / opts.maxArrows;
+        for (let k = 0; k < opts.maxArrows; k++) shown.push(spots[Math.floor(k * stride)]);
+      }
+      const need = shown.length;
       while (pool.length > need) {
         const a = pool.pop();
         try { map.removeLayer(a.marker); } catch (e) {}
@@ -324,8 +336,8 @@ export function createRouteFlow(map, options = {}) {
         if (!a.el) a.el = a.marker.getElement() && a.marker.getElement().firstChild;
         if (!a.el) continue;
         a.el.style.color = opts.arrowColor || t.color;
-        a.marker.setLatLng(spots[i][0]);
-        a.el.style.transform = `rotate(${(spots[i][1] - 90).toFixed(1)}deg)`;
+        a.marker.setLatLng(shown[i][0]);
+        a.el.style.transform = `rotate(${(shown[i][1] - 90).toFixed(1)}deg)`;
       }
     }
   }

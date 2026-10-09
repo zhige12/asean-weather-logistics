@@ -5,8 +5,8 @@
       <span v-if="triggerTag" class="route-state trigger-tag" :class="trigger === 'hazard' ? 'warn' : ''">
         {{ triggerTag }}
       </span>
-      <span v-if="result" class="route-state" :class="result.aiPowered ? 'ok' : ''">
-        {{ result.cacheHit ? "⚡ 预生成缓存" : result.aiPowered ? "本地大模型" : "规则模板" }}
+      <span v-if="result" class="route-state ai-chip" :class="aiChip.cls" :title="aiChip.title">
+        {{ aiChip.text }}
       </span>
     </h3>
     <div class="muted agent-hint">
@@ -15,10 +15,10 @@
 
     <div class="row">
       <button class="btn primary" :disabled="running" @click="runAnalysis(false)">
-        {{ running ? "智能体推理中…" : "🧠 AI 决策分析" }}
+        {{ running ? "智能体推理中…" : "AI 决策分析" }}
       </button>
       <button class="btn outline" :disabled="running" @click="runAnalysis(true)" title="读取预生成缓存，演示 2 秒出结果">
-        ⚡ 缓存模式
+        缓存模式
       </button>
     </div>
 
@@ -30,8 +30,14 @@
           <div class="agent-name">{{ a.name }}</div>
           <div class="agent-meta">
             <span v-if="a.status === 'RUNNING'" class="spinner"></span>
-            <span v-else-if="a.status === 'DONE'">✅ {{ a.elapsedMs ? (a.elapsedMs / 1000).toFixed(1) + "s" : "" }}</span>
+            <span v-else-if="a.status === 'DONE'">{{ a.elapsedMs ? (a.elapsedMs / 1000).toFixed(1) + "s" : "完成" }}</span>
             <span v-else>待命</span>
+            <!-- 逐智能体标注真实生成通道：三段文案可能来自不同通道，汇总标签只取最远程的一级，
+                 这里必须能拆开自证（否则「两个本地 + 一个在线」会被汇总成一个笼统标签） -->
+            <span v-if="a.aiChannel" class="agent-chan" :class="channelClass(a.aiChannel)"
+                  :title="'本段输出来源：' + (a.aiChannelLabel || a.aiChannel)">
+              {{ channelShort(a.aiChannel) }}
+            </span>
           </div>
           <div v-if="a.output" class="agent-output">{{ a.output }}</div>
         </div>
@@ -42,28 +48,36 @@
     <template v-if="result">
       <!-- 风险研判输出 -->
       <div class="block">
-        <div class="block-title">🔵 风险研判 · 决策解释</div>
+        <div class="block-title">风险研判 · 决策解释</div>
         <div class="explain-box">
+          <!-- 熔断即标红：台风致熔断时 fused 同样为 true，不能被漏掉 -->
           <div class="explain-item" :class="{ danger: result.explanation?.ygg?.fused }">
             {{ result.explanation?.ygg?.verdict }}
           </div>
-          <div class="explain-item">
+          <div class="explain-item" :class="{ danger: result.explanation?.mc?.fused }">
             {{ result.explanation?.mc?.verdict }}
           </div>
           <div class="explain-boundary">{{ result.explanation?.boundary }}</div>
-          <div v-if="result.explanation?.llm" class="llm-chip" title="本地大模型结构化研判输出">
-            🧠 模型研判：{{ result.explanation.llm.riskLevel }}风险 · 决策边界 {{ result.explanation.llm.decisionBoundary }}
+          <div v-if="result.explanation?.llm" class="llm-chip" :title="'本段研判输出来源：' + (result.agents?.[0]?.aiChannelLabel || result.aiChannelLabel)">
+            模型研判：{{ result.explanation.llm.riskLevel }}风险 · 决策边界 {{ result.explanation.llm.decisionBoundary }}
           </div>
         </div>
       </div>
 
-      <!-- 三方案对比（六维分析 + 双向切换） -->
-      <div class="block">
-        <div class="block-title">🟢 方案生成 · 六维分析 + 双向切换</div>
+      <!-- 风险已变化：旧结果立即失效提示（两种模板都需要，独立于方案生成块） -->
+      <div v-if="stale" class="stale-banner">
+        风险状态已变化，以下旧方案已失效，正在重新分析绕行路线…
+      </div>
 
-        <!-- 风险已变化：旧推荐立即失效，等待新分析 -->
-        <div v-if="stale" class="stale-banner">
-          ⚠️ 风险状态已变化，以下旧方案已失效，正在重新分析绕行路线…
+      <!-- 三方案对比（六维分析 + 双向切换）：遇风险改路线模板专属，
+           刚开始导航（常态）不展示——没有风险时不存在绕行/联运/等待的取舍 -->
+      <div v-if="isReroute" class="block">
+        <div class="block-title">
+          方案生成 · 六维分析 + 双向切换
+          <!-- 司机在途时标注行程进度：方案是按车当前位置算的，不是纸上对比 -->
+          <span v-if="result.progressRatio >= 0" class="route-state progress-tag">
+            行程已走 {{ Math.round(result.progressRatio * 100) }}%
+          </span>
         </div>
 
         <!-- 双向切换方向横幅（3.4 决策机制） -->
@@ -143,17 +157,18 @@
             v-for="p in result.plans"
             :key="p.id"
             class="plan-item"
-            :class="{ recommended: p.id === recommendedId, selected: p.id === selectedPlan }"
+            :class="{ recommended: p.id === recommendedId, selected: p.id === selectedPlan, na: p.notApplicable }"
             @click="selectPlan(p.id)"
           >
             <div class="plan-head">
               <span class="plan-badge">{{ p.id }}</span>
               <span class="plan-name">{{ p.name }}</span>
               <span v-if="p.id === recommendedId" class="rec-tag">推荐</span>
+              <span v-if="p.notApplicable" class="na-tag">对本行程不适用</span>
             </div>
             <div class="plan-metrics">
-              <span :class="deltaClass(p.extraHours)">⏱ {{ fmtDelta(p.extraHours, "h") }}</span>
-              <span :class="costClass(p.costDeltaYuan)">💰 {{ fmtDelta(p.costDeltaYuan, "元") }}</span>
+              <span :class="deltaClass(p.extraHours)">{{ fmtDelta(p.extraHours, "h") }}</span>
+              <span :class="costClass(p.costDeltaYuan)">{{ fmtDelta(p.costDeltaYuan, "元") }}</span>
               <span class="risk-chip" :class="'risk-' + riskLevelKey(p.damageRisk)">货损风险：{{ p.damageRisk }}</span>
             </div>
             <div v-if="p.damageRatePct != null" class="plan-damage">
@@ -166,7 +181,7 @@
             <!-- 多式联运“一口价”（§4.4）：货主面对单一打包总价，无需分别对接三方 -->
             <div v-if="p.flatPriceYuan != null" class="flat-price">
               <div class="fp-head">
-                🏷️ 多式联运“一口价”
+                多式联运“一口价”
                 <span class="fp-total">¥{{ fmtNum(p.flatPriceYuan) }}</span>
               </div>
               <div class="fp-parties">
@@ -178,12 +193,14 @@
             </div>
           </div>
         </div>
-        <div class="recommend-box">💡 {{ result.recommendation }}</div>
+        <div class="recommend-box">{{ result.recommendation }}</div>
       </div>
 
       <!-- 开始导航模板（常态）：AI 决策分析下的多条路线，选一条派单给司机 -->
-      <div v-if="!isReroute && dispatchCandidates.length" class="block">
-        <div class="block-title">📋 开始导航派单 · 从以下路线选一条派给司机</div>
+      <div v-if="!isReroute && (dispatchCandidates.length || dispatchCanal)" class="block">
+        <div class="block-title">开始导航派单 · 从以下路线选一条派给司机</div>
+        <!-- 常态 AI 结论（方案生成智能体照常计算一次，只不展示风险对比表） -->
+        <div class="recommend-box">{{ result.recommendation }}</div>
         <div class="dcand-list">
           <label
             v-for="c in dispatchCandidates"
@@ -200,31 +217,61 @@
               </span>
               <span class="dcand-via">{{ viaText(c) }}</span>
               <span class="dcand-meta">
-                ⏱ {{ c.hours }}h · 📏 {{ c.distanceKm }}km ·
-                {{ c.riskCount > 0 ? "⚠ " + c.riskCount + " 风险" : "✓ 无风险" }}
+                {{ c.hours }}h · {{ c.distanceKm }}km ·
+                {{ c.riskCount > 0 ? c.riskCount + " 风险" : "✓ 无风险" }}
               </span>
             </span>
             <span
               class="risk-chip"
               :class="c.hazardProbability >= 0 ? 'risk-' + probKey(c.hazardProbability) : ''"
+              :title="c.hazardProbability >= 0 && c.hazardProbability < 15 && !c.hazardOccurred ? '灾害概率 ' + c.hazardProbability + '%（低于阈值视为通畅）' : ''"
             >
-              {{ c.hazardProbability >= 0 ? c.hazardProbability + "%" : "暂无" }}
+              {{ probText(c) }}
             </span>
+          </label>
+          <!-- 陆水联运（坐船出境）：目的地在越南侧时后端并带回 canalOption；
+               禁航时整行标红、不可选，并说明情况——不能一边禁航一边推荐坐船派单 -->
+          <label
+            v-if="dispatchCanal"
+            class="dcand-row canal-row"
+            :class="{ sel: dispatchSelected === 'canal', blocked: dispatchCanal.canalBlocked }"
+          >
+            <input type="radio" name="agent-dispatch-route" value="canal" v-model="dispatchSelected"
+                   :disabled="dispatchCanal.canalBlocked" />
+            <span class="dcand-radio" :class="{ on: dispatchSelected === 'canal' }"></span>
+            <span class="dcand-body">
+              <span class="dcand-title">
+                {{ dispatchCanal.label }}
+                <span v-if="!dispatchCanal.canalBlocked" class="rec-tag">可坐船</span>
+                <span v-else class="rec-tag blocked">已禁航</span>
+              </span>
+              <span v-if="dispatchCanal.canalBlocked" class="canal-blocked-note">
+                {{ dispatchCanal.canalBlockedReason || '平陆运河触发通航安全红线' }}，水运方案暂不可派单，请选公路候选
+              </span>
+              <span class="dcand-via">{{ dispatchCanal.via }}</span>
+              <span class="dcand-meta">
+                {{ dispatchCanal.hours }}h · {{ dispatchCanal.distanceKm }}km · ¥{{ dispatchCanal.costYuan }}
+              </span>
+            </span>
+            <span v-if="!dispatchCanal.canalBlocked" class="risk-chip risk-low">水运</span>
+            <span v-else class="risk-chip risk-high">禁航</span>
           </label>
         </div>
         <div class="row dispatch-row">
           <button class="btn confirm" :disabled="dispatching || !dispatchSelected" @click="dispatchToDriver">
-            {{ dispatching ? "派单中…" : "✅ 确认选择此路线并派单给司机" }}
+            {{ dispatching ? "派单中…" : "确认选择此路线并派单给司机" }}
           </button>
+          <!-- 派单结果就地反馈：成功时时间线/派单卡片在页面其他区域，没点过的人注意不到 -->
+          <span v-if="dispatchFeedback" class="dispatch-ok">{{ dispatchFeedback }}</span>
         </div>
         <div class="muted dispatch-hint">
           派单后司机端自动切物流任务模式：预览订单（货物/重量/起终点/路线/AI 分析）→ 确认接单按选定路线自动导航，或拒单退回普通导航。
         </div>
       </div>
 
-      <!-- 触达预览 -->
-      <div class="block">
-        <div class="block-title">🟡 触达智能体 · 角色专属指令（{{ result.outreachPreview?.count || 0 }} 个角色）</div>
+      <!-- 触达预览：任务变更角色指令，改路线模板专属；常态下触达状态只看状态条 -->
+      <div v-if="isReroute" class="block">
+        <div class="block-title">触达智能体 · 角色专属指令（{{ result.outreachPreview?.count || 0 }} 个角色）</div>
         <div class="touch-list">
           <div v-for="t in result.outreachPreview?.targets || []" :key="t.role" class="touch-item">
             <span class="touch-role">{{ t.name }}</span>
@@ -236,7 +283,7 @@
       <!-- 调度决策（改路线模板）：确认方案 → 下发任务变更 -->
       <div v-if="isReroute" class="row dispatch-row">
         <button class="btn confirm" :disabled="dispatching || !selectedPlan || stale" @click="dispatch">
-          {{ dispatching ? "下发中…" : stale ? "⏳ 等待新分析结果…" : "✅ 确认切换方案" + (selectedPlan || "") + " · 下发任务变更指令" }}
+          {{ dispatching ? "下发中…" : stale ? "等待新分析结果…" : "确认切换方案" + (selectedPlan || "") + " · 下发任务变更指令" }}
         </button>
       </div>
       <div v-if="isReroute" class="muted dispatch-hint">
@@ -264,9 +311,64 @@ const selectedPlan = ref("");
 // 本次分析的触发来源：normal=派单前常态 / hazard=灾害触发重算 / manual=手动
 const trigger = ref("manual");
 const triggerTag = computed(() => {
-  if (trigger.value === "normal") return "📋 派单前 · 常态分析";
-  if (trigger.value === "hazard") return "⚠️ 灾害触发 · 熔断重算";
+  if (trigger.value === "normal") return "派单前 · 常态分析";
+  if (trigger.value === "hazard") return "灾害触发 · 熔断重算";
   return "";
+});
+
+// ---------- AI 溯源标签 ----------
+// 旧写法是 `aiPowered ? "本地大模型" : "规则模板"`，而 aiPowered 的真实含义只是
+// “模型返回了非空文本”——本地 Ollama 一抖（超时 / 显存被占 / 连续 2 次失败进入 2 分钟
+// 冷却）就会静默降级到在线 DeepSeek，屏幕上的「本地大模型」当场变成假话，
+// 而 README 里写的“数据不出境”是最容易被评委追问的一句。现在只认后端回报的通道。
+const CHANNEL_KIND = { local: "local", online: "online", unrecorded: "unrecorded", template: "template" };
+function channelKind(ch) {
+  const s = String(ch || "");
+  return CHANNEL_KIND[s.split(":")[0]] || "template";
+}
+function channelClass(ch) {
+  return "chip-" + { local: "local", online: "remote", unrecorded: "unknown", template: "template" }[channelKind(ch)];
+}
+function channelShort(ch) {
+  return { local: "本地", online: "在线", unrecorded: "未记录", template: "模板" }[channelKind(ch)];
+}
+const aiChip = computed(() => {
+  const r = result.value;
+  if (!r) return { text: "", cls: "", title: "" };
+  const ch = String(r.aiChannel || "");
+  const label = r.aiChannelLabel || "";
+  const kind = channelKind(ch);
+  // 可见标签只留两字（本地 / 在线 / 缓存 / 模板），完整溯源说明放 hover 提示，
+  // 既满足“简洁”又不丢可核验信息（评委悬停仍能看到真实通道与降级链）
+  if (r.cacheHit) {
+    if (kind === "unrecorded" || kind === "template") {
+      return {
+        text: "缓存",
+        cls: "chip-unknown",
+        title: "这条结果来自赛前写进 decision-cache 的静态文案，生成时未记录真实通道，不能证明是本地模型产出。\n点「AI 决策分析」可现场重跑一次真实推理。",
+      };
+    }
+    return {
+      text: "缓存",
+      cls: channelClass(ch),
+      title: "命中 decision-cache 预生成结果，缓存内记录了生成时的通道：" + label,
+    };
+  }
+  if (kind === "local") {
+    return { text: "本地", cls: "chip-local", title: "本次推理在本机 Ollama 完成，数据不出境：" + label };
+  }
+  if (kind === "online") {
+    return {
+      text: "在线",
+      cls: "chip-remote",
+      title: "本机 Ollama 不可用，已静默降级到公网大模型。\n提示词里的路线、货值、口岸状态已离开本机，不属于本地推理：" + label,
+    };
+  }
+  return {
+    text: "模板",
+    cls: "chip-template",
+    title: "本次没有模型参与：方案卡里的数字由确定性决策引擎实时重算（真路网算路 + 熔断/禁航阈值 + 成本模型），\n推荐语那段文字是固定模板。",
+  };
 });
 // 风险变化后旧结果立即标记过期（不再展示旧推荐），并自动重算新方案
 const stale = ref(false);
@@ -274,6 +376,11 @@ const rerunPending = ref(false);
 // 开始导航模板：供调度员比选并派单的多路线候选（含逐条灾害概率）
 const dispatchCandidates = ref([]);
 const dispatchSelected = ref("");
+// 公路候选之外的「可坐船出境」（平陆运河陆水联运）推荐位：目的地在越南侧时后端会并带回
+const dispatchCanal = ref(null);
+// 派单就地反馈文案（成功显示几秒后自清）；与 dispatching 一起构成按钮全链路状态
+const dispatchFeedback = ref("");
+let dispatchFbTimer = null;
 
 // 三智能体实时状态（SSE agent-status 事件驱动 + 结果回填）
 const agentFlow = ref([
@@ -285,7 +392,9 @@ const agentFlow = ref([
 const recommendedId = computed(() => {
   if (!result.value?.plans) return "";
   const rec = result.value.agents?.find((a) => a.id === "plan-generation");
-  return rec?.detail?.recommended || (result.value.plans.find((p) => p.id === "B") ? "B" : "A");
+  // 兜底也要跳过被进度闸门禁用的方案（后端正常都会给出 recommended，这里防旧缓存）
+  return rec?.detail?.recommended
+    || (result.value.plans.find((p) => p.id === "B" && !p.notApplicable) ? "B" : "A");
 });
 
 // 带六维指标的方案（六维对比表数据源）
@@ -306,17 +415,19 @@ const directionInfo = computed(() => {
   const d = result.value?.direction;
   if (!d || d === "normal") return null;
   const reason = result.value?.waterBlockedReason || "通航条件超限";
+  // 不写死口岸名：熔断口岸随场景变化（暴雨断友谊关、台风断芒街），
+  // 写死会让"台风断芒街"时横幅仍提示"绕行芒街"（绕向已断的口岸）
   const map = {
     road_to_water: {
-      title: "🔀 双向切换：公路熔断 → AI 已分析水运方案",
-      sub: "友谊关暴雨触发熔断，可选：切水运（公水联运）/ 公路绕行芒街 / 原地等待",
+      title: "双向切换：公路熔断 → AI 已分析水运方案",
+      sub: "公路口岸熔断，可选：切水运（陆水联运）/ 公路绕行另一口岸 / 原地等待",
     },
     water_to_road: {
-      title: "🔀 双向切换：水运禁航 → AI 已分析公路方案",
-      sub: `平陆运河${reason}，可选：切公路（绕行芒街）/ 锚泊等待 / 绕行其他口岸`,
+      title: "双向切换：水运禁航 → AI 已分析公路方案",
+      sub: `平陆运河${reason}，可选：切公路（绕行可用口岸）/ 锚泊等待`,
     },
     dual_risk: {
-      title: "⚠️ 双线风险：公路与水运同时受阻",
+      title: "双线风险：公路与水运同时受阻",
       sub: "两条线各自风险均不可控，建议原地等待 / 延迟发车，等待期间货损风险已标注",
     },
   };
@@ -324,6 +435,9 @@ const directionInfo = computed(() => {
 });
 
 function selectPlan(id) {
+  // 被进度闸门禁用的方案（如车已过港口时的陆水联运）不可点选下发
+  const p = (result.value?.plans || []).find((x) => x.id === id);
+  if (!p || p.notApplicable) return;
   selectedPlan.value = id;
 }
 
@@ -370,6 +484,10 @@ async function runAnalysis(useCache, triggerSource) {
       if (node) {
         node.status = "DONE";
         node.elapsedMs = a.elapsedMs || 0;
+        // 逐智能体通道回填：汇总标签可能把三个不同通道“就重不就轻”地合并成一个，
+        // 但评委要查的是“这一段具体是谁写的”，所以每个节点各自存一份
+        node.aiChannel = a.aiChannel || "";
+        node.aiChannelLabel = a.aiChannelLabel || "";
       }
     });
     (data.agentStatus || []).forEach((row, i) => {
@@ -405,6 +523,8 @@ function resetAgentFlow() {
     n.status = "IDLE";
     n.elapsedMs = 0;
     n.output = "";
+    n.aiChannel = "";
+    n.aiChannelLabel = "";
   });
 }
 
@@ -438,6 +558,7 @@ async function dispatch() {
 async function loadDispatchCandidates() {
   dispatchCandidates.value = [];
   dispatchSelected.value = "";
+  dispatchCanal.value = null;
   try {
     const { data } = await axios.get("/api/route/candidates", {
       params: { originId: props.originId, destinationId: props.destinationId, cargoType: "cold" },
@@ -445,6 +566,8 @@ async function loadDispatchCandidates() {
     });
     const list = (data && data.candidates) || [];
     dispatchCandidates.value = list;
+    // 与公路并列的「坐船出境」推荐位（后端 serves 命中时才有）
+    dispatchCanal.value = (data && data.canalOption) || null;
     // 默认选中推荐路线（无则选灾害概率最低的一条）
     const withProb = list.filter((c) => c.hazardProbability >= 0);
     const def = list.find((c) => c.key === "recommended")
@@ -463,13 +586,51 @@ function probKey(p) {
   if (p >= 30) return "mid";
   return "low";
 }
+/** 低阈值不显示百分比：平静天气下各候选都堆在同一个地板值（如 9%），
+ * 直接标「通畅」更诚实；已发生灾害或概率达阈值才显示具体数字 */
+function probText(c) {
+  const p = c.hazardProbability;
+  if (p < 0) return "暂无";
+  if (!c.hazardOccurred && p < 15) return "通畅";
+  return p + "%";
+}
 
 /** 开始导航派单：把选定路线快照 + 本次 AI 分析递上去，由父组件合并订单信息后调 /api/task/dispatch */
 function dispatchToDriver() {
+  // 请求在飞时禁止重复点击（否则会向同一司机叠发多条派单指令）
+  if (dispatching.value) return;
+  dispatchFeedback.value = "";
+  // 调度员选定「坐船出境」：派 routeChoice='canal'，司机端接单后走陆水联运导航
+  if (dispatchSelected.value === "canal" && dispatchCanal.value) {
+    // 防御：选上之后运河才禁航（SSE 翻转）时不允许把注定走不了的方案派下去
+    if (dispatchCanal.value.canalBlocked) {
+      window.alert(`平陆运河禁航：${dispatchCanal.value.canalBlockedReason || '触发通航安全红线'}，请改选公路路线`);
+      return;
+    }
+    const cn = dispatchCanal.value;
+    const aiText = (result.value?.recommendation || "") + " 本线为陆水联运（平陆运河坐船出境）。";
+    dispatching.value = true;
+    emit("dispatch-task", {
+      route: {
+        routeChoice: "canal",
+        routeLabel: cn.label,
+        routeSummary: `${cn.via} · ${cn.hours}h · ${cn.distanceKm}km`,
+        hazardProbability: -1,
+        aiAnalysis: aiText,
+      },
+      done: finishDispatch,
+    });
+    return;
+  }
   const c = dispatchCandidates.value.find((x) => x.key === dispatchSelected.value);
-  if (!c) return;
+  if (!c) {
+    // 旧版这里静默 return：点了按钮像没反应一样，补上提示
+    window.alert("未选中任何路线，请先在上方候选里点选一条");
+    return;
+  }
   const aiText = (result.value?.recommendation || "")
     + (c.hazardReason ? ` 本线风险：${c.hazardReason}` : "");
+  dispatching.value = true;
   emit("dispatch-task", {
     route: {
       routeChoice: c.key,
@@ -478,7 +639,17 @@ function dispatchToDriver() {
       hazardProbability: c.hazardProbability >= 0 ? c.hazardProbability : -1,
       aiAnalysis: aiText,
     },
+    done: finishDispatch,
   });
+}
+
+/** 父组件派单完成后回调：ok=true 就地亮「已派单」，失败只恢复按钮（父组件已 alert） */
+function finishDispatch(ok) {
+  dispatching.value = false;
+  if (!ok) return;
+  dispatchFeedback.value = "✓ 已派单，等待司机接单";
+  if (dispatchFbTimer) clearTimeout(dispatchFbTimer);
+  dispatchFbTimer = setTimeout(() => { dispatchFeedback.value = ""; }, 4000);
 }
 
 /**
@@ -518,6 +689,17 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
 .trigger-tag.warn {
   background: rgba(217, 119, 6, 0.16);
   color: #d97706;
+}
+.dispatch-ok {
+  font-size: 12px;
+  font-weight: 700;
+  color: #16a34a;
+  white-space: nowrap;
+  animation: dispatch-fade-in 0.2s ease;
+}
+@keyframes dispatch-fade-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .agent-flow {
   display: flex;
@@ -562,6 +744,19 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
   color: #64748f;
   min-height: 14px;
 }
+/* 每个智能体自己的生成通道（红=出境、绿=本机）， hover 看完整说明 */
+.agent-chan {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 7px;
+  font-size: 9px;
+  cursor: help;
+}
+.agent-chan.chip-local { background: rgba(22, 163, 74, 0.16); color: #16a34a; }
+.agent-chan.chip-remote { background: rgba(225, 29, 72, 0.16); color: #e11d48; }
+.agent-chan.chip-template { background: rgba(139, 148, 158, 0.2); color: #64748f; }
+.agent-chan.chip-unknown { background: rgba(139, 148, 158, 0.2); color: #64748f; }
 .agent-output {
   font-size: 10px;
   color: #4f6df5;
@@ -625,6 +820,12 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
   color: #7c5cff;
   padding: 2px 10px;
 }
+/* AI 溯源 chip：颜色按“数据离本机多远”递进，绿不出门 / 红出公网 */
+.ai-chip { cursor: help; }
+.ai-chip.chip-local { background: rgba(22, 163, 74, 0.14); color: #16a34a; }
+.ai-chip.chip-remote { background: rgba(225, 29, 72, 0.14); color: #e11d48; }
+.ai-chip.chip-template { background: rgba(139, 148, 158, 0.18); color: #64748f; }
+.ai-chip.chip-unknown { background: rgba(139, 148, 158, 0.18); color: #64748f; }
 .plan-list {
   display: flex;
   flex-direction: column;
@@ -646,6 +847,27 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
 .plan-item.selected {
   background: rgba(79, 109, 245, 0.1);
   border-color: #4f6df5;
+}
+/* 进度闸门禁用的方案（如车已过港口时的陆水联运）：置灰、不可点选下发 */
+.plan-item.na {
+  opacity: 0.55;
+  cursor: not-allowed;
+  filter: grayscale(0.5);
+}
+.plan-item.na:hover {
+  border-color: rgba(30, 50, 90, 0.12);
+}
+.na-tag {
+  font-size: 10px;
+  background: rgba(139, 148, 158, 0.22);
+  color: #64748f;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+.progress-tag {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 400;
 }
 .plan-head {
   display: flex;
@@ -980,5 +1202,35 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
 .dcand-meta {
   font-size: 10px;
   color: #5b6b85;
+}
+/* 坐船（陆水联运）行：青蓝底色与公路候选区分；途经较长允许换行 */
+.dcand-row.canal-row {
+  border-color: rgba(14, 165, 233, 0.4);
+  background: rgba(14, 165, 233, 0.06);
+}
+.dcand-row.canal-row.sel {
+  border-color: rgba(14, 165, 233, 0.8);
+  background: rgba(14, 165, 233, 0.12);
+}
+.canal-row .dcand-via {
+  white-space: normal;
+  line-height: 1.4;
+}
+/* 禁航态：整行标红不可选，不能一边禁航一边推荐坐船 */
+.dcand-row.canal-row.blocked,
+.dcand-row.canal-row.blocked.sel {
+  border-color: rgba(225, 29, 72, 0.55);
+  background: rgba(225, 29, 72, 0.07);
+}
+.rec-tag.blocked {
+  background: #e11d48;
+  color: #fff;
+}
+.canal-blocked-note {
+  color: #e11d48;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: normal;
 }
 </style>

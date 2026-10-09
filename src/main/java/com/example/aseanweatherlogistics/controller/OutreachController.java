@@ -35,7 +35,7 @@ public class OutreachController {
     @PostMapping("/dispatch")
     public Map<String, Object> dispatch(@RequestBody(required = false) Map<String, Object> body) {
         String planId = body != null && body.get("planId") instanceof String s ? s : "B";
-        String planName = body != null && body.get("planName") instanceof String s ? s : "公水联运";
+        String planName = body != null && body.get("planName") instanceof String s ? s : "陆水联运";
         return outreachService.dispatch(planId, planName);
     }
 

@@ -32,8 +32,8 @@
           @click="selectTarget(t.id)"
         >
           {{ t.name }}
-          <span v-if="t.confirmed">✅</span>
-          <span v-else-if="t.escalated" class="esc-dot" title="已升级语音外呼">📞</span>
+          <span v-if="t.confirmed" class="tab-state ok">已确认</span>
+          <span v-else-if="t.escalated" class="tab-state esc" title="已升级语音外呼">外呼中</span>
         </button>
       </div>
 
@@ -47,7 +47,7 @@
         <pre class="msg-text">{{ showVi && activeMessage.messageVi ? activeMessage.messageVi : activeMessage.message }}</pre>
         <div class="msg-actions">
           <button v-if="activeMessage.messageVi" class="btn tiny outline" @click="showVi = !showVi">
-            {{ showVi ? "🇨🇳 中文" : "🇻🇳 Tiếng Việt" }}
+            {{ showVi ? "中文" : "Tiếng Việt" }}
           </button>
           <button
             v-if="activeMessage.messageVi"
@@ -56,7 +56,7 @@
             @click="speakVi"
             title="本地 TTS 越南语语音播报（离线）"
           >
-            {{ speaking ? "播报中…" : "🔊 越南语播报" }}
+            {{ speaking ? "播报中…" : "越南语播报" }}
           </button>
           <button
             v-if="!activeMessage.confirmed && canConfirm(activeMessage.role)"
@@ -75,8 +75,8 @@
         </div>
         <div v-for="t in status.targets" :key="t.id" class="status-row" :class="{ escalated: t.escalated && !t.confirmed }">
           <span class="st-name">{{ t.name }}</span>
-          <span>{{ t.delivered ? "✅" : "—" }}</span>
-          <span :class="{ pending: !t.confirmed }">{{ t.confirmed ? "✅" : isReported(t.id) ? "📤 已上报" : t.escalated ? "📞 二次呼叫" : "⏳" }}</span>
+          <span>{{ t.delivered ? "已送达" : "—" }}</span>
+          <span :class="{ pending: !t.confirmed }">{{ t.confirmed ? "已确认" : isReported(t.id) ? "已上报" : t.escalated ? "二次呼叫" : "待确认" }}</span>
           <span class="st-channel">{{ t.channel }}</span>
         </div>
       </div>
@@ -301,8 +301,15 @@ onUnmounted(() => clearInterval(timer));
   from { box-shadow: 0 0 0 rgba(225, 29, 72, 0); }
   to { box-shadow: 0 0 8px rgba(225, 29, 72, 0.6); }
 }
-.esc-dot {
+.tab-state {
   font-size: 10px;
+  margin-left: 4px;
+}
+.tab-state.ok {
+  color: #16a34a;
+}
+.tab-state.esc {
+  color: #e11d48;
 }
 .msg-box {
   border: 1px solid rgba(30, 50, 90, 0.14);
@@ -362,7 +369,7 @@ onUnmounted(() => clearInterval(timer));
 }
 .status-row {
   display: grid;
-  grid-template-columns: 1fr 40px 84px 76px;
+  grid-template-columns: 1fr 56px 96px 76px;
   font-size: 11px;
   align-items: center;
 }

@@ -63,12 +63,7 @@ public class AIService {
 
     /** 中越双语预警：演示流程步骤4（AI 生成双语专业预警） */
     public String buildBilingualWarning(RouteResponse routeResponse) {
-        String pathNames = routeResponse.getPathNodeIds().stream()
-                .map(id -> {
-                    RoadNode n = routeService.getNode(id);
-                    return n == null ? id : n.getName();
-                })
-                .collect(Collectors.joining(" → "));
+        String pathNames = formatPathNames(routeResponse.getPathNodeIds());
         String userPrompt = "你是东盟跨境物流气象预警专家。请基于以下实时信息生成一段中越双语预警文案，"
                 + "文案需同时适合屏幕显示和语音播报（TTS）：\n\n"
                 + "【中文部分要求】\n"
@@ -389,6 +384,11 @@ public class AIService {
         } else if (hazards.isEmpty()) {
             pct = 8; // 完全无气象数据时保守基线
         }
+        // 5.1) 路线暴露度修正：同走廊候选天气输入相同（气象按城市节点取），
+        // 但里程更长、低等级道路占比更高、跨境口岸更多的路线，途中被灾害命中的
+        // 窗口更大——折算成 0~12 个百分点的诚实增量，避免多条路线全部堆在同一地板值
+        int exposure = exposureUplift(pathEdgeIds);
+        pct = pct + exposure;
         if (occurred) {
             pct = Math.max(pct, 90); // 已经发生 → 高概率
         }
@@ -397,6 +397,7 @@ public class AIService {
         // 5) 组装
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("probability", pct);
+        out.put("exposureUplift", exposure); // 路线结构暴露度增量（里程/低等级路/口岸）
         out.put("high", pct >= HAZARD_HIGH_PCT || occurred);
         out.put("level", (pct >= HAZARD_HIGH_PCT || occurred) ? "高风险" : "正常");
         out.put("hazardTypes", types);
@@ -605,6 +606,43 @@ public class AIService {
         return v instanceof Number n ? n.doubleValue() : 0.0;
     }
 
+    /**
+     * 路线暴露度增量（百分点，0~12）：气象相同不代表风险相同——
+     * ① 里程越长，在途时间越久，天气窗口内被灾害命中的累积概率越大；
+     * ② 非高速（trunk/primary 等低等级路）占比越高，山区段积水/滑坡暴露越强；
+     * ③ 跨境口岸边越多，大雾/暴雨导致的通关受阻环节越多。
+     * 让同走廊的多条候选在平静天气下也能拉开结构差异，而不是全堆在地板值。
+     */
+    private int exposureUplift(List<String> pathEdgeIds) {
+        if (pathEdgeIds == null || pathEdgeIds.isEmpty()) {
+            return 0;
+        }
+        java.util.Set<String> idSet = new java.util.HashSet<>(pathEdgeIds);
+        double totalKm = 0.0;
+        double lowGradeKm = 0.0;
+        int customsEdges = 0;
+        for (RoadEdge e : routeService.getAllEdges()) {
+            if (!idSet.contains(e.getId())) {
+                continue;
+            }
+            double km = e.getDistanceKm();
+            totalKm += km;
+            String rt = e.getRoadType();
+            boolean isCustoms = e.isCustoms() || "customs".equalsIgnoreCase(rt);
+            if (isCustoms) {
+                customsEdges++;
+            } else if (rt != null && !"motorway".equalsIgnoreCase(rt) && !"motorway_link".equalsIgnoreCase(rt)) {
+                lowGradeKm += km;
+            }
+        }
+        if (totalKm <= 0) {
+            return 0;
+        }
+        double lowGradeRatio = lowGradeKm / totalKm;
+        double uplift = totalKm * 0.010 + lowGradeRatio * 6.0 + customsEdges * 2.0;
+        return (int) Math.round(Math.min(12, Math.max(0, uplift)));
+    }
+
     /** 概率说明文案：把各项灾害与依据拼成一句司机看得懂的话 */
     private String buildRiskReason(List<Map<String, Object>> hazards, boolean occurred,
                                    List<String> occurredReasons, List<Map<String, Object>> weather) {
@@ -731,14 +769,36 @@ public class AIService {
         return "气象预警：" + riskDesc + "，风险等级较高，请谨慎驾驶并留意最新通知。";
     }
 
+    /**
+     * 拼接可读的途经地名串（如「南宁 → 同登 → 谅山 → 河内」）。
+     * pathNodeIds 含路径上全部节点，越南侧有大量无名街道级碎节点，
+     * 不过滤直接 joining(" → ") 会生成「同登口岸 → → → … → 河内」这种空箭头风暴。
+     * 这里跳过空名节点、合并相邻重名，只保留有地名意义的锚点。
+     */
+    private String formatPathNames(List<String> pathNodeIds) {
+        if (pathNodeIds == null || pathNodeIds.isEmpty()) {
+            return "";
+        }
+        List<String> names = new ArrayList<>();
+        for (String id : pathNodeIds) {
+            RoadNode n = routeService.getNode(id);
+            String name = (n == null) ? id : n.getName();
+            if (name == null || name.isBlank()) {
+                continue;
+            }
+            name = name.trim();
+            // 合并相邻重名（口岸两侧同名节点、重复锚点）
+            if (!names.isEmpty() && names.get(names.size() - 1).equals(name)) {
+                continue;
+            }
+            names.add(name);
+        }
+        return String.join(" → ", names);
+    }
+
     private String fallbackBilingual(RouteResponse route) {
         String riskDesc = describeRisks(route);
-        String pathNames = route.getPathNodeIds().stream()
-                .map(id -> {
-                    RoadNode n = routeService.getNode(id);
-                    return n == null ? id : n.getName();
-                })
-                .collect(Collectors.joining(" → "));
+        String pathNames = formatPathNames(route.getPathNodeIds());
         String zh = "【中文】\n"
                 + "气象预警：" + riskDesc + "。\n"
                 + "影响路段：高风险路段已" + (route.isRerouted() ? "自动熔断" : "处于监控中") + "，"

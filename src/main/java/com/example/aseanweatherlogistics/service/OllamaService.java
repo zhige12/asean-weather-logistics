@@ -21,7 +21,7 @@ import org.springframework.stereotype.Service;
  * 本地大模型通道（演示第七幕 · 拔网线）：
  * Ollama 本地推理（OpenAI 兼容接口），默认 http://localhost:11434，模型 qwen2.5:7b。
  * <p>
- * 在 AI 调用链中优先级最高：Ollama → 公司网关 → 在线 DeepSeek → 规则模板。
+ * 在 AI 调用链中优先级最高：Ollama → 在线 DeepSeek → 规则模板。
  * 断网/未启动 Ollama 时短超时（4s）快速失败并降级，不阻塞演示。
  * 熔断：连续失败 2 次冷却 2 分钟，避免每次请求都白等超时。
  */

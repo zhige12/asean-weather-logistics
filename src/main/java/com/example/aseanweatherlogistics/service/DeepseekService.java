@@ -13,40 +13,33 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 /**
- * AI Agent 适配器（OpenAI 兼容格式），主备双通道自动切换：
+ * AI Agent 适配器（OpenAI 兼容格式），两级通道自动降级：
  * <ol>
- *   <li>主通道：公司内网 new-api 网关（deepseek.api.*，需连公司 VPN）。短超时（8s），
- *       一旦接不上 / 超时 / 401 / 未填令牌 → 立即切备用通道。</li>
- *   <li>备用通道：在线 DeepSeek 官方 API（deepseek.fallback.*，公网直连，无需 VPN）。</li>
+ *   <li>本地通道：Ollama（离线演示主力，拔网线可用，数据不出境，优先级最高）。</li>
+ *   <li>在线通道：DeepSeek 官方 API（deepseek.fallback.*，公网直连）。</li>
  * </ol>
- * 熔断：主通道连续失败 2 次进入 5 分钟冷却期，期间直接走备用通道（不干等）；
- * 冷却结束后自动恢复试探主通道，主通道恢复后不再走备用。
  * payload 使用 messages 数组，响应从 choices[0].message.content 解析。
  * 所有对外方法均不抛 checked 异常：网络失败 / key 无效时返回 null 或空列表，由调用方降级。
+ * <p>
+ * <b>通道溯源（provenance）</b>：两条通道返回的内容在业务上等价，但在<b>展示上不等价</b>——
+ * 「本地大模型」意味着数据不出境，「在线 API」意味着提示词里的路线、货值、口岸状态
+ * 已经离开本机。旧版只向调用方回传一个裸 String，上层无从分辨，界面把任何一次成功
+ * 调用都标成「本地大模型」；Ollama 一抖（超时/显存被占/冷却 2 分钟）就会静默切到在线
+ * 通道，标注当场失真。故新增 {@link #chatWithChannel}：把真实通道一并交出去，
+ * 由上层如实标注。{@link #chat} 保留原签名供不需要溯源的调用方使用。
  */
 @Service
 public class DeepseekService {
 
     private static final Logger log = LoggerFactory.getLogger(DeepseekService.class);
 
-    // ---- 主通道：公司网关 ----
-    @Value("${deepseek.api.url}")
-    private String apiUrl;
-
-    @Value("${deepseek.api.key}")
-    private String apiKey;
-
-    @Value("${deepseek.model}")
-    private String model;
-
-    // ---- 备用通道：在线 DeepSeek ----
+    // ---- 在线通道：DeepSeek 官方 API ----
     @Value("${deepseek.fallback.url:}")
     private String fallbackUrl;
 
@@ -63,15 +56,8 @@ public class DeepseekService {
         this.ollamaService = ollamaService;
     }
 
-    // 主通道短超时：接不上要"马上"切备用，不能干等
-    private static final int PRIMARY_TIMEOUT_SECONDS = 8;
-    private static final int FALLBACK_TIMEOUT_SECONDS = 60;
-    // 熔断：连续失败 2 次 → 冷却 5 分钟
-    private static final int PRIMARY_FAIL_THRESHOLD = 2;
-    private static final long PRIMARY_COOLDOWN_MILLIS = 5 * 60_000L;
-
-    private final AtomicInteger primaryFailures = new AtomicInteger();
-    private volatile long primaryCooldownUntil = 0L;
+    /** 在线通道超时：公网链路较长，给足时间但也不能无限等 */
+    private static final int ONLINE_TIMEOUT_SECONDS = 60;
 
     private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     private final ObjectMapper mapper = new ObjectMapper();
@@ -82,40 +68,54 @@ public class DeepseekService {
     }
 
     /**
-     * OpenAI 兼容 chat completions 调用（主备自动切换）。
-     *
-     * @return 模型回复文本；两条通道都失败 / 无 key 时返回 null（调用方负责降级）
+     * 一次 AI 回复 + 它的真实来源。channel 取值见 {@link #CHANNEL_LOCAL} 等常量，
+     * 两条通道全部失败时为 null（调用方须按「非模型生成」处理）。
      */
-    public String chat(String systemPrompt, String userPrompt, int maxTokens) {
+    public record AiReply(String text, String channel, String model) {
+        /** 给上层落库/透传用的紧凑标记：channel[:model]，无通道时为 null。 */
+        public String tag() {
+            if (channel == null) {
+                return null;
+            }
+            return (model == null || model.isBlank()) ? channel : channel + ":" + model;
+        }
+    }
+
+    /** 本地 Ollama 推理，数据不出境。 */
+    public static final String CHANNEL_LOCAL = "local";
+    /** 公网 DeepSeek，提示词离开本机。 */
+    public static final String CHANNEL_ONLINE = "online";
+
+    /**
+     * OpenAI 兼容 chat completions 调用（本地优先，在线降级），并回报<b>真实命中通道</b>。
+     *
+     * @return 回复文本与来源通道；两条通道都失败 / 无 key 时 text 与 channel 均为 null
+     */
+    public AiReply chatWithChannel(String systemPrompt, String userPrompt, int maxTokens) {
         // 本地 Ollama 优先：拔网线离线演示时所有 AI 功能仍可用，数据不出境
         if (ollamaService != null && ollamaService.enabled()) {
             String local = ollamaService.chat(systemPrompt, userPrompt, maxTokens);
             if (local != null) {
-                return local;
+                return new AiReply(local, CHANNEL_LOCAL, ollamaService.model());
             }
         }
-        boolean primaryReady = keyConfigured(apiKey) && System.currentTimeMillis() >= primaryCooldownUntil;
-        if (primaryReady) {
-            String text = chatRemote(apiUrl, model, apiKey, systemPrompt, userPrompt, maxTokens, PRIMARY_TIMEOUT_SECONDS);
-            if (text != null) {
-                primaryFailures.set(0);
-                return text;
-            }
-            int fails = primaryFailures.incrementAndGet();
-            if (fails >= PRIMARY_FAIL_THRESHOLD) {
-                primaryCooldownUntil = System.currentTimeMillis() + PRIMARY_COOLDOWN_MILLIS;
-                primaryFailures.set(0);
-                log.warn("公司 AI 网关连续 {} 次失败，进入 {} 分钟冷却，期间直连在线 DeepSeek",
-                        PRIMARY_FAIL_THRESHOLD, PRIMARY_COOLDOWN_MILLIS / 60_000L);
-            }
-            log.warn("公司 AI 网关({})调用失败，切换到在线 DeepSeek 备用通道", apiUrl);
-        } else if (!keyConfigured(apiKey)) {
-            log.info("未配置公司网关令牌（deepseek.api.key 为空或占位符），直接使用在线 DeepSeek");
-        } else {
-            log.info("公司 AI 网关处于冷却期，直接使用在线 DeepSeek");
+        if (!keyConfigured(fallbackKey)) {
+            log.info("未配置在线 DeepSeek 令牌（deepseek.fallback.key 为空或占位符），降级到规则模板");
+            return new AiReply(null, null, null);
         }
-        return chatRemote(fallbackUrl, fallbackModel, fallbackKey,
-                systemPrompt, userPrompt, maxTokens, FALLBACK_TIMEOUT_SECONDS);
+        String online = chatRemote(fallbackUrl, fallbackModel, fallbackKey,
+                systemPrompt, userPrompt, maxTokens, ONLINE_TIMEOUT_SECONDS);
+        // 只有真拿到内容才算命中在线通道，否则通道为 null（降级到规则模板）
+        return new AiReply(online, online != null ? CHANNEL_ONLINE : null, fallbackModel);
+    }
+
+    /**
+     * OpenAI 兼容 chat completions 调用（本地优先，在线降级）。
+     *
+     * @return 模型回复文本；两条通道都失败 / 无 key 时返回 null（调用方负责降级）
+     */
+    public String chat(String systemPrompt, String userPrompt, int maxTokens) {
+        return chatWithChannel(systemPrompt, userPrompt, maxTokens).text();
     }
 
     /** 向 OpenAI 兼容端点发一次 chat 请求（携带 Bearer 鉴权） */

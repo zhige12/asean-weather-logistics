@@ -29,8 +29,9 @@ public class OpenMeteoWeatherProvider implements WeatherProvider {
     public static final String ID = "open-meteo";
 
     private static final String USER_AGENT = "asean-weather-logistics/1.0 (open-meteo)";
+    /** surface_pressure 用于台风/强对流判据（低气压 + 大风） */
     private static final String CURRENT_VARS =
-            "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,visibility";
+            "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,visibility,surface_pressure";
 
     @Value("${weather.openmeteo.base-url:https://api.open-meteo.com/v1/forecast}")
     private String baseUrl;
@@ -52,7 +53,7 @@ public class OpenMeteoWeatherProvider implements WeatherProvider {
 
     @Override
     public String label() {
-        return "真实气象接口（Open-Meteo 公网实况）";
+        return "Open-Meteo";
     }
 
     @Override
@@ -136,9 +137,10 @@ public class OpenMeteoWeatherProvider implements WeatherProvider {
                 double pre = num(current, "precipitation", 0);
                 double wind = num(current, "wind_speed_10m", 0);
                 double vis = num(current, "visibility", 10000);
+                double prs = num(current, "surface_pressure", 1013);
                 out.add(new RealWeatherService.WeatherPoint(
                         node.getId(), node.getLatitude(), node.getLongitude(),
-                        tmp, rh, pre, wind, vis, fetchedAt
+                        tmp, rh, pre, wind, vis, prs, fetchedAt
                 ));
             }
         } catch (Exception e) {

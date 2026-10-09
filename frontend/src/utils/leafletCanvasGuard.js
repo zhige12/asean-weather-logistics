@@ -119,7 +119,7 @@ if (L && L.Marker && L.Marker.prototype && !L.Marker.prototype.__animateZoomGuar
 //
 // 成因：Tooltip/Popup 通过 getEvents 订阅 zoomanim→_animateZoom、move→_updatePosition。
 //       图层被 removeLayer / 地图销毁重建时若退订未生效（与竞态 2/3 同源，司机端
-//       公水联运走廊 polyline.bindPopup 在导航开始整层移除后已在线上堆栈中确认），
+//       陆水联运走廊 polyline.bindPopup 在导航开始整层移除后已在线上堆栈中确认），
 //       幽灵浮层仍会收到缩放广播，_animateZoom 开头直接读
 //       this._map._latLngToNewLayerPoint(...) → 对 null 取属性抛错，
 //       从监听器列表中间打断 zoomanim 广播 → 地图卡在 leaflet-zoom-anim → 白屏。

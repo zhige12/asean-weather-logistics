@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>面向东盟跨境物流的突发气象预警与多路线协同调度平台 · 路演</title>
+<style>
+  :root {
+    --prism-1:#6366f1; --prism-2:#38bdf8; --prism-3:#22d3ee; --prism-4:#a855f7; --prism-5:#ec4899;
+    --prism-grad: linear-gradient(120deg,#6366f1 0%,#38bdf8 28%,#22d3ee 50%,#a855f7 74%,#ec4899 100%);
+    --bg:#070b14; --bg2:#0c1220; --panel:rgba(255,255,255,.045); --line:rgba(255,255,255,.10);
+    --txt:#e8eefb; --txt-dim:#9fb0cc; --txt-mute:#64748b;
+    --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--txt); overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* 背景棱彩光晕 */
+  .bg-glow { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+  .bg-glow::before, .bg-glow::after {
+    content: ''; position: absolute; width: 60vw; height: 60vw; border-radius: 50%; filter: blur(120px); opacity: .22;
+  }
+  .bg-glow::before { background: var(--prism-1); top: -20vw; left: -10vw; animation: float1 18s ease-in-out infinite; }
+  .bg-glow::after { background: var(--prism-5); bottom: -25vw; right: -10vw; animation: float2 22s ease-in-out infinite; }
+  @keyframes float1 { 50% { transform: translate(8vw, 6vh) scale(1.15); } }
+  @keyframes float2 { 50% { transform: translate(-6vw, -8vh) scale(1.1); } }
+
+  /* 幻灯片容器 */
+  #deck { position: relative; z-index: 1; width: 100vw; height: 100vh; }
+  .slide {
+    position: absolute; inset: 0; display: none; flex-direction: column; justify-content: center;
+    padding: 6vh 8vw; opacity: 0; transform: translateY(14px); transition: opacity .5s, transform .5s;
+  }
+  .slide.active { display: flex; opacity: 1; transform: translateY(0); }
+
+  /* 通用元素 */
+  .kicker { display: inline-flex; align-items: center; gap: 8px; font-size: 15px; letter-spacing: 3px;
+    color: var(--prism-2); text-transform: uppercase; margin-bottom: 18px; font-weight: 600; }
+  .kicker::before { content: ''; width: 26px; height: 2px; background: var(--prism-grad); border-radius: 2px; }
+  h1 { font-size: 62px; font-weight: 800; line-height: 1.15; letter-spacing: 1px; }
+  h2 { font-size: 40px; font-weight: 800; line-height: 1.2; margin-bottom: 8px; }
+  .grad-text { background: var(--prism-grad); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  .sub { font-size: 20px; color: var(--txt-dim); margin-top: 16px; line-height: 1.6; }
+  .lead { font-size: 22px; color: var(--txt); line-height: 1.7; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* 卡片网格 */
+  .grid { display: grid; gap: 22px; margin-top: 34px; }
+  .g2 { grid-template-columns: repeat(2, 1fr); }
+  .g3 { grid-template-columns: repeat(3, 1fr); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 26px 24px;
+    backdrop-filter: blur(10px); transition: transform .25s, border-color .25s;
+  }
+  .card:hover { transform: translateY(-4px); border-color: rgba(99,102,241,.5); }
+  .card .ico { font-size: 30px; margin-bottom: 12px; display: block; }
+  .card h3 { font-size: 21px; font-weight: 700; margin-bottom: 10px; }
+  .card p { font-size: 16px; color: var(--txt-dim); line-height: 1.65; }
+  .card .big { font-size: 40px; font-weight: 800; }
+  .tag { display: inline-block; font-size: 13px; padding: 3px 10px; border-radius: 999px; margin: 4px 6px 0 0;
+    background: rgba(99,102,241,.14); color: #a5b4fc; border: 1px solid rgba(99,102,241,.3); }
+
+  /* 列表 */
+  ul.clean { list-style: none; margin-top: 20px; }
+  ul.clean li { font-size: 20px; line-height: 1.5; padding: 12px 0 12px 34px; position: relative; color: var(--txt); }
+  ul.clean li::before { content: '▸'; position: absolute; left: 4px; top: 12px; color: var(--prism-3); font-size: 18px; }
+  ul.clean li b { color: #fff; }
+  ul.clean li span.d { color: var(--txt-dim); font-size: 17px; }
+
+  /* 页脚进度 */
+  #hud { position: fixed; bottom: 0; left: 0; right: 0; z-index: 10; display: flex; align-items: center;
+    justify-content: space-between; padding: 14px 26px; font-size: 13px; color: var(--txt-mute); }
+  #bar { position: fixed; top: 0; left: 0; height: 3px; background: var(--prism-grad); z-index: 11; transition: width .4s; }
+  #hud .nav { display: flex; gap: 10px; }
+  #hud button { background: var(--panel); border: 1px solid var(--line); color: var(--txt-dim);
+    width: 34px; height: 34px; border-radius: 9px; cursor: pointer; font-size: 16px; }
+  #hud button:hover { color: #fff; border-color: var(--prism-1); }
+  .pageno { font-variant-numeric: tabular-nums; letter-spacing: 1px; }
+
+  /* 流程条 */
+  .flow { display: flex; align-items: center; gap: 14px; margin-top: 30px; flex-wrap: wrap; }
+  .flow .step { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 20px; min-width: 150px; }
+  .flow .step .t { font-size: 14px; color: var(--prism-2); font-weight: 700; margin-bottom: 6px; }
+  .flow .step .d { font-size: 15px; color: var(--txt-dim); line-height: 1.5; }
+  .flow .arw { color: var(--prism-4); font-size: 24px; }
+
+  /* 表格 */
+  table.spec { width: 100%; border-collapse: collapse; margin-top: 26px; font-size: 17px; }
+  table.spec th, table.spec td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  table.spec th { color: var(--prism-2); font-weight: 700; font-size: 15px; text-transform: uppercase; letter-spacing: 1px; }
+  table.spec td:first-child { color: #fff; font-weight: 600; width: 34%; }
+  table.spec td { color: var(--txt-dim); }
+
+  .hint { font-size: 14px; color: var(--txt-mute); margin-top: 26px; }
+  .stat-row { display: flex; gap: 40px; margin-top: 40px; flex-wrap: wrap; }
+  .stat { }
+  .stat .v { font-size: 52px; font-weight: 800; line-height: 1; }
+  .stat .l { font-size: 16px; color: var(--txt-dim); margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="bg-glow"></div>
+<div id="bar"></div>
+<div id="deck">
+
+  <!-- 1 · 封面 -->
+  <section class="slide active">
+    <div class="kicker">中国 — 东盟 · 跨境物流气象决策</div>
+    <h1 style="font-size:52px">面向东盟跨境物流的<br/><span class="grad-text">突发气象预警与多路线协同调度平台</span></h1>
+    <p class="sub">让每一趟南宁 → 河内的货车，在暴雨熔断友谊关之前，就已经换好了路线。</p>
+    <div class="flow" style="margin-top:44px">
+      <div class="step"><div class="t">官方气象</div><div class="d">CRA40 实况<br/>GOWFS 预报</div></div>
+      <span class="arw">→</span>
+      <div class="step"><div class="t">风险熔断</div><div class="d">Dijkstra 双并行<br/>动态加权绕行</div></div>
+      <span class="arw">→</span>
+      <div class="step"><div class="t">Agent 守护</div><div class="d">SSE 毫秒推送<br/>双端实时联动</div></div>
+      <span class="arw">→</span>
+      <div class="step"><div class="t">司机决策</div><div class="d">双语语音<br/>一键换路</div></div>
+    </div>
+    <p class="hint">← / → 或空格翻页 · F 全屏 · 共 12 页</p>
+  </section>
+
+  <!-- 2 · 痛点 -->
+  <section class="slide">
+    <div class="kicker">为什么做这件事</div>
+    <h2>跨境物流最怕的不是远路，<span class="grad-text">是堵在口岸上的那一夜</span></h2>
+    <p class="sub">南宁 → 河内 375 公里，友谊关是咽喉。一场暴雨、一次熔断，代价却是整个供应链的连锁塌方。</p>
+    <div class="grid g3">
+      <div class="card"><span class="ico">🌧️</span><h3>天气突发不可预测</h3><p>台风、暴雨、大雾集中在越北山口走廊，灾害为区域性天气，一条口岸受阻往往多条线同时告急。</p></div>
+      <div class="card"><span class="ico">🚚</span><h3>司机信息严重滞后</h3><p>传统调度靠电话和经验，司机往往开到口岸才发现封关，掉头意味着数小时延误与冷链货损。</p></div>
+      <div class="card"><span class="ico">❄️</span><h3>冷链货损代价高</h3><p>生鲜、医药对时效与温度极度敏感，一次长时间滞留就可能整柜报废，损失以万计。</p></div>
+    </div>
+    <p class="lead" style="margin-top:34px">核心矛盾：<b style="color:#fff">风险发生的速度</b>，远快于<b style="color:#fff">人做出换路决策的速度</b>。</p>
+  </section>
+
+  <!-- 3 · 方案总览 -->
+  <section class="slide">
+    <div class="kicker">我们的答案</div>
+    <h2>一条自动闭环的<span class="grad-text">天气风险决策链</span></h2>
+    <p class="sub">从气象格点到司机屏幕，全程无需人工介入，风险响应从「小时级」压缩到「毫秒级」。</p>
+    <div class="grid g2" style="margin-top:30px">
+      <div class="card"><span class="ico">🛰️</span><h3>感知层</h3><p>比赛官方 CRA40 实况 + GOWFS 三小时预报格点，按 bbox 切片映射到业务节点；DeepSeek AI 预测未来 6–12 小时灾害。</p></div>
+      <div class="card"><span class="ico">🧠</span><h3>决策层</h3><p>6.2 万条边的真实 OSM 路网上跑 Dijkstra 双并行：基准线 vs 气象风险加权线，边权 = 距离/限速 + 口岸通关时间 × 惩罚系数。</p></div>
+      <div class="card"><span class="ico">📡</span><h3>推送层</h3><p>Agent 实时守护中枢，风险变化经 300ms 防抖后毫秒级重算活跃路线，通过 SSE 同时广播到调度大屏与司机端。</p></div>
+      <div class="card"><span class="ico">📱</span><h3>执行层</h3><p>司机端中越双语语音播报 + 绕行面板一键换路；调度大屏人工干预与自动熔断双轨并行。</p></div>
+    </div>
+  </section>
+
+  <!-- 4 · 创新1 熔断绕行 -->
+  <section class="slide">
+    <div class="kicker">核心创新 ①</div>
+    <h2>天气<span class="grad-text">熔断</span>，而不是天气<span class="grad-text">提醒</span></h2>
+    <p class="sub">市面产品大多只告诉你「前方有雨」；我们做的是——雨还没挡住路，新路线已经算好并推到你面前。</p>
+    <ul class="clean">
+      <li><b>双并行 Dijkstra：</b>同时计算「无风险基准线」与「气象加权线」，两条线的差值就是这条走廊的真实风险代价。</li>
+      <li><b>风险量化到每条边：</b>灾害概率、severity、惩罚系数逐边注入，区域性暴雨会让整片走廊边权抬升，绕行是全局最优而非局部规避。</li>
+      <li><b>毫秒级熔断重算：</b>SSE 主通道 ~350ms 到达，15 秒轮询兜底；司机选定的备选线不被系统强行覆盖，只按其走廊重算。</li>
+      <li><b>避险线不再被误标成风险线：</b>绕行后自动从被绕开的基准线反推真实致灾走廊，标题精准显示「暴雨 · 友谊关口岸」。</li>
+    </ul>
+  </section>
+
+  <!-- 5 · 创新2 平陆运河 -->
+  <section class="slide">
+    <div class="kicker">核心创新 ② · 独家差异牌</div>
+    <h2>公路断了，<span class="grad-text">我们还有运河</span></h2>
+    <p class="sub">平陆运河陆水联运——当所有公路走廊都被暴雨熔断时，这是唯一不受公路天气影响的出境通道。</p>
+    <div class="grid g3">
+      <div class="card"><span class="ico">🚢</span><h3>不受公路熔断</h3><p>水运推荐位与公路候选并列展示，不带货也能全程坐船出境，天然规避山口暴雨。</p></div>
+      <div class="card"><span class="ico">⚖️</span><h3>双向自动切换</h3><p>公路熔断→推运河；运河禁航（通航安全红线）→在途水运对象自动收到换线，回到公路方案。</p></div>
+      <div class="card"><span class="ico">🌊</span><h3>支流顶托风险模型</h3><p>4 条支流口实时雨强 × 6h 等效过程降雨量进概率模型，三分支禁航红线判定，真实气象驱动。</p></div>
+    </div>
+    <p class="lead" style="margin-top:32px">这条走廊的<b style="color:#fff">第二维度运力</b>，是纯公路导航产品给不出的答案。</p>
+  </section>
+
+  <!-- 6 · 创新3 离线工程 -->
+  <section class="slide">
+    <div class="kicker">核心创新 ③ · 工程硬实力</div>
+    <h2>「<span class="grad-text">拔了网线照样跑</span>」不是口号</h2>
+    <p class="sub">跨境弱网、口岸断网、演示现场翻车——三重噩梦，我们用全链路降级架构逐个击破。</p>
+    <div class="grid g2">
+      <div class="card"><span class="ico">🗺️</span><h3>底图四源自动降级</h3><p>天地图影像 → 天地图矢量 → OSM → D 盘本地离线瓦片，探测阈值触发切源 + 运行中瓦片自愈巡检；本地 planetiler 矢量瓦片完全离线可用。</p></div>
+      <div class="card"><span class="ico">🤖</span><h3>AI 两级降级链</h3><p>本地 Ollama（主，数据不出境）→ 在线 DeepSeek（备）→ 内置规则引擎离线模板，断网也能产出双语预警文案。</p></div>
+      <div class="card"><span class="ico">🌐</span><h3>路网全离线</h3><p>311MB OSM PBF 自研脚本裁剪为 22MB 紧凑路网，本地 Dijkstra，无第三方在线算路依赖。</p></div>
+      <div class="card"><span class="ico">⚡</span><h3>首点即毫秒</h3><p>启动预热跑一次 NN→HN 规划触发 JIT；JVM ZGC + 3GB 级瓦片磁盘缓存，避免演示首次点击卡顿。</p></div>
+    </div>
+  </section>
+
+  <!-- 7 · 技术架构栈 -->
+  <section class="slide">
+    <div class="kicker">技术选型</div>
+    <h2>一套<span class="grad-text">为实时与离线而生</span>的技术栈</h2>
+    <table class="spec">
+      <tr><th>层</th><th>选型</th></tr>
+      <tr><td>后端</td><td>Spring Boot 4.1.0 · Java 21 · JGraphT + GraphHopper 10.2 · ZGC（-Xmx4g）</td></tr>
+      <tr><td>算路引擎</td><td>真实 OSM 路网 Dijkstra 双并行 · 逐边气象风险惩罚加权</td></tr>
+      <tr><td>实时推送</td><td>SSE（SseEmitter）主通道 + 15s 轮询兜底 · 300ms 防抖重算</td></tr>
+      <tr><td>气象 / AI</td><td>官方 CRA40 / GOWFS 格点 · DeepSeek 双语预警 · 规则引擎离线降级</td></tr>
+      <tr><td>前端</td><td>Vue 3.5 + Vite · Leaflet 1.9.4 + MapLibre GL 5.0 · 调度大屏 / 司机端双入口</td></tr>
+      <tr><td>移动端</td><td>Capacitor 打包 Android APK · 原生 TTS 中越双语 · 局域网瘦客户端热更新</td></tr>
+      <tr><td>地理数据</td><td>planetiler 本地 MVT 矢量瓦片 · Douglas-Peucker 11m 容差路网 · ODbL 合规</td></tr>
+    </table>
+  </section>
+
+  <!-- 8 · 数据合规 -->
+  <section class="slide">
+    <div class="kicker">答辩加分项 · 数据合规</div>
+    <h2>每个数据源，<span class="grad-text">都经得起追问</span></h2>
+    <p class="sub">比赛最怕的就是「你这数据哪来的、合不合规」。我们把合规做成了一套可审计的工程机制。</p>
+    <div class="grid g2">
+      <div class="card"><span class="ico">🔒</span><h3>密钥绝不入前端</h3><p>官方 Token、天地图密钥池全部经 .env.local（gitignore）注入后端，前端与仓库零明文，从架构上杜绝泄露。</p></div>
+      <div class="card"><span class="ico">🚦</span><h3>节流 + 熔断护上游</h3><p>全局 60s 最小回源间隔 + 连续 3 次失败熔断 300s + 10 分钟缓存，401 不重试轰炸，杜绝暴力访问官方接口。</p></div>
+      <div class="card"><span class="ico">📊</span><h3>频度可审计</h3><p>免鉴权 rate-stats 端点暴露计数；审计脚本动态压测断言「20 连发真实回源 ≤ 1 次」，合规性可验证。</p></div>
+      <div class="card"><span class="ico">©️</span><h3>地图 ODbL 合规</h3><p>底图与路网均派生自 OpenStreetMap（ODbL），界面已标注来源；默认本地自建瓦片，规避第三方在线服务政策限制。</p></div>
+    </div>
+  </section>
+
+  <!-- 9 · 现场演示 -->
+  <section class="slide">
+    <div class="kicker">眼见为实</div>
+    <h2>现场演示 · <span class="grad-text">让暴雨现在就落下</span></h2>
+    <p class="sub">注入一场友谊关暴雨，看系统如何在一秒钟内完成「感知 → 熔断 → 重算 → 推送 → 换路」全闭环。</p>
+    <div class="flow">
+      <div class="step"><div class="t">① 注入灾害</div><div class="d">调度大屏点选<br/>「暴雨·友谊关」场景</div></div>
+      <span class="arw">→</span>
+      <div class="step"><div class="t">② 自动熔断</div><div class="d">走廊边权抬升<br/>Dijkstra 重算</div></div>
+      <span class="arw">→</span>
+      <div class="step"><div class="t">③ 双端推送</div><div class="d">SSE ~350ms<br/>大屏 + 司机端同步</div></div>
+      <span class="arw">→</span>
+      <div class="step"><div class="t">④ 司机换路</div><div class="d">双语语音播报<br/>面板一键切换</div></div>
+    </div>
+    <div class="grid g2" style="margin-top:36px">
+      <div class="card"><span class="ico">🖥️</span><h3>调度大屏</h3><p>全路网风险可视化、灾害场景注入、路线对比、AI 双语预警、通关时效调整，人工与自动双轨决策。</p></div>
+      <div class="card"><span class="ico">📱</span><h3>司机端 App</h3><p>高德风首页、实景导航、风险熔断绕行面板、中越双语语音，已打包 Android APK 真机可跑。</p></div>
+    </div>
+    <p class="hint">（备用方案：现场网络异常时切换至预录演示视频）</p>
+  </section>
+
+  <!-- 10 · 成果数据 -->
+  <section class="slide">
+    <div class="kicker">可量化的成果</div>
+    <h2>用<span class="grad-text">数字</span>说话</h2>
+    <div class="stat-row">
+      <div class="stat"><div class="v grad-text num">~350ms</div><div class="l">风险发生 → 新路线推送<br/>（对比传统小时级）</div></div>
+      <div class="stat"><div class="v grad-text num">6.2万</div><div class="l">真实 OSM 路网边<br/>跨境走廊逐边风险建模</div></div>
+      <div class="stat"><div class="v grad-text num">4 级</div><div class="l">底图自动降级链<br/>+ 运行中瓦片自愈</div></div>
+    </div>
+    <div class="stat-row">
+      <div class="stat"><div class="v grad-text num">3 级</div><div class="l">AI 预警降级链<br/>断网仍产出双语文案</div></div>
+      <div class="stat"><div class="v grad-text num">2 端</div><div class="l">调度大屏 + 司机 App<br/>SSE 实时同频联动</div></div>
+      <div class="stat"><div class="v grad-text num">22MB</div><div class="l">311MB PBF 裁剪压缩<br/>全离线本地算路</div></div>
+    </div>
+    <p class="hint">全部指标基于项目实际代码与 DEV_LOG 记录，可现场复现。</p>
+  </section>
+
+  <!-- 11 · 商业价值 -->
+  <section class="slide">
+    <div class="kicker">价值与落地</div>
+    <h2>从<span class="grad-text">比赛原型</span>到落地路径</h2>
+    <div class="grid g3">
+      <div class="card"><span class="ico">🎯</span><h3>解决什么</h3><p>跨境冷链因天气滞留造成的货损与延误，把「事后补救」变成「事前绕行」。</p></div>
+      <div class="card"><span class="ico">💼</span><h3>服务谁</h3><p>中越跨境货代、冷链承运商、口岸物流园区，以及平陆运河水运运营方。</p></div>
+      <div class="card"><span class="ico">🚀</span><h3>怎么长大</h3><p>从单一走廊扩展到中国—东盟全网络，接入更多官方气象与口岸通关数据源。</p></div>
+    </div>
+    <ul class="clean" style="margin-top:24px">
+      <li><b>技术护城河：</b><span class="d">逐边气象风险建模 + 全离线工程 + 平陆运河陆水联运第二通道，非纯地图套壳可比。</span></li>
+      <li><b>可复用性：</b><span class="d">决策链架构与具体走廊解耦，换一套路网与气象源即可迁移到任意跨境/干线场景。</span></li>
+    </ul>
+  </section>
+
+  <!-- 12 · 结尾 -->
+  <section class="slide" style="align-items:center;text-align:center">
+    <div class="kicker" style="justify-content:center">结语</div>
+    <h1 style="font-size:54px">让风险发生的速度，<br/><span class="grad-text">永远追不上我们换路的速度</span></h1>
+    <p class="sub" style="max-width:760px">面向东盟跨境物流的突发气象预警与多路线协同调度平台——把天气的不确定，变成决策的确定。<br/>谢谢聆听，欢迎评委提问。</p>
+    <div class="flow" style="justify-content:center;margin-top:40px">
+      <span class="tag">官方气象合规</span>
+      <span class="tag">毫秒级熔断绕行</span>
+      <span class="tag">平陆运河陆水联运</span>
+      <span class="tag">全离线可演示</span>
+      <span class="tag">中越双语司机端</span>
+    </div>
+  </section>
+
+</div>
+
+<div id="hud">
+  <span class="pageno num"><span id="cur">01</span> / 12</span>
+  <span>面向东盟跨境物流的突发气象预警与多路线协同调度平台</span>
+  <span class="nav"><button id="prev">‹</button><button id="next">›</button><button id="fs" title="全屏">⛶</button></span>
+</div>
+
+<script>
+  const slides = [...document.querySelectorAll('.slide')];
+  let i = 0;
+  const bar = document.getElementById('bar'), cur = document.getElementById('cur');
+  function show(n) {
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach((s, k) => s.classList.toggle('active', k === i));
+    bar.style.width = ((i + 1) / slides.length * 100) + '%';
+    cur.textContent = String(i + 1).padStart(2, '0');
+  }
+  function next() { show(i + 1); } function prev() { show(i - 1); }
+  document.getElementById('next').onclick = next;
+  document.getElementById('prev').onclick = prev;
+  document.getElementById('fs').onclick = () => {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+    else document.exitFullscreen?.();
+  };
+  document.addEventListener('keydown', e => {
+    if (['ArrowRight', 'PageDown', ' '].includes(e.key)) { e.preventDefault(); next(); }
+    else if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); prev(); }
+    else if (e.key === 'Home') show(0);
+    else if (e.key === 'End') show(slides.length - 1);
+    else if (e.key.toLowerCase() === 'f') document.getElementById('fs').click();
+  });
+  show(0);
+</script>
+</body>
+</html>

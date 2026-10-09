@@ -1,7 +1,7 @@
 {
-  "name": "东盟跨境物流气象导航",
-  "short_name": "跨境物流导航",
-  "description": "中越跨境公路物流气象导航平台 · 智能绕行 + AI 预警",
+  "name": "面向东盟跨境物流的突发气象预警与多路线协同调度平台",
+  "short_name": "跨境气象调度",
+  "description": "突发气象预警 · 多路线协同调度 · 大屏与司机端联动",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0f3460",

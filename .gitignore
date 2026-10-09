@@ -5,6 +5,10 @@
 .env.local
 .env.*.local
 
+# ---------- 离线演示包（交付产物，含内嵌 JRE + 3 万张瓦片，绝不能入库） ----------
+/asean-demo/
+/package-test/
+
 # ---------- IDE ----------
 .idea/
 *.iml

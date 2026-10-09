@@ -3,7 +3,7 @@ package com.example.aseanweatherlogistics.service;
 import com.example.aseanweatherlogistics.model.entity.RoadNode;
 import java.util.List;
 
-/**
+/**npmnpm
  * 气象数据源统一抽象（支持运行时切换）：
  * <ul>
  *   <li>{@code contest-observation} 比赛官方 CRA40 实况接口</li>

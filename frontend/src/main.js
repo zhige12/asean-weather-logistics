@@ -1,7 +1,14 @@
 import { createApp } from "vue";
 import axios from "axios";
+// Leaflet 销毁/缩放竞态守卫：必须在任何地图组件实例化之前打补丁（monkeypatch 原型），
+// 放在入口顶层而非 MapView.vue 内，避免模块图加载顺序变化时守卫晚于首张地图。
+import "./utils/leafletCanvasGuard.js";
+// 轻界面模式：必须在挂载前决定初始状态，否则首帧仍会按满特效绘制（见 utils/perfMode.js）
+import { initPerfMode } from "./utils/perfMode.js";
 import App from "./App.vue";
 import "leaflet/dist/leaflet.css";
+
+initPerfMode();
 
 // Capacitor 本地服务器有 SPA fallback 行为：请求 /api/* 等不存在的路径
 // 会返回 index.html (200 OK) 而不是 404。axios 拦截器检测到 HTML

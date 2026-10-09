@@ -36,8 +36,11 @@ public class TouchAgent {
         this.deepseekService = deepseekService;
     }
 
-    /** 触达预览结果。 */
-    public record TouchResult(Map<String, Object> preview, boolean aiPowered) {
+    /**
+     * 触达预览结果。aiChannel 为各角色指令的真实生成通道；
+     * 只要有一个角色用了模型润色就算命中，全部回退模板时为 null。
+     */
+    public record TouchResult(Map<String, Object> preview, boolean aiPowered, String aiChannel) {
     }
 
     public TouchResult generate(SolutionAgent.SolutionResult solution) {
@@ -46,11 +49,12 @@ public class TouchAgent {
 
         // 2. 大模型按角色润色（升级方案 §3.3）
         boolean aiPowered = false;
+        String aiChannel = null;
         try {
-            String output = deepseekService.chat(
+            DeepseekService.AiReply reply = deepseekService.chatWithChannel(
                     "你是多角色预警触达专家。只输出 JSON，不要输出任何其他文字。",
                     buildPrompt(solution, targets), 700);
-            JsonNode parsed = AgentJson.extractObject(output);
+            JsonNode parsed = AgentJson.extractObject(reply.text());
             if (parsed != null) {
                 for (Map<String, Object> t : targets) {
                     String role = String.valueOf(t.get("role"));
@@ -59,6 +63,7 @@ public class TouchAgent {
                         t.put("instruction", polished);
                         t.put("aiPolished", true);
                         aiPowered = true;
+                        aiChannel = reply.tag();
                     }
                 }
             }
@@ -70,7 +75,7 @@ public class TouchAgent {
         preview.put("targets", targets);
         preview.put("count", targets.size());
         preview.put("note", "触达对象可在开放平台配置器中勾选调整");
-        return new TouchResult(preview, aiPowered);
+        return new TouchResult(preview, aiPowered, aiChannel);
     }
 
     private List<Map<String, Object>> templateTargets(SolutionAgent.SolutionResult solution) {

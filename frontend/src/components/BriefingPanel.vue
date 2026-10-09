@@ -2,10 +2,10 @@
   <div class="briefing-panel">
     <div class="briefing-header">
       <button class="btn primary" @click="generateBriefing" :disabled="generating">
-        {{ generating ? '生成中…' : '📋 一键生成任务简报' }}
+        {{ generating ? '生成中…' : '一键生成任务简报' }}
       </button>
-      <button v-if="briefingText" class="btn outline" @click="copyBriefing">📋 复制</button>
-      <button v-if="briefingText" class="btn outline" @click="downloadBriefing">⬇ 下载</button>
+      <button v-if="briefingText" class="btn outline" @click="copyBriefing">复制</button>
+      <button v-if="briefingText" class="btn outline" @click="downloadBriefing">下载</button>
     </div>
 
     <div v-if="errorMsg" class="briefing-error">{{ errorMsg }}</div>

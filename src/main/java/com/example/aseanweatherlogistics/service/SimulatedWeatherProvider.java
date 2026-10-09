@@ -21,7 +21,7 @@ public class SimulatedWeatherProvider implements WeatherProvider {
 
     @Override
     public String label() {
-        return "离线模拟数据（不联网）";
+        return "离线模拟";
     }
 
     @Override
@@ -45,9 +45,10 @@ public class SimulatedWeatherProvider implements WeatherProvider {
             double precipitation = (h % 100) < 15 ? (h % 30) / 10.0 : 0.0;
             double windKph = 6 + (h / 13) % 18;
             double visibility = precipitation > 0 ? 6000 + (h % 20) * 100 : 9000 + (h % 30) * 100;
+            // 离线模拟不构造台风场景，气压固定标准海压（不触发低气压判据）
             out.add(new RealWeatherService.WeatherPoint(
                     node.getId(), node.getLatitude(), node.getLongitude(),
-                    temp, humidity, precipitation, windKph, visibility, fetchedAt
+                    temp, humidity, precipitation, windKph, visibility, 1013.0, fetchedAt
             ));
         }
         return out;

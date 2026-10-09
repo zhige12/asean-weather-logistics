@@ -95,7 +95,7 @@
         </div>
       </div>
 
-      <div v-if="savedTip" class="saved-tip">✅ 配置已应用，沙盘与方案对比已联动更新</div>
+      <div v-if="savedTip" class="saved-tip">配置已应用，沙盘与方案对比已联动更新</div>
     </div>
     <div v-else class="muted">加载中…</div>
   </section>
