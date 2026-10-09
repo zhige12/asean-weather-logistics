@@ -3674,7 +3674,7 @@ export default {
       // withAi=false：本方法不消费 aiWarning，而 AI 文案要秒级生成，
       // 它同时挂在 15 秒轮询和灾害触发的重取路径上，开着会让路线更新明显滞后。
       const plan = await axios.get('/api/route/plan-with-weather', {
-        params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, cargoType: 'cold', choice: this.selectedKey, withAi: false },
+        params: { originId: this._navOriginId(), destinationId: this.resolvedDestinationId, cargoType: 'cold', choice: this.selectedKey, withAi: false },
         timeout: 30000
       })
       const resp = plan.data.route || plan.data
@@ -4585,6 +4585,20 @@ export default {
       }
       return Math.min(0.95, Math.max(0.05, minIdx / Math.max(1, coords.length - 1)))
     },
+    /**
+     * 导航中且已有“当前位置”标记时，返回车辆当前所在的路网节点作为算路起点，
+     * 让绕行/重算从当前位置起画，而不是从行程起点重画整条线（A 方案）。
+     * 非导航 / 无定位 / 无路径节点时，回退行程起点 resolvedOriginId。
+     */
+    _navOriginId() {
+      if (!this.navigating) return this.resolvedOriginId
+      const pos = this._meMarker ? this._meMarker.getLatLng() : null
+      const nodes = this.route && this.route.pathNodeIds
+      if (!pos || !nodes || nodes.length < 2) return this.resolvedOriginId
+      const ratio = this._computeProgressRatio(pos.lat, pos.lng)
+      const idx = Math.min(nodes.length - 2, Math.max(0, Math.round(ratio * (nodes.length - 1))))
+      return nodes[idx] || this.resolvedOriginId
+    },
     fmtYuan(v) {
       return Number(v || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })
     },
@@ -5482,7 +5496,7 @@ export default {
       this.rerouteLoading = true
       try {
         const r = await axios.get('/api/route/candidates', {
-          params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, cargoType: 'cold' },
+          params: { originId: this._navOriginId(), destinationId: this.resolvedDestinationId, cargoType: 'cold' },
           timeout: 30000
         })
         const list = r.data.candidates || []
