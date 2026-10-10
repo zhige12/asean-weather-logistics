@@ -52,7 +52,7 @@
     </div>
 
     <!-- 快速模拟灾害注入：点一下即把该灾害写进路网触发熔断/重算，无需慢慢拖参数 -->
-    <div class="quick-inject">
+    <div v-if="pushed" class="quick-inject">
       <button class="btn quick-toggle" :class="{ open: quickOpen }" @click="quickOpen = !quickOpen">
         快速模拟灾害注入
         <span class="quick-count" v-if="activeScenarios.length">已注入 {{ activeScenarios.length }}</span>
@@ -788,9 +788,11 @@ defineExpose({ refresh });
   margin: 8px 0 10px;
 }
 .quick-toggle {
+  position: relative;
   width: 100%;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   font-weight: 600;
   background: linear-gradient(135deg, rgba(225, 29, 72, 0.08), rgba(244, 63, 94, 0.06));
@@ -801,7 +803,6 @@ defineExpose({ refresh });
   border-color: rgba(225, 29, 72, 0.55);
 }
 .quick-count {
-  margin-left: auto;
   font-size: 11px;
   font-weight: 600;
   padding: 1px 8px;
@@ -809,7 +810,12 @@ defineExpose({ refresh });
   background: rgba(225, 29, 72, 0.14);
   color: #be123c;
 }
+/* 展开三角钉在按钮最右边，文案居中不受它影响 */
 .quick-caret {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
   font-size: 11px;
   color: #be123c;
 }
