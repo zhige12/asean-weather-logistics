@@ -23,16 +23,22 @@
         <section class="card">
           <h3>跨境路径规划</h3>
           <div class="coords">
-            <label>起点
-              <select v-model="draftOriginId">
-                <option v-for="n in nodeOptions" :key="n.id" :value="n.id">{{ n.name }}</option>
-              </select>
-            </label>
-            <label>终点
-              <select v-model="draftDestinationId">
-                <option v-for="n in nodeOptions" :key="n.id" :value="n.id">{{ n.name }}</option>
-              </select>
-            </label>
+            <!-- 自由输入 + 关键字联想（本地地名库→天地图 POI），选中即吸附路网节点；
+                 与地图选点共用同一套草稿起终点 -->
+            <PlaceInput
+              label="起点"
+              placeholder="输入起点地名，如 南宁 / 青秀"
+              v-model="draftOriginId"
+              v-model:name="originName"
+              ref="originInput"
+            />
+            <PlaceInput
+              label="终点"
+              placeholder="输入终点地名，如 河内 / 还剑湖"
+              v-model="draftDestinationId"
+              v-model:name="destinationName"
+              ref="destInput"
+            />
             <div class="row">
               <button class="btn primary" @click="confirmSelection">确认选择并规划</button>
               <button class="btn outline" @click="clearRoute">清空</button>
@@ -45,9 +51,6 @@
             </div>
           </div>
         </section>
-
-        <!-- 地名输入规划（高德式）：地理编码 → 路网吸附 → 同一条 Dijkstra+熔断主链路 -->
-        <RoutePlanner @planned="applyPlannedRoute" />
 
         <!-- 第四幕：公司派单（司机端收到后自动切物流任务模式） -->
         <TaskDispatchPanel ref="taskPanelRef" :task-status="taskStatus" @refresh="refreshTask" @analyze="onPreDispatchAnalysis" />
@@ -363,7 +366,7 @@ import TributaryPanel from './components/TributaryPanel.vue';
 import PlatformConfigurator from './components/PlatformConfigurator.vue';
 import GrowthPath from './components/GrowthPath.vue';
 import DecisionLogTimeline from './components/DecisionLogTimeline.vue';
-import RoutePlanner from './components/RoutePlanner.vue';
+import PlaceInput from './components/PlaceInput.vue';
 import { isLite, isAutoLite, onLiteChange, toggleLite } from './utils/perfMode.js';
 
 // 左侧面板拖拽缩放边界：1=默认 360px；上限约 2.2 倍（≈790px，投影仪/后排也能看清）
@@ -391,7 +394,7 @@ export default {
   components: {
     MapView, RiskStrip, ETAIndicator, BriefingPanel, CarbonCalc,
     DecisionSandbox, TaskDispatchPanel, AgentPanel, OutreachPanel, TributaryPanel,
-    PlatformConfigurator, GrowthPath, DecisionLogTimeline, RoutePlanner
+    PlatformConfigurator, GrowthPath, DecisionLogTimeline, PlaceInput
   },
   data() {
     return {
@@ -410,6 +413,9 @@ export default {
       destinationId: 'HN',
       draftOriginId: 'NN',
       draftDestinationId: 'HN',
+      // 输入框显示名（PlaceInput v-model:name 双绑）：与草稿节点 id 同步更新
+      originName: '南宁',
+      destinationName: '河内',
       selectedEdgeId: null,
       bilingualWarning: '',
       bilingualLoading: false,
@@ -487,12 +493,6 @@ export default {
         return { zoom: this.panelZoom };
       }
       return { width: Math.round(PANEL_BASE_WIDTH * this.panelZoom) + 'px', flex: '0 0 auto' };
-    },
-    nodeOptions() {
-      if (!this.network || !this.network.nodes) return [];
-      // 真实路网含大量无名的 OSM 中间节点，下拉只展示有名字的城市/口岸节点
-      const named = this.network.nodes.filter(n => n.name && n.name.trim());
-      return named.length ? named : this.network.nodes;
     },
     // 天气面板只展示有名字的节点，避免几千个格子卡死
     visibleWeather() {
@@ -957,8 +957,15 @@ export default {
         console.warn('陆水联运走廊拉取失败', e);
       }
     },
-    // 确认下拉选择的起终点：提交草稿并触发规划，同时注册关注（风险时该路线会被重算推送）
-    confirmSelection() {
+    // 确认输入/选点得到的起终点：用户只打字没选候选时兜底在线解析+吸附，
+    // 然后提交草稿并触发规划，同时注册关注（风险时该路线会被重算推送）
+    async confirmSelection() {
+      const o = await this.$refs.originInput.ensure();
+      if (!o.ok) { alert(o.msg); return; }
+      const d = await this.$refs.destInput.ensure();
+      if (!d.ok) { alert(d.msg); return; }
+      this.originName = o.name;
+      this.destinationName = d.name;
       this.originId = this.draftOriginId;
       this.destinationId = this.draftDestinationId;
       if (this.originId === this.destinationId) {
@@ -967,22 +974,6 @@ export default {
       }
       this.watchRoute(this.originId, this.destinationId);
       this.planCrossBorder();
-    },
-    /**
-     * 地名规划（RoutePlanner）结果接入主绘制链：
-     * 后端 /api/route/plan 坐标模式返回的就是 RouteResponse 全字段（顶层平铺），
-     * 包成 {route} 复用 applyRouteResult（绿/红分段、基准线、ETA/碳排面板全联动），
-     * 同步起终点选中态与候选列表，行为与下拉选点规划完全一致。
-     */
-    applyPlannedRoute(p) {
-      if (!p || !p.pathCoords || p.pathCoords.length < 2) return;
-      this.originId = p.originId || this.originId;
-      this.destinationId = p.destinationId || this.destinationId;
-      this.draftOriginId = this.originId;
-      this.draftDestinationId = this.destinationId;
-      this.applyRouteResult({ route: p, risks: this.risks });
-      this.watchRoute(this.originId, this.destinationId);
-      this.loadCandidates();
     },
     /** 注册关注某条路线：风险注入后，该路线会随其它关注路线一起被 AI 重算并推送 */
     watchRoute(originId, destinationId) {
@@ -1357,11 +1348,13 @@ export default {
         this.pickOriginNode = n;
         this.originId = n.id;
         this.draftOriginId = n.id;
+        this.originName = n.name || n.id;
         return;
       }
       this.pickDestinationNode = n;
       this.destinationId = n.id;
       this.draftDestinationId = n.id;
+      this.destinationName = n.name || n.id;
       if (this.pickOriginNode.id === n.id) {
         alert('起终点不能是同一节点，请重新点击终点');
         this.pickDestinationNode = null;

@@ -18,9 +18,11 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,6 +52,12 @@ public class GeocodeService {
     public static final double SNAP_MAX_KM = 5.0;
 
     private static final String GEOCODER_URL = "http://api.tianditu.gov.cn/geocoder?ds=%s&tk=%s";
+
+    /** 天地图 POI 关键字检索（多候选）：输入联想用，mapBound 把搜索偏置到服务走廊。
+     * 注意 mapBound 只是偏置不是硬限制（全国同名点会混入），候选另按同一范围二次过滤。 */
+    private static final String SEARCH_URL = "https://api.tianditu.gov.cn/v2/search?postStr=%s&type=keyword&tk=%s";
+    private static final String SEARCH_MAP_BOUND = "104.0,8.5,110.0,24.5";
+    private static final double[] SEARCH_BOUND = {8.5, 24.5, 104.0, 110.0}; // latMin,latMax,lonMin,lonMax
 
     /**
      * 服务覆盖走廊大致经纬度范围（广西—越南北部 + 平陆运河沿线）：
@@ -94,6 +102,9 @@ public class GeocodeService {
 
     /** 在线结果缓存：name → 坐标+来源，避免重复花配额/重复外调 */
     private final Map<String, GeoHit> onlineCache = new ConcurrentHashMap<>();
+
+    /** 输入联想结果缓存：q → 候选列表（同词重复输入不重复花配额） */
+    private final Map<String, List<Map<String, Object>>> suggestCache = new ConcurrentHashMap<>();
 
     public GeocodeService(RouteService routeService,
                           @Value("${tianditu.keys:}") String keyPool,
@@ -160,6 +171,116 @@ public class GeocodeService {
             m.put("lng", p.lng);
             m.put("tag", p.tag);
             out.add(m);
+        }
+        return out;
+    }
+
+    /**
+     * 输入联想（导航软件式）：关键字 → 多候选 {name, lat, lng, tag, source}。
+     * 本地库前缀命中优先、包含命中其次（零配额）；不足 6 条且关键字≥ 2 字时
+     * 才调天地图 POI 检索补齐（结果进缓存，失败静默降级为仅本地）。
+     */
+    public List<Map<String, Object>> suggest(String q) {
+        if (q == null || q.isBlank()) return List.of();
+        String t = q.trim();
+        List<Map<String, Object>> out = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        String nt = stripSuffix(t);
+        List<Place> prefixHits = new ArrayList<>();
+        List<Place> containHits = new ArrayList<>();
+        for (Place p : places) {
+            if (p.name == null) continue;
+            if (p.name.startsWith(t) || stripSuffix(p.name).startsWith(nt)) {
+                prefixHits.add(p);
+            } else if (p.name.contains(t) || t.contains(p.name)) {
+                containHits.add(p);
+            }
+        }
+        for (Place p : prefixHits) addSuggest(out, seen, p.name, p.lat, p.lng, p.tag, "local");
+        for (Place p : containHits) addSuggest(out, seen, p.name, p.lat, p.lng, p.tag, "local");
+        if (out.size() < 6 && t.length() >= 2) {
+            suggestOnline(t, out, seen, 8);
+        }
+        return out.size() > 8 ? new ArrayList<>(out.subList(0, 8)) : out;
+    }
+
+    private void addSuggest(List<Map<String, Object>> out, Set<String> seen,
+                            String name, double lat, double lng, String tag, String source) {
+        if (name == null || !seen.add(name)) return;
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("name", name);
+        m.put("lat", lat);
+        m.put("lng", lng);
+        m.put("tag", tag == null ? "" : tag);
+        m.put("source", source);
+        out.add(m);
+    }
+
+    /** 天地图 POI 检索补候选：同词命中缓存直接复用；失败/无结果静默返回。 */
+    private void suggestOnline(String q, List<Map<String, Object>> out, Set<String> seen, int cap) {
+        List<Map<String, Object>> cached = suggestCache.get(q);
+        if (cached == null) {
+            cached = searchTianditu(q);
+            if (suggestCache.size() > 400) suggestCache.clear();
+            suggestCache.put(q, cached);
+        }
+        for (Map<String, Object> m : cached) {
+            if (out.size() >= cap) return;
+            addSuggest(out, seen, (String) m.get("name"),
+                    (Double) m.get("lat"), (Double) m.get("lng"),
+                    (String) m.get("tag"), "tianditu");
+        }
+    }
+
+    /** 调天地图 v2/search 接口拿 POI 列表（密钥池轮转 + 合规 Referer，与地理编码同策略）。
+     * 返回顶层 pois 数组，每项 {name, address, lonlat:"lng,lat"}；全国同名结果靠走廊过滤剔除。 */
+    private List<Map<String, Object>> searchTianditu(String q) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (keys.isEmpty()) return out;
+        String ref = (tiandituReferer == null || tiandituReferer.isBlank())
+                ? "http://localhost/" : tiandituReferer;
+        for (int i = 0; i < keys.size(); i++) {
+            String key = nextKey();
+            String post = "{\"keyWord\":\"" + q.replace("\"", "") + "\",\"mapBound\":\"" + SEARCH_MAP_BOUND
+                    + "\",\"level\":10,\"queryType\":\"1\",\"start\":0,\"count\":10}";
+            try {
+                HttpRequest req = HttpRequest.newBuilder(URI.create(String.format(SEARCH_URL,
+                        URLEncoder.encode(post, StandardCharsets.UTF_8), key)))
+                        .timeout(Duration.ofSeconds(5))
+                        .header("Referer", ref)
+                        .header("User-Agent", tiandituUserAgent)
+                        .GET().build();
+                HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() != 200) continue;
+                JsonElement root = JsonParser.parseString(resp.body());
+                if (!root.isJsonObject()) continue;
+                JsonElement pois = root.getAsJsonObject().get("pois");
+                if (pois == null || !pois.isJsonArray()) continue;
+                for (JsonElement e : pois.getAsJsonArray()) {
+                    JsonObject poi = e.getAsJsonObject();
+                    String name = poi.has("name") ? poi.get("name").getAsString() : null;
+                    String lonlat = poi.has("lonlat") ? poi.get("lonlat").getAsString() : null;
+                    if (name == null || name.isBlank() || lonlat == null || !lonlat.contains(",")) continue;
+                    String[] ll = lonlat.split(",");
+                    double lng = Double.parseDouble(ll[0].trim());
+                    double lat = Double.parseDouble(ll[1].trim());
+                    // 双重过滤：先过搜索范围（剔除贵州/云南等窗外同名噪声），再过走廊兼容窗口
+                    if (lat < SEARCH_BOUND[0] || lat > SEARCH_BOUND[1]
+                            || lng < SEARCH_BOUND[2] || lng > SEARCH_BOUND[3]) continue;
+                    if (!isInCorridor(lat, lng)) continue;
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("name", name);
+                    m.put("lat", lat);
+                    m.put("lng", lng);
+                    // 地址做副标题：同名异地时用户能分辨（省市区前缀已含在 address 里）
+                    m.put("tag", poi.has("address") ? poi.get("address").getAsString() : "在线");
+                    out.add(m);
+                    if (out.size() >= 8) break;
+                }
+                return out;
+            } catch (Exception e) {
+                log.warn("天地图 POI 检索 {} 失败 key={}：{}", q, key, e.getMessage());
+            }
         }
         return out;
     }

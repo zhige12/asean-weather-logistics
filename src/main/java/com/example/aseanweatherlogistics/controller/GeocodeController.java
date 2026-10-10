@@ -39,6 +39,13 @@ public class GeocodeController {
         return Map.of("places", places, "total", places.size());
     }
 
+    /** 输入联想：关键字 → 多候选（本地地名库 + 天地图 POI 检索），导航软件式下拉 */
+    @GetMapping("/suggest")
+    public Map<String, Object> suggest(@RequestParam String q) {
+        List<Map<String, Object>> hits = geocodeService.suggest(q);
+        return Map.of("suggestions", hits, "total", hits.size());
+    }
+
     /**
      * 坐标 → 最近路网节点（吸附）。手机端把地名编码成坐标后调此接口拿到 nodeId，
      * 再复用司机端既有的按节点算路/候选/熔断/陆水联运流程。
