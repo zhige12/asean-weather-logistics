@@ -75,7 +75,7 @@
         </section>
 
         <!-- 第一/二幕：决策沙盘（官方推送熔断 + 滑块观察决策边界） -->
-        <DecisionSandbox ref="sandboxRef" @sandbox-change="onSandboxChange" />
+        <DecisionSandbox ref="sandboxRef" @sandbox-change="onSandboxChange" @quick-inject="onQuickInject" />
 
         <!-- 第三幕：多智能体协同决策分析（含第四幕确认下发入口） -->
         <AgentPanel
@@ -88,23 +88,6 @@
 
         <!-- 第五/六幕：多角色触达 + 分级叫应追踪 -->
         <OutreachPanel :status="outreachStatus" @refresh="refreshOutreach" />
-
-        <section class="card">
-          <h3>模拟灾害注入（熔断演示）</h3>
-          <div v-if="scenarios.length" class="scenario-list">
-            <div v-for="s in scenarios" :key="s.id" class="scenario-item">
-              <button class="btn scenario-btn" :class="{active: activeScenarios.includes(s.id)}"
-                      @click="toggleScenario(s.id)">
-                <span class="scenario-name">{{ s.name }}</span>
-                <span class="scenario-desc">{{ s.description }}</span>
-              </button>
-            </div>
-          </div>
-          <div v-else class="muted">加载中…</div>
-          <div class="row" style="margin-top:8px">
-            <button class="btn muted" @click="clearAllScenarios">清除全部风险</button>
-          </div>
-        </section>
 
         <section class="card">
           <h3>灾害时间线（实时）</h3>
@@ -423,8 +406,6 @@ export default {
       baselineEdgeSpans: [],
       network: null,
       risks: [],
-      scenarios: [],
-      activeScenarios: [],
       originId: 'NN',
       destinationId: 'HN',
       draftOriginId: 'NN',
@@ -673,21 +654,6 @@ export default {
         this.risks = r.data || [];
       } catch (e) {
         console.error(e);
-      }
-    },
-    async loadScenarios() {
-      try {
-        const r = await axios.get('/api/weather/scenarios');
-        this.scenarios = r.data || [];
-      } catch (e) {
-        // 离线模拟场景
-        this.scenarios = [
-          { id: 's1', name: '暴雨·友谊关', description: '北部山区暴雨，友谊关口岸通行缓慢' },
-          { id: 's2', name: '大雾·芒街', description: '沿海大雾，芒街口岸通行受阻' },
-          { id: 's3', name: '泥石流·越北', description: '越北山区泥石流，部分路段封闭' },
-          { id: 's4', name: '高温·冷链', description: '高温预警，冷链货车需加速通关' },
-          { id: 's5', name: '台风·广宁', description: '台风逼近广宁省，注意路段安全' }
-        ];
       }
     },
     async loadCustoms() {
@@ -1415,41 +1381,24 @@ export default {
       this.pickOriginNode = null;
       this.pickDestinationNode = null;
     },
-    async toggleScenario(scenarioId) {
-      try {
-        if (this.activeScenarios.includes(scenarioId)) {
-          await axios.delete(`/api/weather/scenario/${scenarioId}`);
-          this.activeScenarios = this.activeScenarios.filter(id => id !== scenarioId);
-          this.pushTimeline('清除灾害场景', `场景 ${scenarioId} 已清除，等待路线重算`, 'ok');
-        } else {
-          await axios.post(`/api/weather/scenario/${scenarioId}`);
-          this.activeScenarios.push(scenarioId);
-          this.pushTimeline('注入灾害场景', `场景 ${scenarioId} 已注入，正在触发路线重算`, 'warn');
-        }
-        // 风险已变化：通知 AI 决策面板，旧推荐立即失效并自动重算新方案（水路/公路）
-        if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.notifyRiskChanged();
-        await this.refreshRisks();
-        if (this.routeResult && this.routeResult.route) {
-          await this.planCrossBorder();
-        }
-      } catch (e) {
-        console.error(e);
-        alert('场景操作失败');
-      }
-    },
-    async clearAllScenarios() {
-      try {
-        await axios.delete('/api/weather/risk');
-        this.activeScenarios = [];
-        // 风险已清除：通知 AI 决策面板重算
-        if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.notifyRiskChanged();
-        await this.refreshRisks();
+    /**
+     * 沙盘「快速模拟灾害注入」回调：注入/撤销已在子组件完成，
+     * 此处只做跨面板副作用：AI 面板旧方案失效重算、刷新风险列表、重规路线、写时间线。
+     */
+    async onQuickInject(payload) {
+      if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.notifyRiskChanged();
+      await this.refreshRisks();
+      if (payload && payload.clearAll) {
         this.pushTimeline('清除全部风险', '已清空所有灾害注入，路线恢复常态评估', 'ok');
-        if (this.routeResult && this.routeResult.route) {
-          await this.planCrossBorder();
-        }
-      } catch (e) {
-        console.error(e);
+      } else if (payload) {
+        this.pushTimeline(
+          payload.active ? '注入灾害场景' : '清除灾害场景',
+          `${payload.name} ${payload.active ? '已注入，正在触发路线重算' : '已清除'}`,
+          payload.active ? 'warn' : 'ok'
+        );
+      }
+      if (this.routeResult && this.routeResult.route) {
+        await this.planCrossBorder();
       }
     },
     async buildBilingual() {
@@ -1558,7 +1507,6 @@ export default {
     this.getStatus();
     this.loadNetwork();
     this.refreshRisks();
-    this.loadScenarios();
     this.loadCustoms();
     // 先拿“选了哪个源”，再拉数据：反过来会让拉数据回包临时顶掉下拉框
     this.loadWeatherSource();
@@ -1801,8 +1749,8 @@ export default {
 .btn:active { transform:scale(.97); }
 .btn.primary { background:linear-gradient(135deg, #4f6df5, #22b8cf); box-shadow:0 4px 18px rgba(79,109,245,0.35); }
 .btn.primary:hover { box-shadow:0 6px 24px rgba(79,109,245,0.45); }
-.btn:not(.primary):not(.outline):not(.muted):not(.tiny):not(.scenario-btn):not(.pick-on) { background:#eef1f8; border:1px solid #dbe3f2; color:#33415c; }
-.btn:hover:not(.primary):not(.outline):not(.muted):not(.tiny):not(.scenario-btn):not(.pick-on) { background:#e4eaf6; }
+.btn:not(.primary):not(.outline):not(.muted):not(.tiny):not(.pick-on) { background:#eef1f8; border:1px solid #dbe3f2; color:#33415c; }
+.btn:hover:not(.primary):not(.outline):not(.muted):not(.tiny):not(.pick-on) { background:#e4eaf6; }
 .btn.small { padding:6px 10px; font-size:11px; }
 .btn.muted { background:#eef1f8; color:#8b99b5; }
 .btn.outline { background:transparent; color:#0e9bb0; border:1px solid rgba(14,155,176,0.4); }
@@ -1810,19 +1758,6 @@ export default {
 .btn.outline-light { background:rgba(255,255,255,0.25); color:#fff; border:1px solid rgba(255,255,255,.5); }
 .btn.pick-on { background:linear-gradient(135deg, #16a34a, #34d399); box-shadow:0 0 18px rgba(22,163,74,0.35); animation:pulse-green 2s infinite; }
 @keyframes pulse-green { 0%,100%{box-shadow:0 0 8px rgba(22,163,74,0.18)} 50%{box-shadow:0 0 22px rgba(22,163,74,0.45)} }
-
-/* Scenario buttons */
-.btn.scenario-btn {
-  width:100%; text-align:left;
-  background:#f6f8fd; color:#5b6b85;
-  border:1px solid #e2e8f5; display:block;
-}
-.btn.scenario-btn:hover { border-color:rgba(217,119,6,0.45); }
-.btn.scenario-btn.active { background:linear-gradient(135deg, #e11d48, #f43f5e); color:#fff; border-color:#e11d48; box-shadow:0 4px 18px rgba(225,29,72,0.35); }
-.scenario-item { margin-top:6px; }
-.scenario-name { font-weight:600; }
-.scenario-desc { display:block; font-size:11px; color:#8b99b5; margin-top:2px; }
-.btn.scenario-btn.active .scenario-desc { color:rgba(255,255,255,0.85); }
 
 .muted { color:#8b99b5; font-size:12px; }
 

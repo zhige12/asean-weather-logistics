@@ -51,6 +51,39 @@
       GOWFS 预报通道未启用（需配置 weather.real.base-url / token）
     </div>
 
+    <!-- 快速模拟灾害注入：点一下即把该灾害写进路网触发熔断/重算，无需慢慢拖参数 -->
+    <div class="quick-inject">
+      <button class="btn quick-toggle" :class="{ open: quickOpen }" @click="quickOpen = !quickOpen">
+        快速模拟灾害注入
+        <span class="quick-count" v-if="activeScenarios.length">已注入 {{ activeScenarios.length }}</span>
+        <span class="quick-caret">{{ quickOpen ? '▲' : '▼' }}</span>
+      </button>
+      <div v-if="quickOpen" class="quick-body">
+        <div class="muted quick-tip">
+          点击卡片直接注入对应灾害（等效于把参数拉过阈值），立即触发熔断与智能体重算；再点一次撤销。
+        </div>
+        <div v-if="scenarios.length" class="scenario-list">
+          <button
+            v-for="s in scenarios"
+            :key="s.id"
+            class="btn scenario-btn"
+            :class="{ active: activeScenarios.includes(s.id) }"
+            :disabled="quickBusy"
+            @click="toggleScenario(s)"
+          >
+            <span class="scenario-name">{{ s.name }}</span>
+            <span class="scenario-desc">{{ s.description }}</span>
+          </button>
+        </div>
+        <div v-else class="muted">加载中…</div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn muted" :disabled="quickBusy || !activeScenarios.length" @click="clearAllScenarios">
+            清除全部风险
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div v-if="pushed" class="section-list">
       <div v-for="s in sections" :key="s.id" class="section-item" :class="'st-' + s.status">
         <div class="section-head">
@@ -300,7 +333,7 @@
 import { computed, onMounted, ref } from "vue";
 import axios from "axios";
 
-const emit = defineEmits(["sandbox-change"]);
+const emit = defineEmits(["sandbox-change", "quick-inject"]);
 
 const state = ref({ pushed: false, fuseThresholdMm: 80, riskProfile: "CONSERVATIVE", sections: [] });
 
@@ -676,7 +709,71 @@ function applyState(data) {
   emit("sandbox-change", data);
 }
 
-onMounted(refresh);
+// ===== 快速模拟灾害注入（把 App 原独立面板内聚进沙盘，点卡片直接注入/撤销）=====
+const scenarios = ref([]);
+const activeScenarios = ref([]);
+const quickOpen = ref(false);
+const quickBusy = ref(false);
+
+/** 拉取预置灾害场景；后端不可用时退回到与 WeatherSimulator 同构的本地清单 */
+async function loadScenarios() {
+  try {
+    const { data } = await axios.get("/api/weather/scenarios");
+    scenarios.value = data || [];
+  } catch (e) {
+    scenarios.value = [
+      { id: "RAIN_YGG", name: "暴雨·友谊关", description: "12h 降雨量 >80mm，友谊关口岸路段，等效道路中断" },
+      { id: "FOG_MC", name: "大雾·芒街", description: "能见度 <50m，芒街口岸通关受阻" },
+      { id: "LANDSLIDE", name: "泥石流·越北山区", description: "谅山—北江段山地次生灾害，泥石流风险>0.7，直接切断" },
+      { id: "HEAT", name: "高温·冷链", description: "北江—河内段 >35°C，冷链货损风险上升" },
+      { id: "TYPHOON", name: "台风·广宁沿海", description: "下龙—海阳沿海段台风，阵风12级，谨慎通行" },
+    ];
+  }
+}
+
+/** 切换某灾害场景：未注入则 POST 注入、已注入则 DELETE 撤销，随后刷新沙盘并通知父组件重算 */
+async function toggleScenario(s) {
+  if (quickBusy.value) return;
+  quickBusy.value = true;
+  const wasActive = activeScenarios.value.includes(s.id);
+  try {
+    if (wasActive) {
+      await axios.delete(`/api/weather/scenario/${s.id}`);
+      activeScenarios.value = activeScenarios.value.filter((id) => id !== s.id);
+    } else {
+      await axios.post(`/api/weather/scenario/${s.id}`);
+      activeScenarios.value = [...activeScenarios.value, s.id];
+    }
+    await refresh();
+    emit("quick-inject", { id: s.id, name: s.name, active: !wasActive });
+  } catch (e) {
+    console.error("quick inject failed", e);
+    alert("场景操作失败");
+  } finally {
+    quickBusy.value = false;
+  }
+}
+
+/** 清除全部已注入风险 */
+async function clearAllScenarios() {
+  if (quickBusy.value) return;
+  quickBusy.value = true;
+  try {
+    await axios.delete("/api/weather/risk");
+    activeScenarios.value = [];
+    await refresh();
+    emit("quick-inject", { clearAll: true });
+  } catch (e) {
+    console.error("clear inject failed", e);
+  } finally {
+    quickBusy.value = false;
+  }
+}
+
+onMounted(() => {
+  refresh();
+  loadScenarios();
+});
 
 // 供父组件调用：外部（配置器改阈值）触发后刷新沙盘
 defineExpose({ refresh });
@@ -685,6 +782,85 @@ defineExpose({ refresh });
 <style scoped>
 .sandbox-card {
   border: 1px solid rgba(22, 163, 74, 0.35);
+}
+/* 快速模拟灾害注入：沙盘内的可折叠快捷入口 */
+.quick-inject {
+  margin: 8px 0 10px;
+}
+.quick-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  background: linear-gradient(135deg, rgba(225, 29, 72, 0.08), rgba(244, 63, 94, 0.06));
+  border: 1px solid rgba(225, 29, 72, 0.35);
+  color: #be123c;
+}
+.quick-toggle.open {
+  border-color: rgba(225, 29, 72, 0.55);
+}
+.quick-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: rgba(225, 29, 72, 0.14);
+  color: #be123c;
+}
+.quick-caret {
+  font-size: 11px;
+  color: #be123c;
+}
+.quick-body {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid rgba(30, 50, 90, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.5);
+}
+.quick-tip {
+  font-size: 11px;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+.scenario-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.btn.scenario-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: #fff;
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  color: #7c4a03;
+  border-radius: 9px;
+  padding: 8px 10px;
+  line-height: 1.4;
+}
+.btn.scenario-btn:hover {
+  border-color: rgba(217, 119, 6, 0.6);
+}
+.btn.scenario-btn.active {
+  background: linear-gradient(135deg, #e11d48, #f43f5e);
+  color: #fff;
+  border-color: #e11d48;
+  box-shadow: 0 4px 18px rgba(225, 29, 72, 0.35);
+}
+.scenario-name {
+  font-weight: 600;
+}
+.scenario-desc {
+  display: block;
+  font-size: 11px;
+  color: #8b99b5;
+  margin-top: 2px;
+}
+.btn.scenario-btn.active .scenario-desc {
+  color: rgba(255, 255, 255, 0.85);
 }
 .data-source {
   font-size: 11px;
