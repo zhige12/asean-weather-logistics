@@ -51,8 +51,9 @@
       GOWFS 预报通道未启用（需配置 weather.real.base-url / token）
     </div>
 
-    <!-- 快速模拟灾害注入：点一下即把该灾害写进路网触发熔断/重算，无需慢慢拖参数 -->
-    <div v-if="pushed" class="quick-inject">
+    <!-- 快速模拟灾害注入：点一下即把该灾害写进路网触发熔断/重算，无需慢慢拖参数。
+         入口只在点过「模拟」进入模拟模式后才出现：注入本质是模拟行为，真实数据模式下不给入口 -->
+    <div v-if="isSimMode" class="quick-inject">
       <button class="btn quick-toggle" :class="{ open: quickOpen }" @click="quickOpen = !quickOpen">
         快速模拟灾害注入
         <span class="quick-count" v-if="activeScenarios.length">已注入 {{ activeScenarios.length }}</span>
