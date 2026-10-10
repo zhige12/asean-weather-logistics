@@ -3172,15 +3172,20 @@ export default {
     _navMaxZoom() {
       return this.map ? this.map.getMaxZoom() : this.navZoom
     },
-    /** 进入导航视角：自动放大到车辆当前位置（对齐高德/百度「点开始导航即放大跟随」）*/
+    /** 导航视角：开场落到路线起点；导航中点「回到当前位置」回到车标 */
     zoomToNav() {
       if (!this.map) return
-      // 开场视角以**路线起点**为准（模拟行驶也正是从起点出发），
-      // 不再优先取 _meMarker：它可能已被真实定位带偏 —— 开了代理时浏览器定位基于出口 IP，
+      // 开场视角以**路线起点**为准（模拟行驶也正是从起点出发）：开场不取 _meMarker，
+      // 它可能已被真实定位带偏 —— 开了代理时浏览器定位基于出口 IP，
       // 会报到国外（实测报到日本），于是开场就把地图拽走。
-      // 取路线起点后，场面先落在路线头上，随后再由 _followVehicle 跟随车辆前进。
+      // 但**导航进行中**（_navZoomReady 后用户拖图再点「回到当前位置」）必须回到车标：
+      // 模拟行驶在跑时车标以路线为准（GPS 不再动车），不存在代理问题；
+      // 若仍取 pathCoords[0]，一旦路线被绕行/调度替换过，首点已是新起点节点，
+      // 视角就会「一下子跳到芒街」而不是回到车的位置。
+      const veh = (this._navZoomReady && this._meMarker && this._meMarker._map === this.map)
+        ? this._meMarker.getLatLng() : null
       const c = (this.route.pathCoords && this.route.pathCoords[0]) || null
-      const p = c ? L.latLng(c[0], c[1]) : (this._meMarker ? this._meMarker.getLatLng() : null)
+      const p = veh || (c ? L.latLng(c[0], c[1]) : (this._meMarker ? this._meMarker.getLatLng() : null))
       if (p) {
         this.navFollowing = true
         this.navOffView = false
@@ -4571,19 +4576,32 @@ export default {
       this.showPush(detour.rerouted ? 'warn' : 'info', '局部绕行避灾',
         `⚠ 前方灾害，已从当前位置局部绕行${delayInfo}（${ts}）`)
     },
-    /** 根据 GPS 位置计算在路线上的进度比例 (0~1) */
+    /** 根据 GPS 位置计算在路线上的进度比例 (0~1)，按里程而非点数 */
     _computeProgressRatio(lat, lng) {
-      if (!this.route || !this.route.pathCoords || !this.route.pathCoords.length) return 0.3
-      const coords = this.route.pathCoords
+      const coords = this.route && this.route.pathCoords
+      if (!coords || coords.length < 2) return 0.3
+      // pathCoords 是 [lat,lng] 数组（后端 List<double[]>）。老实现按 c.lat/c.lon 对象读，
+      // 所有点都被 continue 跳过、minIdx 恒为 0，进度永远钉在下限 ——
+      // 在途重算/绕行的起点节点因此一直按行程起点附近算，和车真实位置脱钩。
       let minDist = Infinity
       let minIdx = 0
       for (let i = 0; i < coords.length; i++) {
         const c = coords[i]
-        if (!c || c.lat == null || c.lon == null) continue
-        const d = Math.hypot(c.lat - lat, c.lon - lng)
+        if (!c || c.length < 2) continue
+        const d = Math.hypot(c[0] - lat, c[1] - lng)
         if (d < minDist) { minDist = d; minIdx = i }
       }
-      return Math.min(0.95, Math.max(0.05, minIdx / Math.max(1, coords.length - 1)))
+      // 比例按累计里程换算：点密度不均（城市密、山区稀），按点数占比会错位。
+      // 模拟行驶的累计里程表在跑就直接复用，与车辆推进同一口径
+      let cum = this._simCum
+      if (!cum || cum.length !== coords.length) {
+        cum = [0]
+        for (let i = 1; i < coords.length; i++) {
+          cum.push(cum[i - 1] + this._distM(coords[i - 1], coords[i]))
+        }
+      }
+      const total = cum[cum.length - 1] || 1
+      return Math.max(0, Math.min(1, cum[minIdx] / total))
     },
     /**
      * 导航中且已有“当前位置”标记时，返回车辆当前所在的路网节点作为算路起点，
@@ -4595,6 +4613,29 @@ export default {
       const pos = this._meMarker ? this._meMarker.getLatLng() : null
       const nodes = this.route && this.route.pathNodeIds
       if (!pos || !nodes || nodes.length < 2) return this.resolvedOriginId
+      // 用 pathEdgeSpans 把车标吸附到**当前所在的边**（spans[i] 是第 i 条边在 pathCoords
+      // 中的下标区间），边 i 的起点节点 nodes[i] 就是算路起点。
+      // 老实现把进度比例按点数折算到节点列表 —— 节点间距极不均匀
+      // （南宁→芒街一条边就几百公里），刚跑一点起点就会被吸附到远处的口岸，
+      // 表现为路线「一下子跳到芒街」。
+      const coords = this.route.pathCoords || []
+      const spans = this.route.pathEdgeSpans || []
+      if (coords.length > 1 && spans.length) {
+        let minDist = Infinity
+        let m = 0
+        for (let i = 0; i < coords.length; i++) {
+          const c = coords[i]
+          if (!c || c.length < 2) continue
+          const d = Math.hypot(c[0] - pos.lat, c[1] - pos.lng)
+          if (d < minDist) { minDist = d; m = i }
+        }
+        for (let i = 0; i < spans.length; i++) {
+          const sp = spans[i]
+          if (sp && m >= sp[0] && m <= sp[1]) return nodes[Math.min(i, nodes.length - 2)]
+        }
+        // 车在最后一条边终点之后（临到终点）：取倒数第二个节点，留一条边的余量
+        return nodes[Math.min(spans.length, nodes.length - 2)]
+      }
       const ratio = this._computeProgressRatio(pos.lat, pos.lng)
       const idx = Math.min(nodes.length - 2, Math.max(0, Math.round(ratio * (nodes.length - 1))))
       return nodes[idx] || this.resolvedOriginId
