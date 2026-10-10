@@ -182,7 +182,7 @@
     <h2>「<span class="grad-text">拔了网线照样跑</span>」不是口号</h2>
     <p class="sub">跨境弱网、口岸断网、演示现场翻车——三重噩梦，我们用全链路降级架构逐个击破。</p>
     <div class="grid g2">
-      <div class="card"><span class="ico">🗺️</span><h3>底图四源自动降级</h3><p>天地图影像 → 天地图矢量 → OSM → D 盘本地离线瓦片，探测阈值触发切源 + 运行中瓦片自愈巡检；本地 planetiler 矢量瓦片完全离线可用。</p></div>
+      <div class="card"><span class="ico">🗺️</span><h3>底图四源自动降级</h3><p>天地图影像 → 天地图矢量 → OSM → D 盘本地离线瓦片，探测阈值触发切源 + 运行中瓦片自愈巡检；后端同源代理 + 内存/磁盘两级缓存，热门瓦片全生命周期只回源一次。</p></div>
       <div class="card"><span class="ico">🤖</span><h3>AI 两级降级链</h3><p>本地 Ollama（主，数据不出境）→ 在线 DeepSeek（备）→ 内置规则引擎离线模板，断网也能产出双语预警文案。</p></div>
       <div class="card"><span class="ico">🌐</span><h3>路网全离线</h3><p>311MB OSM PBF 自研脚本裁剪为 22MB 紧凑路网，本地 Dijkstra，无第三方在线算路依赖。</p></div>
       <div class="card"><span class="ico">⚡</span><h3>首点即毫秒</h3><p>启动预热跑一次 NN→HN 规划触发 JIT；JVM ZGC + 3GB 级瓦片磁盘缓存，避免演示首次点击卡顿。</p></div>
@@ -199,9 +199,9 @@
       <tr><td>算路引擎</td><td>真实 OSM 路网 Dijkstra 双并行 · 逐边气象风险惩罚加权</td></tr>
       <tr><td>实时推送</td><td>SSE（SseEmitter）主通道 + 15s 轮询兜底 · 300ms 防抖重算</td></tr>
       <tr><td>气象 / AI</td><td>官方 CRA40 / GOWFS 格点 · DeepSeek 双语预警 · 规则引擎离线降级</td></tr>
-      <tr><td>前端</td><td>Vue 3.5 + Vite · Leaflet 1.9.4 + MapLibre GL 5.0 · 调度大屏 / 司机端双入口</td></tr>
+      <tr><td>前端</td><td>Vue 3.5 + Vite · Leaflet 1.9.4（栅格瓦片 + Canvas 渲染）· 调度大屏 / 司机端双入口</td></tr>
       <tr><td>移动端</td><td>Capacitor 打包 Android APK · 原生 TTS 中越双语 · 局域网瘦客户端热更新</td></tr>
-      <tr><td>地理数据</td><td>planetiler 本地 MVT 矢量瓦片 · Douglas-Peucker 11m 容差路网 · ODbL 合规</td></tr>
+      <tr><td>地理数据</td><td>OSM PBF 自研脚本清洗为跨境路网（约 8.6 万节点 / 9.8 万边，Douglas-Peucker 11m 容差）· 本地离线瓦片兜底 · ODbL 合规</td></tr>
     </table>
   </section>
 

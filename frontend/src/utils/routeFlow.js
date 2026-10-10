@@ -74,6 +74,12 @@ function ensureStyle() {
 
 const DEG = Math.PI / 180;
 
+/**
+ * 静态箭头的硬性能上限：每屏铺多少个都不该超过这个数。
+ * 只用来兜住「极端弯道 + 极端放大」把 spots 撑爆的情况，常态不该碰到它。
+ */
+const STATIC_ARROW_HARD_CAP = 360;
+
 function bearing(a, b) {
   const lat1 = a[0] * DEG;
   const lat2 = b[0] * DEG;
@@ -88,7 +94,9 @@ export function createRouteFlow(map, options = {}) {
   const opts = Object.assign({
     color: '#2563eb',
     speedPxPerSec: 88,
-    spacingPx: 110,
+    // 箭头屏幕间距（像素）：静态模式下这就是「密度」本身，与缩放无关。
+    // 110 是旧动态流光的值，静态铺放时看着太稀，两端都收紧到 40~50 一档。
+    spacingPx: 44,
     minArrows: 3,
     maxArrows: 16,
     glowWidth: 10,
@@ -97,8 +105,8 @@ export function createRouteFlow(map, options = {}) {
     pane: 'markerPane',
     // 箭头 JS 循环帧率上限：移动端 WebView 传 15 降 CPU，PC 保持 60
     fps: 60,
-    // 轻量特效模式（移动端）：关闭箭头 drop-shadow 滤镜与脉冲/流光 CSS 动画，
-    // 这些动画不受 fps 限帧约束、在手机 WebView 上是滑动掉帧主因。大屏保持 false。
+    // 轻量特效模式：关闭箭头 drop-shadow 滤镜与脉冲/流光 CSS 动画，
+    // 这些动画不受 fps 限帧约束、在手机 WebView 上是滑动掉帧主因。司机端与大屏现均传 true。
     lite: false,
     // ---- 高德风主线（均为可选，不传保持旧样式，大屏不受影响）----
     // 描边色：段未自带 casing 时用这个；传了才画 casing 层
@@ -110,7 +118,8 @@ export function createRouteFlow(map, options = {}) {
     // 箭头颜色：默认跟随段色；导航线传 '#fff' 用白色箭头
     arrowColor: null,
     // 静态箭头模式：箭头沿路线等距固定分布、不随帧推进（也不起 rAF 循环），
-    // 仅 zoomend 重排时重算位置/朝向。司机端导航线用这个省 CPU，大屏保持动态。
+    // 仅 zoomend/moveend 重排时重算位置/朝向。司机端导航线与大屏主线都用这个，
+    // 零逐帧开销且避开缩放动画期间写 marker 位置与 zoomanim 叠加的竞态。
     staticArrows: false
   }, options);
 
@@ -224,21 +233,22 @@ export function createRouteFlow(map, options = {}) {
     tracks = [];
   }
 
-  /** 用最长的一段估算「米 → 屏幕像素」比例（所有段同缩放级别，比例一致） */
+  /**
+   * 「米 → 屏幕像素」比例：取地图中心，量 0.25° 经度在容器像素上的跨度除以实地距离。
+   * 旧实现是沿折线按 ~40 个采样点累加「弦长 / 里程」：step 一跨就跨过好几个弯道
+   * （司机端原始几何几千个点，step=75 ≈ 十几 km），弦长明显短于折线实长，
+   * pxPerM 被系统性低估 2~3 倍 → spacingM 偏大 → 箭头铺得稀稀拉拉（用户反馈「箭头太少」）。
+   * 解析法与几何无关、O(1)，任何 CRS（3857/4326 离线底图）都成立。
+   */
   function measurePxPerM() {
-    let ref = null;
-    for (const t of tracks) if (!ref || t.total > ref.total) ref = t;
-    if (!ref || ref.pts.length < 2 || ref.total <= 0) return;
-    const step = Math.max(1, Math.floor(ref.pts.length / 40));
-    let px = 0;
-    let m = 0;
-    for (let i = step; i < ref.pts.length; i += step) {
-      const a = map.latLngToContainerPoint(L.latLng(ref.pts[i - step]));
-      const b = map.latLngToContainerPoint(L.latLng(ref.pts[i]));
-      px += a.distanceTo(b);
-      m += ref.cum[i] - ref.cum[i - step];
-    }
-    pxPerM = m > 0 ? Math.max(px / m, 1e-7) : 2e-4;
+    const c = map.getCenter();
+    if (!c) return;
+    const a = map.latLngToContainerPoint(c);
+    const b = map.latLngToContainerPoint(L.latLng(c.lat, c.lng + 0.25));
+    const px = Math.abs(b.x - a.x);
+    const m = map.distance(c, L.latLng(c.lat, c.lng + 0.25));
+    if (!(px > 0) || !(m > 0)) return;
+    pxPerM = px / m;
   }
 
   /** 计算各段箭头数量：按长度分配，全局上限内每段至少 1 个 */
@@ -302,6 +312,21 @@ export function createRouteFlow(map, options = {}) {
     // 导致 spacingM 算小、箭头铺得过密、spots 数量暴涨，再叠加下面的封顶就整段丢箭头。
     if (tracks.length) measurePxPerM();
     const spacingM = opts.spacingPx / pxPerM;
+    // 抽稀上限要按「视口能铺多少个」动态给，不能直接用 opts.maxArrows 写死。
+    // 旧口径（轻界面 32 / 司机端 64）在放大后必然被打满：spots 是在 pad(0.25) 的
+    // 视口外扩区里铺的（比屏幕可见段长约 1.5~2 倍），而 maxArrows 是按「整屏对角线
+    // 能铺多少个」量出来的，两者一撞，等间隔抽稀就把可见段的间距从 44px 翻倍到 88px
+    // —— 用户反馈的「导航线箭头放大后就只有一半、有一半没有了」正是这个（实测：
+    // overview 58 个箭头，放大后恒为 32 个，相邻空档在 44 与 88 之间交替）。
+    // 系数 3 是给「折线在视口内来回盘绕」的路段留余量，超出后仍由硬上限兜性能。
+    const view = map.getSize();
+    const arrowCap = Math.max(opts.maxArrows, Math.min(STATIC_ARROW_HARD_CAP,
+      Math.ceil((Math.hypot(view.x, view.y) / opts.spacingPx) * 3)));
+    // 朝向取前方一小段的方向。下限必须按「屏幕像素」换算，不能写死 60 米：
+    // 放大后 spacingM 已缩到几十米，60 米等于跨过两三个弯道往前看，
+    // 箭头会照着弦的方向斜指出去（弯道上看着「箭头歪一半」）。
+    // 取 18px 对应里程、但不超过一个间距的 30%，兼顾平滑与贴合。
+    const lookM = Math.min(Math.max(spacingM * 0.08, 18 / pxPerM), spacingM * 0.3);
     for (const t of tracks) {
       const pool = t.arrows;
       const spots = [];
@@ -309,17 +334,26 @@ export function createRouteFlow(map, options = {}) {
         for (let d = spacingM * 0.5; d < t.total; d += spacingM) {
           const p = pointAt(t, d);
           if (!bounds.contains(p)) continue;
-          const ahead = Math.min(t.total, d + Math.max(60, spacingM * 0.08));
+          const ahead = Math.min(t.total, d + lookM);
           spots.push([p, bearing(p, pointAt(t, ahead))]);
+        }
+      }
+      // 短于一个间距的段（按风险分段着色时很常见）整段铺不下一个箭头，
+      // 表现为「这一截线看着没方向」——补 1 个落在视口里的点兜底。
+      if (!spots.length && t.total > 0 && t.pts.length >= 2) {
+        for (let i = 0; i < t.pts.length - 1; i++) {
+          if (!bounds.contains(t.pts[i])) continue;
+          spots.push([t.pts[i], bearing(t.pts[i], t.pts[i + 1])]);
+          break;
         }
       }
       // 超预算时沿「可见路线」等间隔抽稀，而不是截断前 N 个——
       // 截断会把箭头全堆在路线起点一侧（左下），后半段整条没箭头（司机端实测现象）。
       let shown = spots;
-      if (spots.length > opts.maxArrows) {
+      if (spots.length > arrowCap) {
         shown = [];
-        const stride = spots.length / opts.maxArrows;
-        for (let k = 0; k < opts.maxArrows; k++) shown.push(spots[Math.floor(k * stride)]);
+        const stride = spots.length / arrowCap;
+        for (let k = 0; k < arrowCap; k++) shown.push(spots[Math.floor(k * stride)]);
       }
       const need = shown.length;
       while (pool.length > need) {
@@ -423,7 +457,8 @@ export function createRouteFlow(map, options = {}) {
           const d = (t.progress + i * t.spacingM) % t.total;
           const p = pointAt(t, d);
           t.arrows[i].marker.setLatLng(p);
-          const ahead = Math.min(t.total, d + Math.max(60, t.spacingM * 0.08));
+          const look = Math.min(Math.max(t.spacingM * 0.08, 18 / pxPerM), t.spacingM * 0.3);
+          const ahead = Math.min(t.total, d + look);
           const q = pointAt(t, ahead);
           const ang = bearing(p, q);
           const el = t.arrows[i].el || (t.arrows[i].marker.getElement() && t.arrows[i].marker.getElement().firstChild);

@@ -40,10 +40,11 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * 缺失的静态资源/瓦片（如覆盖范围外的 /tiles/**.pbf）：返回 404 空响应。
-     * Spring Boot 3.2+ 对找不到的静态资源抛 NoResourceFoundException，若不单独处理会落入
-     * 下面的 Exception 兼底被误判成 500；MapLibre 收到 500+JSON 会报“Unable to parse the tile”
-     * 并刷屏，还可能触发“大量加载失败自动切换”把刚选中的矢量底图又切走。404 则被当作“该瓦片无数据”干净跳过。
+     * 缺失的静态资源/瓦片（如离线瓦片覆盖范围外的 /tiles/{z}/{x}/{y}.jpg）：按语义回 404 空响应体。
+     * Spring Boot 3.2+ 对找不到的静态资源抛 NoResourceFoundException，不单独接住就会落入
+     * 下面的 Exception 兼底被误判成 500 + JSON 错误体，于是每请求一张越界瓦片就在服务端日志里
+     * 留下一条“未捕获异常”堆栈。前端对失败瓦片本就各有处理（大屏 hideBrokenTile 隐藏、
+     * 司机端计入底图降级探测），服务端不该把“没有这个文件”伪装成“服务出错”。
      */
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<Void> handleNoResource(NoResourceFoundException ex) {

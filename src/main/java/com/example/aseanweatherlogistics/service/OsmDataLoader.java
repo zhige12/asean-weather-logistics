@@ -30,10 +30,12 @@ public class OsmDataLoader {
 
     private static final Logger logger = LoggerFactory.getLogger(OsmDataLoader.class);
 
-    @Value("${osm.pbf.path:D:/idea/vietnam-260811.osm.pbf}")
+    // 默认值与 application.properties 保持一致（相对进程工作目录），
+    // 不写死任何一台开发机的绝对路径；换机器时无需改代码，改环境变量即可。
+    @Value("${osm.pbf.path:data/osm/vietnam.osm.pbf}")
     private String osmPbfPath;
 
-    @Value("${osm.graph.cache.path:D:/idea/graph-cache}")
+    @Value("${osm.graph.cache.path:data/graph-cache}")
     private String graphCachePath;
 
     @Value("${osm.loader.enabled:false}")

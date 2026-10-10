@@ -27,7 +27,7 @@
 ```bash
 # 1) 本地大模型（离线必需）
 ollama pull qwen2.5:14b && ollama serve
-# 2) 配置环境变量（根目录 .env.local，参考技术文档第四节，填入气象 Token）
+# 2) 配置环境变量：复制根目录 .env.example 为 .env.local，按需填入气象 Token（留空则自动降级，不影响主流程）
 # 3) 起后端
 gradlew.bat bootRun           # 监听 :8080，GET /ping 返回 OK
 # 4) 前端（已随 dist 托管则跳过；或开发模式）

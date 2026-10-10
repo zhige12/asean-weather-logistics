@@ -161,7 +161,11 @@ public class GeocodeService {
         }
     }
 
-    /** 下拉候选 + 前端离线预匹配用全量地名库 */
+    /**
+     * 下拉候选 + 前端离线预匹配用全量地名库。
+     * nodeId 一并下发：带路网内置节点 id 的条目（城市/口岸）前端可直接填，省一次 /snap 请求，
+     * 离线演示也不依赖吸附接口。hot 为「常用地点」排序权重（见 place-names.json），无标记不下发。
+     */
     public List<Map<String, Object>> list() {
         List<Map<String, Object>> out = new ArrayList<>(places.size());
         for (Place p : places) {
@@ -170,6 +174,8 @@ public class GeocodeService {
             m.put("lat", p.lat);
             m.put("lng", p.lng);
             m.put("tag", p.tag);
+            if (p.nodeId != null && !p.nodeId.isBlank()) m.put("nodeId", p.nodeId);
+            if (p.hot != null) m.put("hot", p.hot);
             out.add(m);
         }
         return out;
@@ -196,8 +202,8 @@ public class GeocodeService {
                 containHits.add(p);
             }
         }
-        for (Place p : prefixHits) addSuggest(out, seen, p.name, p.lat, p.lng, p.tag, "local");
-        for (Place p : containHits) addSuggest(out, seen, p.name, p.lat, p.lng, p.tag, "local");
+        for (Place p : prefixHits) addSuggest(out, seen, p.name, p.lat, p.lng, p.tag, "local", p.nodeId);
+        for (Place p : containHits) addSuggest(out, seen, p.name, p.lat, p.lng, p.tag, "local", p.nodeId);
         if (out.size() < 6 && t.length() >= 2) {
             suggestOnline(t, out, seen, 8);
         }
@@ -205,7 +211,7 @@ public class GeocodeService {
     }
 
     private void addSuggest(List<Map<String, Object>> out, Set<String> seen,
-                            String name, double lat, double lng, String tag, String source) {
+                            String name, double lat, double lng, String tag, String source, String nodeId) {
         if (name == null || !seen.add(name)) return;
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", name);
@@ -213,6 +219,8 @@ public class GeocodeService {
         m.put("lng", lng);
         m.put("tag", tag == null ? "" : tag);
         m.put("source", source);
+        // 本地库条目带路网节点 id 时一并给出，前端点选可跳过吸附
+        if (nodeId != null && !nodeId.isBlank()) m.put("nodeId", nodeId);
         out.add(m);
     }
 
@@ -228,7 +236,7 @@ public class GeocodeService {
             if (out.size() >= cap) return;
             addSuggest(out, seen, (String) m.get("name"),
                     (Double) m.get("lat"), (Double) m.get("lng"),
-                    (String) m.get("tag"), "tianditu");
+                    (String) m.get("tag"), "tianditu", null);
         }
     }
 
@@ -526,6 +534,8 @@ public class GeocodeService {
         double lng;
         String tag;
         String nodeId;
+        /** 「常用地点」权重（1 最靠前），仅调度大屏输入框下拉用 */
+        Integer hot;
     }
 
     /** 在线地理编码结果缓存条目：坐标 + 来源（tianditu / osm） */

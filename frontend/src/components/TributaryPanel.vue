@@ -1,5 +1,5 @@
 <template>
-  <section class="card tributary-card">
+  <section class="tributary-sub">
     <h3>
       平陆运河支流风险 · 差异化预测
       <span v-if="loaded" class="route-state">{{ mode === 'live' ? '实况驱动' : '未来6小时' }}</span>
@@ -8,9 +8,18 @@
       平陆运河沿线每条支流有独立的特征向量，输出的是概率，不是简单的熔断/不熔断
     </div>
 
+    <!-- 并入决策沙盘门控：未点「拉取 GOWFS 数据」前不加载、不展示支流真实预测 -->
+    <div v-if="!pushed" class="muted mode-hint">
+      未拉取真实数据：请先在上方「决策沙盘」点击「拉取 GOWFS 数据」，这里才显示平陆运河支流的真实降雨预测；再点「模拟」可切换手动剧本调节。
+    </div>
+    <template v-else>
     <div class="mode-row">
-      <button class="mode-btn" :class="{ active: mode === 'live' }" @click="switchMode('live')">真实降雨</button>
-      <button class="mode-btn" :class="{ active: mode === 'manual' }" @click="switchMode('manual')">手动剧本</button>
+      <!-- 未点决策沙盘「模拟」时只展示支流真实情况：不给「手动剧本」切换入口 -->
+      <template v-if="simMode">
+        <button class="mode-btn" :class="{ active: mode === 'live' }" @click="switchMode('live')">真实降雨</button>
+        <button class="mode-btn" :class="{ active: mode === 'manual' }" @click="switchMode('manual')">手动剧本</button>
+      </template>
+      <span v-else class="mode-readonly">真实降雨 · 只读</span>
       <button v-if="mode === 'live'" class="refresh-btn" :disabled="liveLoading" @click="loadLive">
         {{ liveLoading ? '拉取中…' : '刷新' }}
       </button>
@@ -18,6 +27,10 @@
         <input type="checkbox" v-model="linkMainline" @change="apply" />
         联动干流禁航
       </label>
+    </div>
+    <!-- 只读态给一句指路：想手动调节支流降雨，去上方决策沙盘点「模拟」 -->
+    <div v-if="!simMode" class="muted mode-hint">
+      当前展示支流真实降雨预测；在上方「决策沙盘」点击「模拟」后，可切换为手动剧本调节支流降雨
     </div>
 
     <div v-if="mode === 'live' && live" class="live-info" :class="{ warn: !live.realtimeSource || !live.dataAvailable }">
@@ -27,7 +40,7 @@
       <span v-else class="live-eq">· {{ live.equivalentNote }}</span>
     </div>
 
-    <div v-if="mode === 'manual'" class="slider-row">
+    <div v-if="simMode && mode === 'manual'" class="slider-row">
       <span class="slider-label">平陆运河支流流域降雨量</span>
       <input
         type="range"
@@ -90,12 +103,21 @@
       <template v-else-if="mode === 'live'">暂无真实气象数据，概率按 0mm 保守展示</template>
       <template v-else>同样的 {{ rainfall }}mm 降雨：{{ summaryText }}</template>
     </div>
+    </template>
   </section>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import axios from "axios";
+
+// simMode：决策沙盘是否处于模拟模式。false 时本面板只读展示支流真实情况，
+// 隐藏「手动剧本」入口与调节滑杆；true 时才开放可调节的支流剧本模拟。
+// pushed：决策沙盘是否已拉取到真实数据。false 时不加载、不展示真实预测，只给指路提示。
+const props = defineProps({
+  simMode: { type: Boolean, default: false },
+  pushed: { type: Boolean, default: false },
+});
 
 // 双模式：live = 真实气象源实时雨强驱动；manual = 手动剧本滑杆覆写
 const mode = ref("live");
@@ -219,21 +241,55 @@ function switchMode(m) {
   else load();
 }
 
-onMounted(() => {
-  if (mode.value === "live") loadLive();
-  else load();
-  liveTimer = setInterval(() => {
-    if (mode.value === "live") loadLive();
-  }, 5 * 60 * 1000);
-});
+// 退出模拟时若正停在手动剧本，强制回到真实视图并重拉实况，避免残留一个不可调的剧本滑杆
+watch(
+  () => props.simMode,
+  (v) => {
+    if (!v && mode.value === "manual") {
+      mode.value = "live";
+      loadLive();
+    }
+  }
+);
+
+// 拉取态驱动加载：沙盘点了「拉取 GOWFS 数据」(pushed=true) 才拉真实支流预测并起定时刷新；
+// 未拉取（或重置）时清空数据、停掉定时器，面板只留指路提示，绝不跑在拉取前展示真实数据。
+watch(
+  () => props.pushed,
+  (v) => {
+    if (v) {
+      if (mode.value === "live") loadLive();
+      else load();
+      if (!liveTimer) {
+        liveTimer = setInterval(() => {
+          if (mode.value === "live") loadLive();
+        }, 5 * 60 * 1000);
+      }
+    } else {
+      if (liveTimer) {
+        clearInterval(liveTimer);
+        liveTimer = null;
+      }
+      tributaries.value = [];
+      live.value = null;
+      loaded.value = false;
+      mainline.value = null;
+      tribImpact.value = null;
+    }
+  },
+  { immediate: true }
+);
 onBeforeUnmount(() => {
   if (liveTimer) clearInterval(liveTimer);
 });
 </script>
 
 <style scoped>
-.tributary-card {
-  border: 1px solid rgba(79, 109, 245, 0.3);
+.tributary-sub {
+  /* 并入决策沙盘卡片内作为子块：不再自带 card 外框，用顶部虚线分隔 */
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed rgba(79, 109, 245, 0.35);
 }
 .trib-hint {
   font-size: 11px;
@@ -249,6 +305,21 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+  margin-bottom: 8px;
+}
+.mode-readonly {
+  font-size: 11px;
+  font-weight: 700;
+  color: #4f6df5;
+  padding: 3px 10px;
+  border-radius: 8px;
+  background: rgba(79, 109, 245, 0.08);
+  border: 1px solid rgba(79, 109, 245, 0.28);
+  white-space: nowrap;
+}
+.mode-hint {
+  font-size: 11px;
+  line-height: 1.5;
   margin-bottom: 8px;
 }
 .mode-btn {

@@ -6,7 +6,18 @@
         <button class="btn small" :class="perfLite ? 'primary' : 'outline'"
                 :title="perfLite ? (perfAuto ? '本机帧率自检未达阈值，已自动关掉毛玻璃与逐帧重绘的装饰特效（功能、数据、红绿分段均不变）；点一下可强制恢复满特效' : '轻界面模式已开启：关掉毛玻璃与流光等逐帧重绘的装饰特效（功能、数据、红绿分段均不变），再点一次恢复满特效') : '当前为满特效。若这台机器不只拖图卡、点按钮也发滞，点这里关掉装饰特效'"
                 @click="togglePerfLite">{{ perfLite ? (perfAuto ? '轻界面（自动）' : '轻界面已开') : '轻界面' }}</button>
-        <button class="btn small outline-light" @click="openDriver">司机端 ↗</button>
+        <!-- 司机端入口：原先用 .outline-light（白字 + 半透明白底）压在浅色毛玻璃头部上几乎看不见，
+             换成品牌橙红渐变胶囊 + 货车 SVG 图标（不用 emoji，与司机端图标规范一致） -->
+        <button class="btn driver-entry" title="在新窗口打开司机端（与手机同款界面），演示时可并排看调度下发 → 司机接单"
+                @click="openDriver">
+          <svg class="de-ico" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M2 6h11v9.5H2z"/>
+            <path d="M13 9h4l3 3.4V15.5h-7z"/>
+            <circle cx="6.5" cy="17.8" r="1.8"/><circle cx="16.8" cy="17.8" r="1.8"/>
+          </svg>
+          <span>司机端</span>
+          <span class="de-arrow">↗</span>
+        </button>
         <button class="btn small" @click="getStatus">OSM 状态</button>
         <span class="status-badge" :class="{ready: status && status.loaded}">{{ status && status.loaded ? 'OSM 已加载' : 'OSM 未加载' }}</span>
       </div>
@@ -23,18 +34,18 @@
         <section class="card">
           <h3>跨境路径规划</h3>
           <div class="coords">
-            <!-- 自由输入 + 关键字联想（本地地名库→天地图 POI），选中即吸附路网节点；
-                 与地图选点共用同一套草稿起终点 -->
+            <!-- 自由输入 + 关键字联想（本地地名库→天地图 POI），空输入点开即常用地点下拉，
+                 选中即吸附路网节点；与地图选点共用同一套草稿起终点 -->
             <PlaceInput
               label="起点"
-              placeholder="输入起点地名，如 南宁 / 青秀"
+              placeholder="输入或点选起点，如 南宁 / 青秀"
               v-model="draftOriginId"
               v-model:name="originName"
               ref="originInput"
             />
             <PlaceInput
               label="终点"
-              placeholder="输入终点地名，如 河内 / 还剑湖"
+              placeholder="输入或点选终点，如 河内 / 还剑湖"
               v-model="draftDestinationId"
               v-model:name="destinationName"
               ref="destInput"
@@ -47,13 +58,29 @@
               <button class="btn" :class="pickMode ? 'pick-on' : 'outline'" @click="togglePickMode">
                 {{ pickMode ? '取消地图选点' : '地图选点' }}
               </button>
-              <span class="muted" style="align-self:center">{{ pickMode ? (pickOriginNode ? '已选起点，点地图选终点' : '点击地图任意位置选起点') : '选择起终点后点击「确认选择并规划」' }}</span>
+              <span class="muted" style="align-self:center">{{ pickHintText }}</span>
             </div>
           </div>
         </section>
 
         <!-- 第四幕：公司派单（司机端收到后自动切物流任务模式） -->
         <TaskDispatchPanel ref="taskPanelRef" :task-status="taskStatus" @refresh="refreshTask" @analyze="onPreDispatchAnalysis" />
+
+        <!-- 全域受阻：区域性灾害（台风 / 大范围暴雨）同时盖住多条出境走廊，平陆运河也禁航。
+             此时算路引擎仍会给出一条「向前」的路线——那是把已封闭路段降级放行换来的，
+             继续派单等于从一个风险区换进另一个风险区，所以把返回/等待的结论顶到面板上方 -->
+        <section v-if="corridorView" class="card corridor-advisory">
+          <h3>
+            {{ corridorView.title }}
+            <span class="route-state blocked">{{ corridorShort }}</span>
+          </h3>
+          <div class="corridor-advice">{{ corridorView.text }}</div>
+          <div class="muted corridor-basis" :title="corridorAdvisory.waitBasis">{{ corridorAdvisory.waitBasis }}</div>
+          <div class="row" style="margin-top:6px">
+            <button class="btn outline tiny" @click="dismissCorridorAdvisory">知道了</button>
+            <span class="muted" style="align-self:center">走廊或成因变化会重新提醒</span>
+          </div>
+        </section>
 
         <!-- 平陆运河禁航：点名影响在途水运对象。
              物流司机换线必须由大屏下发任务变更（司机端只等确认）；
@@ -78,24 +105,85 @@
         </section>
 
         <!-- 第一/二幕：决策沙盘（官方推送熔断 + 滑块观察决策边界） -->
-        <DecisionSandbox ref="sandboxRef" @sandbox-change="onSandboxChange" @quick-inject="onQuickInject" />
+        <DecisionSandbox ref="sandboxRef" @sandbox-change="onSandboxChange" @quick-inject="onQuickInject">
+          <!-- 通关时效并入决策沙盘：simMode/pushed 由沙盘经作用域插槽下发。
+               未点「模拟」只读展示真实时效，点「模拟」后才可手动调节各口岸 -->
+          <template #extra="{ simMode, pushed }">
+            <div class="sandbox-sub">
+              <h3>
+                通关时效（customs_efficiency）
+                <span v-if="pushed && !simMode" class="route-state">真实 · 只读</span>
+                <span v-else-if="simMode" class="route-state ok">模拟 · 可调</span>
+              </h3>
+              <div v-if="!pushed" class="muted" style="line-height:1.6">
+                未拉取真实数据：请先在上方「决策沙盘」点击「拉取 GOWFS 数据」查看真实通关时效；再点「模拟」方可手动调节各口岸时效。
+              </div>
+              <template v-else>
+                <div class="row">
+                  <label class="inline-label">时段
+                    <select v-model="period" :disabled="!simMode" @change="replanIfNeeded">
+                      <option value="normal">普通</option>
+                      <option value="peak">高峰 ×1.3~1.4</option>
+                      <option value="holiday">节假日 ×1.7~1.8</option>
+                    </select>
+                  </label>
+                  <label class="inline-label">货类
+                    <select v-model="cargoType" :disabled="!simMode" @change="replanIfNeeded">
+                      <option value="general">普货</option>
+                      <option value="cold">冷链</option>
+                      <option value="dangerous">危化</option>
+                      <option value="oversized">大件</option>
+                    </select>
+                  </label>
+                </div>
+                <div v-for="p in customsList" :key="p.portId" class="customs-item" :class="{adjusted: p.adjusted}">
+                  <div class="customs-head">
+                    <span class="customs-name">{{ p.portName }}</span>
+                    <span class="customs-hours">{{ p.currentHours }}h</span>
+                    <span v-if="p.adjusted" class="customs-note" :title="p.note">(调整)</span>
+                  </div>
+                  <div class="row">
+                    <button class="btn tiny" :disabled="!simMode" @click="adjustCustoms(p.portId, -0.5)">-0.5h</button>
+                    <button class="btn tiny" :disabled="!simMode" @click="adjustCustoms(p.portId, 0.5)">+0.5h</button>
+                    <button class="btn tiny outline" :disabled="!simMode" @click="resetCustoms(p.portId)">重置</button>
+                  </div>
+                </div>
+                <div class="muted" style="margin-top:6px">基准：友谊关 {{ baseHours('YGG') }}h / 芒街 {{ baseHours('MC') }}h</div>
+              </template>
+            </div>
+          </template>
+        </DecisionSandbox>
 
         <!-- 第三幕：多智能体协同决策分析（含第四幕确认下发入口） -->
         <AgentPanel
           ref="agentPanelRef"
           :originId="originId"
           :destinationId="destinationId"
+          :canalLiveBlock="canalBlockLive ? canalBlockLive.blocked : undefined"
+          :canalLiveReason="canalBlockLive && canalBlockLive.blocked ? canalBlockLive.reason : ''"
           @dispatched="onDispatched"
           @dispatch-task="onDispatchTask"
+          @preview-candidate="onPreviewCandidate"
         />
 
         <!-- 第五/六幕：多角色触达 + 分级叫应追踪 -->
         <OutreachPanel :status="outreachStatus" @refresh="refreshOutreach" />
 
         <section class="card">
-          <h3>灾害时间线（实时）</h3>
-          <div v-if="hazardTimeline.length" class="timeline-list">
-            <div v-for="(item, i) in hazardTimeline" :key="i" class="timeline-item">
+          <h3>
+            灾害时间线（实时）
+            <span class="route-state">{{ filteredTimeline.length }} / {{ hazardTimeline.length }} 条</span>
+          </h3>
+          <!-- 历史事件只留最近 30 条、会越堆越长：给它一个限高滚动窗口 + 关键字搜索，
+               输入「台风 / 熔断 / 绕行 / 河内」等即可从历史里筛出相关事件 -->
+          <input
+            v-model="timelineQuery"
+            class="timeline-search"
+            type="text"
+            placeholder="搜索历史记录，如 台风 / 熔断 / 绕行 / 河内…"
+          />
+          <div v-if="filteredTimeline.length" class="timeline-list">
+            <div v-for="(item, i) in filteredTimeline" :key="i" class="timeline-item">
               <span class="timeline-time">{{ item.time }}</span>
               <span class="timeline-dot" :class="item.level"></span>
               <div class="timeline-body">
@@ -104,7 +192,7 @@
               </div>
             </div>
           </div>
-          <div v-else class="muted">暂无灾害事件</div>
+          <div v-else class="muted">{{ timelineQuery ? '没有匹配的记录' : '暂无灾害事件' }}</div>
         </section>
 
         <section class="card">
@@ -119,7 +207,7 @@
               @change="switchWeatherSource($event.target.value)"
             >
               <option
-                v-for="opt in weatherSourceOptions"
+                v-for="opt in sourceSelectOptions"
                 :key="opt.id"
                 :value="opt.id"
                 :disabled="!opt.configured"
@@ -150,40 +238,6 @@
             </div>
           </div>
           <div v-else class="muted">暂无实时数据，点击拉取</div>
-        </section>
-
-        <section class="card">
-          <h3>通关时效（customs_efficiency）</h3>
-          <div class="row">
-            <label class="inline-label">时段
-              <select v-model="period" @change="replanIfNeeded">
-                <option value="normal">普通</option>
-                <option value="peak">高峰 ×1.3~1.4</option>
-                <option value="holiday">节假日 ×1.7~1.8</option>
-              </select>
-            </label>
-            <label class="inline-label">货类
-              <select v-model="cargoType" @change="replanIfNeeded">
-                <option value="general">普货</option>
-                <option value="cold">冷链</option>
-                <option value="dangerous">危化</option>
-                <option value="oversized">大件</option>
-              </select>
-            </label>
-          </div>
-          <div v-for="p in customsList" :key="p.portId" class="customs-item" :class="{adjusted: p.adjusted}">
-            <div class="customs-head">
-              <span class="customs-name">{{ p.portName }}</span>
-              <span class="customs-hours">{{ p.currentHours }}h</span>
-              <span v-if="p.adjusted" class="customs-note" :title="p.note">(调整)</span>
-            </div>
-            <div class="row">
-              <button class="btn tiny" @click="adjustCustoms(p.portId, -0.5)">-0.5h</button>
-              <button class="btn tiny" @click="adjustCustoms(p.portId, 0.5)">+0.5h</button>
-              <button class="btn tiny outline" @click="resetCustoms(p.portId)">重置</button>
-            </div>
-          </div>
-          <div class="muted" style="margin-top:6px">基准：友谊关 {{ baseHours('YGG') }}h / 芒街 {{ baseHours('MC') }}h</div>
         </section>
 
         <section v-if="routeResult && routeResult.route" class="card">
@@ -281,14 +335,9 @@
           <div v-else-if="knowledgeLoaded" class="muted">输入关键词检索行业知识，或查看全部条目</div>
         </section>
 
-        <!-- 第九幕：平陆运河支流风险差异化预测 -->
-        <TributaryPanel />
-
-        <!-- 第十幕：开放平台智能体配置器 -->
+        <!-- 第十幕：开放平台智能体配置器（成长路径三步走已并入该卡尾段，
+             让「众创」从第 1 步就看得见，而不是单独摆在第三步） -->
         <PlatformConfigurator @config-changed="onConfigChanged" />
-
-        <!-- 第十一幕：成长路径三步走 -->
-        <GrowthPath />
 
         <!-- 全程：决策日志留痕 -->
         <DecisionLogTimeline ref="logRef" />
@@ -342,6 +391,9 @@
           :candidates="candidates"
           :selected-candidate-key="selectedCandidateKey"
           :corridor="showCorridor ? corridorData : null"
+          :pick-mode="pickMode"
+          :pick-origin="pickOriginNode"
+          :pick-destination="pickDestinationNode"
           @candidate-pick="selectCandidate"
           @edge-click="onEdgeClick"
           @map-click="onMapClick"
@@ -362,11 +414,11 @@ import DecisionSandbox from './components/DecisionSandbox.vue';
 import TaskDispatchPanel from './components/TaskDispatchPanel.vue';
 import AgentPanel from './components/AgentPanel.vue';
 import OutreachPanel from './components/OutreachPanel.vue';
-import TributaryPanel from './components/TributaryPanel.vue';
 import PlatformConfigurator from './components/PlatformConfigurator.vue';
-import GrowthPath from './components/GrowthPath.vue';
 import DecisionLogTimeline from './components/DecisionLogTimeline.vue';
 import PlaceInput from './components/PlaceInput.vue';
+import { advisoryView, ACTION_SHORT } from './utils/corridorAdvisory';
+import { fetchPlaceList } from './utils/geocoder.js';
 import { isLite, isAutoLite, onLiteChange, toggleLite } from './utils/perfMode.js';
 
 // 左侧面板拖拽缩放边界：1=默认 360px；上限约 2.2 倍（≈790px，投影仪/后排也能看清）
@@ -374,6 +426,12 @@ const PANEL_ZOOM_MIN = 0.85;
 const PANEL_ZOOM_MAX = 2.2;
 /** 面板基准宽度（CSS 中的 .panel width），拖拽换算用 */
 const PANEL_BASE_WIDTH = 360;
+/**
+ * 地图选点吸附护栏（km）：点击点到此距离内才认最近路网节点。
+ * 路网节点只沿中越走廊密铺（走廊内中位吸附距离 ~6km），走廊外点到哪都
+ * 会吸到同几个远处节点，不拦就会出现“点了一下、起点跑到几百公里外”。
+ */
+const PICK_SNAP_MAX_KM = 60;
 /**
  * 浏览器是否支持 zoom。Chromium 与 Firefox 126+ 均支持，且 zoom 参与布局尺寸计算，
  * 因此面板宽度与内部字号能一起等比放大（子组件字号是写死的 px，靠父级 zoom 才会放大）。
@@ -393,8 +451,8 @@ const WEATHER_SOURCE_SHORT = {
 export default {
   components: {
     MapView, RiskStrip, ETAIndicator, BriefingPanel, CarbonCalc,
-    DecisionSandbox, TaskDispatchPanel, AgentPanel, OutreachPanel, TributaryPanel,
-    PlatformConfigurator, GrowthPath, DecisionLogTimeline, PlaceInput
+    DecisionSandbox, TaskDispatchPanel, AgentPanel, OutreachPanel,
+    PlatformConfigurator, DecisionLogTimeline, PlaceInput
   },
   data() {
     return {
@@ -445,6 +503,8 @@ export default {
       pickDestinationNode: null,
       agentNotice: null,
       hazardTimeline: [],
+      // 灾害时间线搜索关键字：命中 标题/描述/时间 任一即保留，空则展示全部
+      timelineQuery: '',
       // 候选路线：每次规划后由 /api/routes/candidates 拉回，最多 10 条
       candidates: [],
       // 平陆运河「可坐船出境」推荐位：后端 candidates 接口在公路候选外并列返回的 canalOption
@@ -461,12 +521,17 @@ export default {
       // === 演示场景（11幕）===
       outreachStatus: { targets: [], total: 0, confirmed: 0, pending: 0 },
       // 运输任务（公司派单）：司机端据此切物流任务模式，大屏派单面板显示接单状态
-      taskStatus: { task: null, status: 'NONE' },
+      // 运输任务服务端态：初值必须是 null（= 还没拿到服务端态），不能给个
+      // { task: null, status: 'NONE' } 占位——那样子组件的「服务端态优先」判据会立刻生效，
+      // 把面板自己 mount 时拉到的兜底快照顶掉，首屏反而短暂显示成「未派单」
+      taskStatus: null,
       // 公司派单面板递来的订单信息（车牌/司机/货物/重量/起终点）：
       // 「AI 决策分析」面板的开始导航模板派单时与选定路线合并后下发
       dispatchForm: null,
       // 平陆运河禁航告警卡（canal-block SSE 事件驱动）：点名受影响在途对象并支持一键换线
       canalAlert: null,
+      // 全域受阻建议（后端 CorridorAdvisoryService 下发）：公路走廊全部封闭且运河禁航时给返回/等待建议
+      corridorAdvisory: null,
       // 左侧面板缩放系数（1=默认360px）：拖动右边缘手柄整体等比放大，字号随之变大
       panelZoom: 1,
       panelDragging: false,
@@ -477,6 +542,20 @@ export default {
     };
   },
   computed: {
+    /** 选点面板提示：把「现在该点哪里 / 已经选到哪一步」说清楚 */
+    pickHintText() {
+      if (!this.pickMode) return '选择起终点后点击「确认选择并规划」';
+      if (!this.pickOriginNode) return '点击地图任意位置选起点';
+      if (!this.pickDestinationNode) return '已选起点「' + this.originName + '」，再点一处选终点';
+      return '已选「' + this.originName + ' → ' + this.destinationName + '」，继续点击可换终点并重规';
+    },
+    /** 大屏不在途（规划态），动作固定为「暂缓发车」；进度归司机端算 */
+    corridorView() {
+      return advisoryView(this.corridorAdvisory, -1);
+    },
+    corridorShort() {
+      return (this.corridorView && ACTION_SHORT[this.corridorView.action]) || '';
+    },
     /** 运河当前是否禁航：SSE 实时状态优先，其次用后端随 canalOption 下发的静态快照 */
     canalBlockedNow() {
       if (this.canalBlockLive) return this.canalBlockLive.blocked;
@@ -516,6 +595,19 @@ export default {
     },
     weatherSourceLabel() {
       return WEATHER_SOURCE_SHORT[this.weatherSourceId] || '多数据源';
+    },
+    /**
+     * 下拉框实际渲染的清单。
+     * 清单原本只在 mounted 里拉一次（/api/weather/source），后端比页面起得晚、
+     * 或那一发超时/断网，weatherSourceOptions 就永远是空数组 —— <select> 没有任何
+     * <option> 可显示，整个框变成空白（看着像“数据源没了”），而其它卡片都有 15 秒轮询自愈。
+     * 这里在清单为空时兜一个“当前源”单选项，至少把正在用的源显示出来，
+     * 配合下方轮询里的自动补拉恢复成完整清单。
+     */
+    sourceSelectOptions() {
+      if (this.weatherSourceOptions && this.weatherSourceOptions.length) return this.weatherSourceOptions;
+      const id = this.weatherSourceId || 'contest-observation';
+      return [{ id, label: this.sourceShort(id) + '（清单加载中…）', configured: true, active: true }];
     },
     /** 展示中数据的真实来源（与下拉框选了谁是两件事） */
     weatherServedLabel() {
@@ -580,6 +672,18 @@ export default {
       return this.risks.reduce((max, risk) => {
         return Math.max(max, severityMap[risk.severity] || 0);
       }, 0);
+    },
+    // 按关键字过滤灾害时间线（大小写不敏感）；空查询返回全量，
+    // 列表本身限高滚动，不再把面板越堆越长
+    filteredTimeline() {
+      const q = (this.timelineQuery || '').trim().toLowerCase();
+      const list = this.hazardTimeline || [];
+      if (!q) return list;
+      return list.filter(it =>
+        (it.title && it.title.toLowerCase().includes(q)) ||
+        (it.desc && it.desc.toLowerCase().includes(q)) ||
+        (it.time && String(it.time).toLowerCase().includes(q))
+      );
     }
   },
   methods: {
@@ -759,7 +863,7 @@ export default {
       return WEATHER_SOURCE_SHORT[id] || id || '未定';
     },
     /** 加载可选气象数据源清单（CRA40 / Open-Meteo / 离线模拟） */
-    async loadWeatherSource() {
+    async loadWeatherSource(retryLeft = 3) {
       try {
         const r = await axios.get('/api/weather/source', { timeout: 8000 });
         this.weatherSourceOptions = r.data.options || [];
@@ -767,6 +871,15 @@ export default {
         if (r.data.current) this.weatherSourceId = r.data.current;
       } catch (e) {
         console.error('load weather source failed', e);
+      }
+      // 大屏往往在后端启动完成之前就打开了，mounted 那一发注定空手。
+      // 只靠 15 秒心跳补拉的话，评委对着空下拉框能等小半分钟，这里先按 3 秒节奏快补三次。
+      if (!this.weatherSourceOptions.length && retryLeft > 0) {
+        if (this._srcRetryTimer) clearTimeout(this._srcRetryTimer);
+        this._srcRetryTimer = setTimeout(() => {
+          this._srcRetryTimer = null;
+          this.loadWeatherSource(retryLeft - 1);
+        }, 3000);
       }
     },
     /** 切换气象数据源：切完立即按新源重新拉取 */
@@ -868,6 +981,7 @@ export default {
           }
         });
         this.applyRouteResult(r.data);
+        this.setCorridorAdvisory(r.data && r.data.advisory);
         // 同步拉候选列表，让大屏把多条备选路线都展示出来
         await this.loadCandidates();
         await this.loadRealWeather();
@@ -896,6 +1010,8 @@ export default {
         });
         const list = (r.data && r.data.candidates) || [];
         this.candidates = list;
+        // 候选接口里附带的全部受阻建议（与 /candidates 同一份判据）
+        this.setCorridorAdvisory(r.data && r.data.advisory);
         // 公路候选之外的「可坐船出境」推荐位：一并接住，供坐船卡片与地图走廊高亮使用
         this.canalOption = (r.data && r.data.canalOption) || null;
         if (!this.canalOption) this.showCorridor = false;
@@ -911,9 +1027,33 @@ export default {
         this.showCorridor = false;
       }
     },
+    /**
+     * 全域受阻建议的统一入口（15 秒轮询 / SSE / 候选拉取三处都会带）。
+     * 同一局势只弹一次：调度员确认过就不再因轮询反复抢回面板，
+     * 但走廊清单或成因变了（签名变化）会重新提醒——灾害范围扩大时必须重新告知。
+     */
+    setCorridorAdvisory(a) {
+      const sig = a && a.code ? a.action + '|' + (a.detail || '') : '';
+      this._corridorSig = sig;
+      if (sig && sig === this._corridorAck) {
+        this.corridorAdvisory = null;
+        return;
+      }
+      const first = !!a && !this.corridorAdvisory;
+      this.corridorAdvisory = a || null;
+      if (a && first) {
+        const v = advisoryView(a, -1);
+        this.pushTimeline('全域受阻', (v && v.title) || '全线受阻', 'danger');
+      }
+    },
+    /** 调度员确认「知道了」：记住这轮局势签名，走廊与成因都没变就不再弹 */
+    dismissCorridorAdvisory() {
+      this._corridorAck = this._corridorSig || '';
+      this.corridorAdvisory = null;
+    },
     // 切换主线：直接把候选的几何替换为主线数据，无需再次请求后端（候选已含 coords/edgeIds/edgeSpans）
-    selectCandidate(key) {
-      const c = (this.candidates || []).find(x => x.key === key);
+    selectCandidate(key, candidateOverride) {
+      const c = candidateOverride || (this.candidates || []).find(x => x.key === key);
       if (!c) return;
       this.selectedCandidateKey = key;
       // 1. 主线几何 = 候选的几何（coords 是 [[lat,lon],...]）
@@ -941,6 +1081,20 @@ export default {
       }
       this.bilingualWarning = '';
       this.pushTimeline('主线切换', `${c.label || c.key} · ${c.hours != null ? c.hours + 'h' : '-'} · 风险 ${c.riskCount || 0} 段`, c.softened ? 'warn' : 'info');
+    },
+    /**
+     * AgentPanel「开始导航派单」候选点选 → 大屏地图预览。
+     * 直接用传上来的候选几何（与派单完全一致），不依赖大屏自身候选列表（两者 cargoType 参数可能不同）。
+     * 选到「坐船出境」则展开平陆运河陆水联运走廊。
+     */
+    onPreviewCandidate(payload) {
+      if (!payload) return;
+      if (payload.key === 'canal') {
+        if (payload.canal && !this.canalOption) this.canalOption = payload.canal;
+        if (this.canalOption && !this.showCorridor) this.toggleCanalCorridor();
+        return;
+      }
+      this.selectCandidate(payload.key, payload.candidate);
     },
     // 坐船卡片：点击在地图上高亮/收起「平陆运河陆水联运走廊」。几何懒拉一次后缓存复用。
     toggleCanalCorridor() {
@@ -1022,6 +1176,8 @@ export default {
           // 风险集合先落地（即便本次没带 route）：硬熔断会走下面的 early return，
           // 若风险也一并跳过，地图上的红色风险走廊就只能等 15 秒轮询才更新。
           if (Array.isArray(data.risks)) this.risks = data.risks;
+          // 全域受阻建议随推送一并下发（RouteAgentService 重算后附上）：先落建议再看路线
+          this.setCorridorAdvisory(data.advisory);
           if (!data.route) {
             // 硬熔断：无可用路径事件（含 error / advice），以红色告警提示人工介入
             this.showAgentNotice(data);
@@ -1061,13 +1217,18 @@ export default {
       // 运输任务（公司派单/司机接单/撤销）：大屏派单面板实时更新
       this._agentEs.addEventListener('task-assigned', (ev) => {
         try {
+          const prevTask = (this.taskStatus && this.taskStatus.task) || null;
           this.taskStatus = JSON.parse(ev.data);
-          if (this.taskStatus && this.taskStatus.task) {
-            const t = this.taskStatus.task;
+          const t = this.taskStatus && this.taskStatus.task;
+          if (t) {
             const accepted = t.status === 'ACCEPTED';
             this.pushTimeline(accepted ? '司机接单' : '公司派单',
               `${t.plate} ${t.driverName}承运 ${t.cargoName} ${t.weightT}t，${t.originId} → ${t.destinationId}`,
               accepted ? 'info' : 'warn');
+          } else if (prevTask) {
+            // 司机退出接单 / 调度撤销：派单面板立刻回到「未派单」，时间线也要留痕，
+            // 否则演示时看不出这一刀是即时生效的
+            this.pushTimeline('任务撤销', `${prevTask.plate} 已退出接单，司机端退回普通导航模式`, 'info');
           }
           this.refreshDecisionLog();
         } catch (e) {
@@ -1077,8 +1238,17 @@ export default {
       this._agentEs.onerror = () => {
         retries++;
         if (retries > 3) {
+          // 旧实现在这里 close 后置空就再也不管了：SSE 一断，司机端接单/退单
+          // 只能等刷新页面才看得到，正是「两端响应慢」的另一半原因。
+          // 改成退避后重建连接，重连成功再补拉一次任务态对齐断流期间漏掉的事件。
           this._agentEs.close();
           this._agentEs = null;
+          clearTimeout(this._agentReconnectTimer);
+          this._agentReconnectTimer = setTimeout(() => {
+            this._agentReconnectTimer = null;
+            if (this._unmounted) return;
+            this.connectAgent();
+          }, 4000);
           return;
         }
         // EventSource 会自动重连，此处仅日志
@@ -1091,6 +1261,9 @@ export default {
       this._agentEs.addEventListener('canal-recover', (ev) => {
         try { this.onCanalRecover(JSON.parse(ev.data)); } catch (e) { console.error('canal-recover parse failed', e); }
       });
+      // 订阅建好立刻对一次任务态：首次挂载靠这一发拿到初始状态，
+      // 断线重连则补上断流期间漏掉的派单/接单/退单事件
+      this.refreshTask();
     },
     showAgentNotice(data) {
       const rerouted = data.route && data.route.rerouted;
@@ -1195,6 +1368,10 @@ export default {
         dispatched: false,
         dispatching: false
       };
+      // 禁航翻转也让 AI 面板旧方案立即失效并重算（与 onSandboxChange 沙盘路径同构）：
+      // 支流联动/后端自动触发的 canal-block 不经沙盘，不补这一刀的话面板会一直停在
+      // 禁航前的旧推荐，常态模板还会拿过期候选比选派单
+      if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.notifyRiskChanged();
     },
     /** 运河恢复通航：收起换线卡片，时间线去重同上 */
     onCanalRecover(data) {
@@ -1205,6 +1382,8 @@ export default {
         this.pushTimeline('恢复通航', (data && data.reason) || '平陆运河通航条件恢复红线之上，陆水联运方案恢复可用', 'ok');
       }
       this.canalAlert = null;
+      // 恢复通航同样重算：水运方案重新可用，旧一轮「公路绕行」推荐不该接着展示
+      if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.notifyRiskChanged();
     },
     /**
      * 一键为在途联运司机换线：等价于调度员在 AI 面板确认「公路绕行」并下发任务变更
@@ -1246,6 +1425,20 @@ export default {
       // done：AI 面板按钮的完成回调（恢复可点/亮「已派单」），无论成败必须调，否则按钮卡在「派单中…」
       const done = payload && typeof payload.done === 'function' ? payload.done : () => {};
       if (!route) { done(false); return; }
+      // 全域受阻时不得直接把线派下去：候选里那条「向前」路线是降级放行换来的，
+      // 默认动作是暂缓发车。这里加一道人工确认，防的是“灾害一来、调度员顺手一点就派单”。
+      if (this.corridorAdvisory && this._dispatchHitsBlocked(route)) {
+        const v = this.corridorView;
+        const ok = window.confirm(`${v.title}\n\n${v.text}\n\n`
+          + `仍要按「${route.routeLabel || route.routeChoice}」派单吗？\n（确定 = 明知全线受阻仍派单，取消 = 回到候选列表）`);
+        if (!ok) {
+          done(false);
+          this.pushTimeline('派单已中止', v.title, 'danger');
+          return;
+        }
+        this.pushTimeline('全域受阻仍派单',
+          `调度员确认按「${route.routeLabel || route.routeChoice}」派单，风险自负`, 'danger');
+      }
       const body = { ...(this.dispatchForm || {}), ...route };
       // 空值剔掉，让后端剧本默认值生效
       Object.keys(body).forEach(k => {
@@ -1266,6 +1459,12 @@ export default {
         alert('派单失败，请重试');
       }
     },
+    /** 本次派单是否踩在全域受阻的口径上：选了降级放行的候选，或运河禁航下仍派坐船方案 */
+    _dispatchHitsBlocked(route) {
+      if (route.routeChoice === 'canal') return true;
+      const c = (this.candidates || []).find(x => x.key === route.routeChoice);
+      return !!(c && c.notRecommended);
+    },
     refreshOutreach() {
       axios.get('/api/outreach/status').then(({ data }) => { this.outreachStatus = data; }).catch(() => {});
       this.refreshDecisionLog();
@@ -1278,6 +1477,19 @@ export default {
         axios.get('/api/task/current').then(({ data: d }) => { this.taskStatus = d; }).catch(() => {});
       }
       this.refreshDecisionLog();
+    },
+    /**
+     * 任务态对账（SSE 之外的兜底）：只在真的变了时才写入 taskStatus。
+     * EventSource 有「连接看着还活着、但已经不吐事件」的静默死法（切后台、代理断流），
+     * 没有这层兜底，司机端退单后大屏可能长时间停在旧状态。
+     */
+    syncTaskState() {
+      axios.get('/api/task/current').then(({ data }) => {
+        if (!data) return;
+        const sig = (t) => (t ? `${t.taskId}|${t.status}` : 'none');
+        const prev = (this.taskStatus && this.taskStatus.task) || null;
+        if (sig(prev) !== sig(data.task || null)) this.taskStatus = data;
+      }).catch(() => { /* 静默，下一轮再对 */ });
     },
     // ---- 左侧面板拖拽缩放：拖动右边缘手柄，宽度与字号等比放大 ----
     startPanelDrag(e) {
@@ -1343,24 +1555,50 @@ export default {
       if (!this.pickMode) return;
       const hit = this.nearestNode(lat, lon);
       if (!hit || !hit.node) { alert('路网数据未加载'); return; }
+      // 吸附距离护栏：路网节点只沿中越走廊密集，点到走廊外（老挝/泰国/海上）
+      // 会默默吸到几百 km 外的节点，起终点看起来“乱跑”且算路必然失败——当场说清楚
+      if (hit.distKm > PICK_SNAP_MAX_KM) {
+        alert(`该位置距最近路网节点约 ${Math.round(hit.distKm)} km，超出路网覆盖范围。\n请在广西—越北道路走廊附近点击。`);
+        return;
+      }
       const n = hit.node;
+      const label = await this.pickLabel(n, lat, lon);
       if (!this.pickOriginNode) {
         this.pickOriginNode = n;
         this.originId = n.id;
         this.draftOriginId = n.id;
-        this.originName = n.name || n.id;
+        this.originName = label;
         return;
       }
       this.pickDestinationNode = n;
       this.destinationId = n.id;
       this.draftDestinationId = n.id;
-      this.destinationName = n.name || n.id;
+      this.destinationName = label;
       if (this.pickOriginNode.id === n.id) {
         alert('起终点不能是同一节点，请重新点击终点');
         this.pickDestinationNode = null;
         return;
       }
       await this.planCrossBorder();
+    },
+    /**
+     * 选点显示名。8.6 万路网节点里只有 32 个带名字，直接用 n.name || n.id 会让
+     * 输入框变成一串节点 ID（3266817885），调度员看不出选中了哪儿、还以为没生效。
+     * 因此：节点有名用节点名 → 否则用本地地名库最近地名（“XX附近”）→ 再否则用坐标。
+     */
+    async pickLabel(n, lat, lon) {
+      if (n.name && n.name.trim()) return n.name.trim();
+      let best = null;
+      let bestKm = Infinity;
+      try {
+        for (const p of await fetchPlaceList()) {
+          if (p.lat == null || p.lng == null) continue;
+          const d = this.haversineKm({ latitude: lat, longitude: lon }, { latitude: p.lat, longitude: p.lng });
+          if (d < bestKm) { bestKm = d; best = p; }
+        }
+      } catch (e) { /* 地名库拉不到（离线）就退化成坐标显示 */ }
+      if (best && bestKm <= 60) return `${best.name}附近`;
+      return `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
     },
     clearRoute() {
       this.routeResult = null;
@@ -1371,6 +1609,9 @@ export default {
       this.baselineEdgeIds = [];
       this.baselineEdgeSpans = [];
       this.bilingualWarning = '';
+      this.corridorAdvisory = null;
+      this._corridorSig = '';
+      this._corridorAck = '';
       this.pickOriginNode = null;
       this.pickDestinationNode = null;
     },
@@ -1508,6 +1749,9 @@ export default {
     this.connectAgent();
     this._riskTimer = setInterval(() => {
       this.refreshRisks();
+      // 气象源清单只在 mounted 拉过一次，那一发失败就再没人管（下拉框永久空白）；
+      // 空了就顺着这个 15 秒心跳补拉，拉到自动停（不再发请求）。
+      if (!this.weatherSourceOptions.length) this.loadWeatherSource();
       if (this.routeResult && this.routeResult.route) {
         this.planCrossBorder();
       }
@@ -1515,6 +1759,8 @@ export default {
     // 司机端"开始导航"信号：车一动就自动触发一次 AI 六维分析（常态方案对比），
     // 由调度员人工确认路线后再下发，分析不再只在熔断后才做
     this._tripTimer = setInterval(() => { this.pollTripSignal(); }, 2500);
+    // 两端状态对账：SSE 是毫秒级主通道，这发 10 秒的 REST 只防 SSE 静默断流
+    this._taskSyncTimer = setInterval(() => { this.syncTaskState(); }, 10000);
     // 帧率自检是在首屏画完后异步跑的，它判定要降级时得把按钮文案带起来
     this._offLiteChange = onLiteChange(() => {
       this.perfLite = isLite();
@@ -1522,8 +1768,12 @@ export default {
     });
   },
   beforeUnmount() {
+    this._unmounted = true;
+    if (this._agentReconnectTimer) { clearTimeout(this._agentReconnectTimer); this._agentReconnectTimer = null; }
+    if (this._taskSyncTimer) clearInterval(this._taskSyncTimer);
     if (this._offLiteChange) { this._offLiteChange(); this._offLiteChange = null; }
     if (this._sourceSettleTimer) { clearTimeout(this._sourceSettleTimer); this._sourceSettleTimer = null; }
+    if (this._srcRetryTimer) { clearTimeout(this._srcRetryTimer); this._srcRetryTimer = null; }
     if (this._riskTimer) clearInterval(this._riskTimer);
     if (this._tripTimer) clearInterval(this._tripTimer);
     if (this._agentEs) this._agentEs.close();
@@ -1533,6 +1783,74 @@ export default {
 </script>
 
 <style scoped>
+/* 灾害时间线：搜索框 + 限高滚动窗口（此前 timeline-* 类没有任何样式，记录一多就把面板撑得很长）*/
+.timeline-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border: 1px solid rgba(30, 50, 90, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text-h, #1c2a44);
+}
+.timeline-search:focus {
+  outline: none;
+  border-color: #4f6df5;
+}
+.timeline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.timeline-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px dashed rgba(30, 50, 90, 0.08);
+}
+.timeline-item:last-child {
+  border-bottom: none;
+}
+.timeline-time {
+  font-size: 10px;
+  color: #64748f;
+  font-family: var(--mono, monospace);
+  min-width: 52px;
+  padding-top: 2px;
+}
+.timeline-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 5px;
+  flex-shrink: 0;
+  background: #64748f;
+}
+.timeline-dot.info { background: #4f6df5; }
+.timeline-dot.ok { background: #22a35a; }
+.timeline-dot.warn { background: #d97706; }
+.timeline-dot.danger { background: #e11d48; }
+.timeline-body {
+  flex: 1;
+  min-width: 0;
+}
+.timeline-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-h, #1c2a44);
+}
+.timeline-desc {
+  font-size: 11px;
+  color: #64748f;
+  line-height: 1.5;
+  word-break: break-word;
+}
 .app-root {
   font-family: 'Segoe UI', Inter, system-ui, sans-serif;
   color: #33415c;
@@ -1742,13 +2060,37 @@ export default {
 .btn:active { transform:scale(.97); }
 .btn.primary { background:linear-gradient(135deg, #4f6df5, #22b8cf); box-shadow:0 4px 18px rgba(79,109,245,0.35); }
 .btn.primary:hover { box-shadow:0 6px 24px rgba(79,109,245,0.45); }
-.btn:not(.primary):not(.outline):not(.muted):not(.tiny):not(.pick-on) { background:#eef1f8; border:1px solid #dbe3f2; color:#33415c; }
-.btn:hover:not(.primary):not(.outline):not(.muted):not(.tiny):not(.pick-on) { background:#e4eaf6; }
+.btn:not(.primary):not(.outline):not(.muted):not(.tiny):not(.pick-on):not(.driver-entry) { background:#eef1f8; border:1px solid #dbe3f2; color:#33415c; }
+.btn:hover:not(.primary):not(.outline):not(.muted):not(.tiny):not(.pick-on):not(.driver-entry) { background:#e4eaf6; }
 .btn.small { padding:6px 10px; font-size:11px; }
 .btn.muted { background:#eef1f8; color:#8b99b5; }
 .btn.outline { background:transparent; color:#0e9bb0; border:1px solid rgba(14,155,176,0.4); }
 .btn.outline:hover { border-color:#0e9bb0; background:rgba(14,155,176,0.08); }
 .btn.outline-light { background:rgba(255,255,255,0.25); color:#fff; border:1px solid rgba(255,255,255,.5); }
+/* 司机端入口：头部其余按钮都是冷蓝灰，这里用品牌棱镜里的暖端（橙→品红）做整屏唯一暖色块，
+   再叠一呼吸发光。高度控制在 ~29px：.main 的 calc(100vh - 65px) 是写死的，
+   按钮把头部顶高就会在底部多出/缺一段空隙 */
+.btn.driver-entry {
+  display:inline-flex; align-items:center; gap:5px;
+  padding:6px 12px; font-size:12px; font-weight:700; letter-spacing:.3px;
+  border-radius:999px; color:#fff;
+  background:linear-gradient(135deg, #ff7a00, #ff2d55);
+  border:1px solid rgba(255,255,255,.55);
+  box-shadow:0 0 0 1px rgba(255,122,0,.35), 0 4px 14px rgba(255,45,85,.32);
+  animation:driver-entry-pulse 2.4s ease-in-out infinite;
+}
+.btn.driver-entry:hover {
+  transform:translateY(-1px) scale(1.03);
+  box-shadow:0 0 0 1px rgba(255,122,0,.55), 0 7px 20px rgba(255,45,85,.45);
+}
+/* 与 .btn:hover 同特异度且写在后面，按下时的缩放手感才能生效 */
+.btn.driver-entry:active { transform:scale(.97); }
+.de-ico { width:15px; height:15px; fill:none; stroke:#fff; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
+.de-arrow { font-size:11px; opacity:.9; }
+@keyframes driver-entry-pulse {
+  0%, 100% { box-shadow:0 0 0 1px rgba(255,122,0,.30), 0 4px 12px rgba(255,45,85,.28); }
+  50%      { box-shadow:0 0 0 4px rgba(255,122,0,.16), 0 5px 18px rgba(255,45,85,.42); }
+}
 .btn.pick-on { background:linear-gradient(135deg, #16a34a, #34d399); box-shadow:0 0 18px rgba(22,163,74,0.35); animation:pulse-green 2s infinite; }
 @keyframes pulse-green { 0%,100%{box-shadow:0 0 8px rgba(22,163,74,0.18)} 50%{box-shadow:0 0 22px rgba(22,163,74,0.45)} }
 
@@ -1796,6 +2138,11 @@ export default {
 }  .candidate-item:hover { background:#eef4fb; border-color:rgba(34,184,207,0.5); }
 .candidate-item.recommended { border-left-color:#16a34a; }
 .candidate-item.softened { border-left-color:#ea7a2e; }
+    /* 全域受阻卡：区域性灾害同时盖住多条走廊时的返回/等待结论，比普通告警卡更重 */
+.corridor-advisory { border-color:rgba(225,29,72,0.45); background:rgba(225,29,72,0.06); }
+.corridor-advisory h3 { color:#be123c; }
+.corridor-advice { font-size:13px; line-height:1.7; margin-top:4px; }
+.corridor-basis { font-size:11px; line-height:1.6; margin-top:4px; }
 .candidate-item.active {
   background:rgba(34,184,207,0.10);
   border-color:#22b8cf;
@@ -1855,6 +2202,9 @@ export default {
 .customs-name { font-weight:700; color:#1c2a44; font-size:13px; }
 .customs-hours { background:linear-gradient(135deg, #4f6df5, #22b8cf); color:#fff; padding:3px 10px; border-radius:10px; font-weight:700; font-size:11px; }
 .customs-note { color:#ea7a2e; font-size:11px; font-weight:600; }
+
+/* 通关时效并入决策沙盘卡片内的子块：不再自带 card 外框，用顶部虚线与上方沙盘内容分隔 */
+.sandbox-sub { margin-top:16px; padding-top:14px; border-top:1px dashed rgba(30,50,90,0.15); }
 
 .kb-input { flex:1; padding:8px 10px; background:#f4f6fc; border:1px solid #dbe3f2; border-radius:8px; color:#33415c; font-size:13px; outline:none; }
 .kb-input:focus { border-color:#4f6df5; box-shadow:0 0 0 3px rgba(79,109,245,0.12); }

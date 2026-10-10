@@ -1,7 +1,13 @@
 // 生成本地地名库 place-names.json：路网带名节点（保证吸附精度）+ 策展补充（港口/口岸/运河枢纽）
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const net = JSON.parse(fs.readFileSync('D:/idea project/asean-weather-logistics/src/main/resources/data/vietnam-road-network.json', 'utf8'));
+// 路径基于脚本自身位置推导，不写死任何一台开发机的绝对路径
+const DATA_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
+  '..', 'src', 'main', 'resources', 'data');
+
+const net = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'vietnam-road-network.json'), 'utf8'));
 const named = net.nodes.filter(n => n.name);
 console.log('named nodes:', named.length, 'by level:', named.reduce((m, n) => (m[n.level] = (m[n.level] || 0) + 1, m), {}));
 
@@ -33,6 +39,6 @@ for (const n of named) {
   out.push({ name: n.name, lat: n.latitude, lng: n.longitude, tag, nodeId: n.id });
 }
 console.log('total entries:', out.length);
-fs.writeFileSync('D:/idea project/asean-weather-logistics/src/main/resources/data/place-names.json',
+fs.writeFileSync(path.join(DATA_DIR, 'place-names.json'),
   JSON.stringify(out, null, 1), 'utf8');
 console.log('written');

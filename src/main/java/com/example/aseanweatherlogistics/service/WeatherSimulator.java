@@ -51,10 +51,16 @@ public class WeatherSimulator {
      * 说明：真实 OSM 路网中"谅山—北江"等路段由多条边组成，
      * 因此 LANDSLIDE/HEAT/TYPHOON 使用 fromNodeId/toNodeId 做整段路径注入，
      * 口岸场景 RAIN_YGG/FOG_MC 保留单边（口岸通道边 ID 固定）。
+     * <p>
+     * simParams：注入该灾害时同步拉到判定/熔断值的沙盘气象滑杆参数（扁平键与
+     * DecisionSandboxService.setSimParams 一致），让"点卡片"与"手动拖滑杆过阈值"
+     * 在界面上完全等价；文案里的阈值与 RoadRiskIndex / TyphoonRiskRule /
+     * CargoSafetyIndex 的真实判据统一，不再各说各话。
      */
     public record Scenario(String id, String name, String description,
                            String edgeId, String fromNodeId, String toNodeId,
-                           double penaltyMultiplier, String reason) {
+                           double penaltyMultiplier, String reason,
+                           Map<String, Double> simParams) {
         public Map<String, Object> toMap() {
             Map<String, Object> map = new LinkedHashMap<>();
             map.put("id", id);
@@ -65,26 +71,32 @@ public class WeatherSimulator {
             if (toNodeId != null) map.put("toNodeId", toNodeId);
             map.put("penaltyMultiplier", penaltyMultiplier);
             map.put("reason", reason);
+            map.put("simParams", simParams);
             return map;
         }
     }
 
     private static final List<Scenario> SCENARIOS = List.of(
             new Scenario("RAIN_YGG", "暴雨·友谊关",
-                    "12h 降雨量 >80mm，友谊关口岸路段，等效道路中断",
-                    "E4", null, null, 100, "暴雨（12h降雨量>80mm）"),
+                    "12h 降雨量 ≥80mm 即熔断（友谊关阈值，本次注入 85mm），等效道路中断",
+                    "E4", null, null, 100, "暴雨（12h降雨量≥80mm熔断）",
+                    Map.of("yggRainMm", 85.0)),
             new Scenario("FOG_MC", "大雾·芒街",
-                    "能见度 <50m，芒街口岸通关受阻",
-                    "E9", null, null, 50, "大雾（能见度<50m）"),
+                    "能见度 <500m 判定浓雾（与路面风险指数同一判据，本次注入 400m），芒街口岸通关受阻",
+                    "E9", null, null, 50, "大雾（能见度<500m）",
+                    Map.of("mcVisibilityM", 400.0)),
             new Scenario("LANDSLIDE", "泥石流·越北山区",
-                    "谅山—北江段山地次生灾害，泥石流风险>0.7，直接切断",
-                    null, "LS", "BG", 1000, "山地次生灾害（泥石流风险>0.7）"),
+                    "谅山—北江段山地次生灾害，泥石流风险>0.7，直接切断（地质指标，不由气象滑杆驱动）",
+                    null, "LS", "BG", 1000, "山地次生灾害（泥石流风险>0.7）",
+                    Map.of()),
             new Scenario("HEAT", "高温·冷链",
-                    "北江—河内段 >35°C，冷链货损风险上升",
-                    null, "BG", "HN", 10, "高温（>35°C，冷链货损风险）"),
+                    "北江—河内段 ≥38°C 记高温风险（本次注入 38°C），冷链货损自 ≥30°C 起累积",
+                    null, "BG", "HN", 10, "高温（≥38°C，冷链货损风险）",
+                    Map.of("yggTempC", 38.0, "mcTempC", 38.0)),
             new Scenario("TYPHOON", "台风·广宁沿海",
-                    "下龙—海阳沿海段台风，阵风12级，谨慎通行",
-                    null, "HL", "HD", 80, "台风（广宁省沿海段）")
+                    "台风熔断判据：气压≤990hPa 且 风速≥60km/h（本次注入 985hPa / 65km/h，芒街侧）",
+                    null, "HL", "HD", 80, "台风（气压≤990hPa且风速≥60km/h）",
+                    Map.of("mcPressureHpa", 985.0, "mcWindKph", 65.0))
     );
 
     public RiskSegment injectRisk(RiskSegment riskSegment) {
@@ -215,6 +227,42 @@ public class WeatherSimulator {
 
     /** 场景 ID -> 注入的边集合（用于路径场景清理） */
     private final Map<String, Set<String>> scenarioEdges = new ConcurrentHashMap<>();
+
+    /** 某场景对应的沙盘气象滑杆快照（注入时把滑杆拉到该灾害的判定/熔断值）；无滑杆场景返回空 */
+    public Map<String, Double> scenarioSimParams(String scenarioId) {
+        return findScenario(scenarioId).simParams();
+    }
+
+    /** 撤销场景时：把本场景拉过的滑杆键回落到"安全中性值"（与 DecisionSandboxService.neutralSection 同口径） */
+    public Map<String, Double> neutralizedScenarioSimParams(String scenarioId) {
+        Map<String, Double> out = new LinkedHashMap<>();
+        for (String key : scenarioSimParams(scenarioId).keySet()) {
+            out.put(key, neutralValueOf(key));
+        }
+        return out;
+    }
+
+    /** 清除全部风险时用：所有场景拉过的滑杆键一并回落中性值 */
+    public Map<String, Double> neutralAllScenarioSimParams() {
+        Map<String, Double> out = new LinkedHashMap<>();
+        for (Scenario s : SCENARIOS) {
+            for (String key : s.simParams().keySet()) {
+                out.put(key, neutralValueOf(key));
+            }
+        }
+        return out;
+    }
+
+    private static double neutralValueOf(String flatKey) {
+        if (flatKey.endsWith("RainMm")) return 0;
+        if (flatKey.endsWith("PressureHpa")) return 1013;
+        if (flatKey.endsWith("WindKph")) return 20;
+        if (flatKey.endsWith("TempC")) return 28;
+        if (flatKey.endsWith("HumidityPct")) return 60;
+        if (flatKey.endsWith("CloudPct")) return 30;
+        if (flatKey.endsWith("VisibilityM")) return 10000;
+        return 0;
+    }
 
     private Scenario findScenario(String scenarioId) {
         for (Scenario s : SCENARIOS) {

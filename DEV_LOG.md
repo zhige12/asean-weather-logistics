@@ -13,7 +13,7 @@
 - **AI 灾害预测**：实时气象喂给 DeepSeek，预测未来 6-12 小时灾害并注入风险
 - **Agent 实时守护**：风险变化后毫秒级重算路线，SSE 推送新路线到调度大屏和司机端
 - **中越双语预警 + 行业知识库 RAG**
-- **离线矢量底图**：本地 planetiler 生成 MVT 瓦片，后端 `/tiles` 托管，完全离线可用、无第三方在线依赖
+- **离线可用的底图能力**：默认走天地图在线瓦片（后端同源代理 + 内存/磁盘两级缓存，磁盘缓存在 `data/tile-cache/{img_w,vec_w,cia_w,cva_w}`），降级末级为包内 EPSG:4326 栅格瓦片 `/tiles/{z}/{x}/{y}.jpg`，断网仍有底图。（早期的 planetiler MVT 矢量瓦片 + MapLibre 渲染方案已弃用，见 §五）
 
 ---
 
@@ -29,7 +29,7 @@
 | `probe_namezh.py` | 临时探测脚本，检查 PBF 中地名与中文译名（name:zh）覆盖情况 |
 | `verify_network.py` | 最终校验：锚点可达性、关键路径连通性（NN→HN、LS→BG 等）、节点/边 ID 唯一性 |
 
-**矢量瓦片**：用 planetiler 从同一 PBF 生成 z0-14 越南 MVT 瓦片（`tools/data/tiles/`），OpenMapTiles schema，样式文件 `frontend/src/data/local-base-style.js`。
+**矢量瓦片（历史）**：用 planetiler 从同一 PBF 生成 z0-14 越南 MVT 瓦片（`tools/data/tiles/`），OpenMapTiles schema，样式文件 `frontend/src/data/local-base-style.js`。**现状**：前端已全部改为 Leaflet 栅格层，不再请求 `.pbf`，样式文件已不存在（`frontend/src/data/` 现为空目录）；`tools/data/tiles` 仍被 `WebConfig` 注册为 `/tiles/**` 的第二个位置，属无人访问的历史产物。
 
 ### 2. 后端（Spring Boot 4.1.0 + Java 21，端口 8080）
 
@@ -56,31 +56,30 @@
 - `AIService` / `DeepseekService`：本地 Ollama → 在线 DeepSeek → 内置离线模板（规则引擎），两级降级保证"拔网线可演示"（公司网关通道已移除）
 - `StartupWarmup`：启动预热跑一次 NN→HN 规划触发 JIT，保证首次点击毫秒级
 
-**配置**：`WebConfig` 配 CORS（`/api/**` 全开放）+ 把 `tools/data/tiles` 映射为 `/tiles/**` 托管矢量瓦片。
+**配置**：`WebConfig` 配 CORS（`/api/**` 全开放）+ 把 `frontend/dist` 与离线瓦片目录映射为静态资源；`/tiles/**` 按顺序挂两处：离线栅格目录（`osm.tiles.path`，未指定时在 `data/osm-tiles` 与本机历史目录中探测）与 `tools/data/tiles`（历史 MVT 矢量瓦片，当前前端不请求）。
 
-### 3. 前端（Vue 3.5 + Vite + Leaflet 1.9.4 + MapLibre GL 5.0）
+### 3. 前端（Vue 3.5 + Vite + Leaflet 1.9.4）
 
 双入口：`src/main.js`（调度大屏）、`src/driver/main.js`（司机端），`vite.config.js` 双入口打包 + `/api` 代理到 8080。
 
 | 文件 | 核心功能 |
 |---|---|
 | `src/App.vue` | 调度大屏：路径规划（下拉/地图选点）、灾害场景注入、实时气象、通关时效调整、路线对比、AI 双语预警、AI 灾害预测、知识库检索、当前风险列表；订阅 SSE + 15 秒轮询兜底 |
-| `src/components/MapView.vue` | 地图组件（Leaflet + MapLibre 混用）：底图四级切源（本地矢量→高德→OSM→Carto）+ 瓦片自愈巡检；中文地名分级注记（`zh-places.json`）；口岸节点（divIcon）、风险边（橙色）、口岸虚拟边（红色）、路线（通畅绿/绕行红）、基准路线（灰虚线）、地图选点 |
-| `src/driver/DriverApp.vue` | 司机端（手机竖屏）：状态卡（通畅/预警/绕行）、沿线实时气象、风险路段列表、AI 双语预警、通关提示、知识库速查 |
-| `src/data/local-base-style.js` | MapLibre 矢量底图样式（OpenMapTiles schema），数据源指向 `/tiles/{z}/{x}/{y}.pbf` |
-| `src/data/zh-places.json` | 80+ 中文地名注记，level 1-3 分级显隐 |
+| `src/components/MapView.vue` | 地图组件（纯 Leaflet，MapLibre 已弃用）：底图四级降级链（天地图影像→天地图矢量→OSM 在线→本地离线瓦片，源定义在 `src/utils/tileSources.js`）+ 瓦片自愈巡检；中文地名注记由天地图注记层（`cia_w`/`cva_w`）提供；口岸节点（divIcon）、风险边（橙色）、口岸虚拟边（红色）、路线（通畅绿/绕行红）、基准路线（灰虚线）、地图选点 |
+| `src/components/PlaceInput.vue` | 调度大屏起终点输入框：关键字联想 + 空输入聚焦展开「常用地点」下拉（地名库 `hot` 标记），候选自带 `nodeId` 时直接填入、否则走 `/api/geocode/snap` 吸附 |
+| `src/driver/DriverApp.vue` | 司机端（手机竖屏）：状态卡（通畅/预警/绕行）、沿线实时气象、风险路段列表、AI 双语预警、通关提示、知识库速查；TTS 抢占优先级：灾害预警 / 运河禁航 / 全域受阻（`force`）> 导航开始播报（`lock` 独占）> 其余普通播报 |
 
 ### 4. 数据合规确认（答辩加分项）
 
 - 地图底图与路网数据均派生自 OpenStreetMap（ODbL 许可），界面已标注 `© OpenStreetMap contributors (ODbL)`
-- 默认使用**本地自建矢量瓦片**，不依赖官方在线瓦片服务，规避 Tile Usage Policy 限制
+- 底图默认取**天地图在线瓦片**，但密钥不外泄：前端只走后端同源代理 `/api/tianditu/...`，密钥池轮转 + per-key 熔断 + 内存/磁盘两级缓存，热门瓦片全生命周期只回源一次；探测失败时才降级到 OSM 在线源与包内自建离线栅格瓦片。「不依赖第三方在线服务」只在包内离线末级这一档成立，不是默认状态
 - 初赛展示为非商业内部使用，ODbL 共享义务不触发，无版权纠纷风险
 
 ### 5. 联调与运维
 
 - 后端：`gradlew bootRun`，bootrun*.log 记录各次启动
 - 前端：Vite dev server（5173），`/api` 代理后端
-- 数据验证：瓦片接口 `/tiles/...pbf` 返回 200；路网接口 `/api/route/network` 返回 200（23MB 全量加载正常）
+- 数据验证：瓦片接口 `/tiles/...` 返回 200（当时为 MVT `.pbf`，现离线末级为 `.jpg`）；路网接口 `/api/route/network` 返回 200（23MB 全量加载正常）
 - 离线演示包 `asean-demo/`（外发 `D:\桌面\asean-demo-offline.zip`，342MB / 32421 条目 / 解压后 375MB）：
   内嵌 jre + app.jar + dist + 29493 张天地图瓦片 + decision-cache；`README.txt`（114 行）= 启动链路（解压 → 双击 start.bat → 打开大屏/司机端地址）
   + 一段「气象数据用的是组委会官方接口 · 可当场核验」：`WEATHER_SOURCE=contest-observation` 且 Token 随包（用户要求评委必须亲自验官方数据，
@@ -109,28 +108,33 @@
 
 | 问题 | 现象 | 处理 |
 |---|---|---|
-| 地图缩放空白/路线消失 | 首次缩放后画面空白，需缩放两次才显示路线 | 诊断：数据链路全正常（瓦片 200、network 200），定位为 Leaflet 缩放动画与 MapLibre GL 5 相机管线兼容问题（`maplibre-gl-leaflet` 在 zoomAnimation 中对 WebGL canvas 做 transform，与 v5 不兼容）。曾尝试 `zoomAnimation: false` 修复，但效果更差（全程空白），**已回退恢复 `zoomAnimation: true`** |
-| （待验证）缩放兼容性 | 缩放动画仍可能存在与 MapLibre GL 5 的不稳定表现 | 待后续：升级 `maplibre-gl` 版本、给插件打补丁或改用纯 MapLibre 渲染 |
+| 地图缩放空白/路线消失 | 首次缩放后画面空白，需缩放两次才显示路线 | 诊断：数据链路全正常（瓦片 200、network 200），定位为 Leaflet 缩放动画与 MapLibre GL 5 相机管线兼容问题（`maplibre-gl-leaflet` 在 zoomAnimation 中对 WebGL canvas 做 transform，与 v5 不兼容）。曾尝试 `zoomAnimation: false` 修复，但效果更差（全程空白），**已回退恢复 `zoomAnimation: true`**。**现状**：MapLibre 已从依赖中整体移除、两端统一纯 Leaflet，大屏仍保留 `zoomAnimation: true`（见 §四 1） |
+| （待复测）缩放兼容性 | 当时观察到缩放动画可能与 `maplibre-gl-leaflet` 桥接层有不稳定表现 | 后续 MapLibre 已整体移除、两端纯 Leaflet，该现象是否随桥接层消失**尚未复测**；旧条目里的「升级 maplibre-gl / 给插件打补丁 / 改用纯 MapLibre」三个候选已随依赖一并作废，现状收敛为 §四 1 |
 | 路线不贴合道路（穿山/切弯） | 路网转换脚本 DP 抽稀容差 0.0006°（≈66m）过粗，52382/62090 条边几何只剩起终点 2 点，山区弯道全部被切成直线 | **根治**：`convert_vietnam_pbf.py` 容差降到 0.0001°（≈11m）重新生成（节点/边数量不变，路由不受影响），>1km 长边平均几何 18.5 点；JSON 改紧凑输出，体积 36MB→22MB。配套：`RouteService.toCoords` 新增 `pathEdgeSpans`（每条边在 pathCoords 中的下标区间），RouteResponse/候选 DTO 下发；司机端风险段标红与 `focusRisk` 改按区间取点（几何加密后点数≠边数，原下标直取会错位） |
 | （已修复）AI 文案谎称本地 | `aiPowered` 仅表示“模型返回了非空文本”，不区分命中哪级通道；本地 Ollama 一超时/显存被占就静默降级到在线 DeepSeek，而 `AgentPanel.vue` 仍按「本地大模型」展示，与 README“数据不出境”直接矛盾（实测：11434 挂时 reroute 结果全由 api.deepseek.com 生成） | `DeepseekService` 新增 `chatWithChannel()` 返回 `AiReply{text,channel,model}`（保留 `chat()` 旧签名不影响其他调用方）；RiskAgent / SolutionAgent / TouchAgent 三个结果 record 各加 `aiChannel`；`DecisionOrchestrator` 取 `worstChannel()` 汇总并输出 `aiChannelLabel`；前端改成四档真实通道标签（本地/在线非本地/规则模板/预生成未记录），每个智能体节点各自标注。旧 decision-cache 无法核实来源，读到旧记录时强制降为 `unrecorded` |
 | 方案 C「原地等待」车标仍前进 | 大屏下发原地等待、司机端确认接收后，导航里的车辆图标照旧沿路线爬。`_switchNavForPlan('C')` 只 `showPush` 就 return，驱动图标前进的模拟行驶定时器 `_triTimer` 从头到尾没被停过 | 新增 `waitHold` 停驶态：`_applyWaitHold()` 关掉 GPS 探测与推进定时器、把车钉在当前里程位置；`_start/_resumeTripSimulation`、`_startRealTimeGPS`、`_tryCapacitor/_BrowserGPS` 及其定位回调、tick 均按 `waitHold` 短路（否则底图整图重建的恢复分支、`await` 权限后迟到的 watchPosition 回调会把车重新开起来）；导航底部加「⏸ 原地等待中 · 车辆停驶」条 + 「恢复行驶」按钮（从当前里程续跑、不回起点）；改派 A/B、司机自行出发、退出导航均清除停驶态 |
 | 弱机上「点什么都没反应」（不只是地图卡） | 同事电脑跑离线包：拖图卡，点各种按钮也发滞；同一份代码在本机顺畅 | 根因不在地图，在**常驻逐帧重绘**：`.panel`（360px 宽、满屏高，所有按钮都在里面）同时挂 `backdrop-filter: blur(20px)` + `prism-drift`（动 background-position）+ `prism-glow`（动 inset box-shadow），`.app-header` 与全屏极光层同类，routeFlow 的 `.rf-arrow-pulse` 以 60fps 重算 `filter: drop-shadow()`——background-position / box-shadow / filter 三者都交不给合成器，只能整幅重绘，主线程被绘制占满后输入事件排队，于是“点什么都没反应”。修：新增 `frontend/src/utils/perfMode.js`，用 `<html data-perf-lite="on">` + 注入 `!important` 样式一次性关掉这些装饰（刻意不用 `* { animation: none }`，否则连加载转圈也一起停掉），`MapView` 按 `isLite()` 以 `lite/fps:24/maxArrows:8` 重建特效层（切换时还要清 `_lastRouteSig`，否则被“同一张图”免疫直接 return）；判定分三层：用户手点（写 localStorage，优先）→ 静态弱机信号（≤2 核 / ≤4GB / 系统要求减少动效）→ 首屏 5 秒后实测 1.2 秒帧率，`fps<40` 或单帧 >250ms 则自动降级且**不写** localStorage。实测（CDP + CPU 节流）：20x 节流下采样到 5fps / 645ms → 自动开启、按钮变「⚡ 轻界面（自动）」、`.panel` animation 转 none、localStorage 仍为 null；不节流时 175fps / 38ms → 保持满特效不误伤。后端同批改两处内存陷阱：`MEM_CACHE_MAX_ENTRIES` 由写死 10 万改为 `tianditu.mem-cache-entries`（默认 2 万，包内 5000——包内总共才 29493 张瓦片，且磁盘才是主缓存），`start.bat` 的 `-Xmx3g` 改为按物理内存自适应（≥16GB 3g / ≥8GB 2g / 其余 1g）并在黑窗打印检测值 |
+| `/api/geocode/list` 丢字段，司机端地名库回填是死路径 | `place-names.json` 与 `GeocodeService.Place` 都有 `nodeId`，但 `list()` 只输出 name/lat/lng/tag；`DriverApp.vue` 里 `if (p.nodeId) NAME_TO_ID[p.name] = p.nodeId` 永远拿不到值（症状被内置 `NODE_NAMES` 掩盖，不报错也不生效） | `list()` 补发 `nodeId`（非空才发）与 `hot`；`suggest()` 的本地候选同样带上 `nodeId`，前端点选自带节点 id 的候选直接写入、跳过 `/api/geocode/snap`（少一次请求且离线可用）。CDP 实测：空输入聚焦弹 14 条常用地点，点选「河内」后输入框为“河内”、下拉收起、`/snap` 请求数 0；改输关键字则分组头消失、切回联想候选 |
+| 导航开始播报把灾害预警「闷」掉（只弹卡不出声） | 司机点「开始导航」后的十几秒内（出发播报还没念完中越双语）灾害到达：红卡弹了、手机震了，但**语音一个字都没有**；`?voicedebug=1` 上留痕「拦截预警播报：导航开始播报中」 | 优先级被写成两个布尔 `force`/`lock`：出发播报用 `{force:true, lock:true}` 独占通道，`speakQueue` 开头对非 force 直接 return，`_cancelVoice(false)` 见 `_criticalVoiceSeq` 也拒绝取消。问题在于**同类安全信息有两套优先级**：运河禁航、全域受阻传了 `force`，而真正最常触发的灾害入口 `_notifyHazard`（SSE 即时提示）、`announceHazard`（绕行播报）、`refreshForecast`（概率骤升）、`_handleDispatchDuringNav`（调度下发）、`buildWarning`（司机手点 AI 预警）全部没传。修：这 5 处统一补 `force`（非安全类的轮询/普通播报仍照旧被出发锁拦住，原有保护不拆）；同时补一个**抢占后的信息不丢**回路——出发播报入队时把开场核心行（起讫点 + 全程里程 + 耗时 + ETA）与当时的播报世代登记下来，被 force 打断时挂到本次队尾补读一次（走 `_expandToSentences` 拆句，否则长句在 WebView 会被提前 onend 截掉后半句），正常念完、重试、卸载三个出口都要作废该登记；第一版把整句从头重读，于是已念完的段会重复（探针输出里「导航开始，」出现在 [0] 和 [7]）——改为登记**拆句后的数组**、`_doSpeak` 每推进一条就把上一条出列，补读只补「还没完整念到的连续后缀」（正在念而被掐断的那条保留重读，半句不能缺字）；出发播报的「4.5 秒未出声自动重试」改成与首次同一个登记函数，否则重试换了新世代而登记里还存着旧世代，重试之后再来灾害就不补读了。**验证**：`tools/_voice_preempt_probe.mjs`（CDP + 把 `window.speechSynthesis` 换成逐句登记文本的假引擎，直接驱动组件方法复现时序）两轮 PASS：灾害句紧接在出发片段之后出现、补读尾部逐条等于「打断时刻登记在册的待补读段」快照、出发独占期间塞入的普通播报仍然不出声 |
+| 地图选点「点了没反应」 | 大屏点「地图选点」后在地图上点两下：无标记、无提示、无规划，看起来像按钮坏了 | 三层原因叠加：① **`App.vue` 压根没把 `pickMode/pickOrigin/pickDestination` 传给 `MapView`**（props 有默认值 false/null，子组件不报错，`map.on('click')` 里的 `if (this.pickMode)` 永远为假，一次 `map-click` 都不发）——补上三个绑定；② `mounted` 与 `initMap` **各绑了一次** `map.on('click')`，一旦①修好就变成一次点击触发两回 `onMapClick`，同一点被当成「起点+终点」并弹「起终点不能是同一节点」——删掉 `mounted` 那次，绑定统一由 `initMap` 负责（每个新地图实例绑一次）；③ 口岸注记、风险/口岸/候选线都是 Leaflet 交互层，它们的 click 优先于地图 click 被消费，点在这些元素上同样没反应——选点模式给地图容器挂 `picking` 类，`:deep(.picking .leaflet-interactive/.place-label-text){pointer-events:none}` 让点击穿透，同时光标变十字作为「现在点地图有效」的可见反馈。另外补两处反馈质量问题：8.6 万路网节点只有 32 个带名字，`n.name || n.id` 会把输入框变成一串节点 ID，改为节点名 → 本地地名库最近地名（「XX附近」）→ 坐标 三级兜底；路网只沿中越走廊密铺（走廊内吸附中位 6km），点到走廊外会默默吸到 300~1000km 外，新增 `PICK_SNAP_MAX_KM=60` 护栏并当场说明。**验证**（CDP 无头点击真实后端）：点河口口岸/芒街口岸注记位置 → 起、终标记落在点击点 1~3px 内、输入框显示「河口口岸附近 / 东兴附近」、自动发出 `plan-with-weather`；点泰国境内 → 弹「距最近路网节点约 995 km，超出路网覆盖范围」而不是默默乱吸 |
 
 ---
 
 ## 四、遗留事项 / 风险提示
 
-1. **缩放兼容性问题未根治**：当前保留 `zoomAnimation: true`（与问题出现前行为一致），"首次缩放需二次触发"的问题仍存在，暂不阻塞演示（可通过先缩放一次规避），答辩前建议优先解决。
+1. **缩放兼容性问题未根治（且需复测）**：当前保留 `zoomAnimation: true`（与问题出现前行为一致），"首次缩放需二次触发"的问题仍存在，暂不阻塞演示（可通过先缩放一次规避），答辩前建议优先解决。注意：该问题当初归因于 MapLibre 桥接，而 MapLibre 现已不在依赖中，所以现象是否已随桥接层消失尚未复测，不能直接当作旧结论的延续。
 2. **DeepSeek API key** 已迁移至 `.env.local`（`DEEPSEEK_FALLBACK_KEY`），不在 `application.properties` 中硬编码。
 3. **OSM 在线源仅作备用**：对外发布前建议移除高德/OSM/Carto 在线源，只保留本地瓦片，并在关于页写明数据来源。
-4. 旧版测试路网 `road-network.json`（1KB）与主路网并存，未清理。
+4. ~~旧版测试路网 `road-network.json`（1KB）与主路网并存，未清理~~ — **已清理**：该文件实际为 0 字节且无任何代码引用（`RouteRepository` 只读 `data/vietnam-road-network.json`），已删；同时删掉 `src/main/resources/data/` 下三个 `.bak` 路网快照（共 ~79MB，`*.bak` 本就 被 `.gitignore` 排除，但留在目录里会被整个文件夹打包带走）。
+5. **四个源文件仍未入版本库**（`git status` 为 `??`）：`service/CorridorAdvisoryService.java`、`service/RecommendationPool.java`、`frontend/src/utils/corridorAdvisory.js`、`test/.../SolutionAgentDetourTriggerTest.java`。本地编译与测试能过（文件在磁盘上），但**评委 clone 后会直接编译失败**，提交前必须 `git add`。
+6. **曾随离线包明文外发过的凭证需作废轮换**：`asean-demo/.env.local` 早期版本含真值的气象 Token、天地图密钥池与 DeepSeek Key，现已全部置空，但旧包若已发出，那些凭证应视为已泄露。
 
 ---
 
 ## 五、关键技术决策备忘
 
 - **路网数据**：弃用早期 OSMnx 在线下载方案（`download_road.py`），改用离线 PBF + 自研解析脚本，保证可复现、可离线。
-- **底图方案**：弃用在线栅格，改 planetiler 本地矢量瓦片，全离线、无授权风险，是演示核心亮点。
+- **底图方案**：走过「在线栅格直连 → planetiler 本地矢量瓦片（MapLibre 渲染）→ 回到纯 Leaflet 栅格」三段。当前实现：天地图在线瓦片（后端同源代理 + 密钥池轮转 + 内存/磁盘两级缓存）为默认，OSM 在线与包内 EPSG:4326 离线栅格（`/tiles/{z}/{x}/{y}.jpg`）为降级末级；`tools/data/tiles` 下的 MVT 瓦片是上一段矢量方案的遗留产物，仍挂在 `/tiles/**` 但已无请求方。取舍口径：观感与授权风险靠「同源代理 + 离线末级」解决，而不是坚持自绘矢量样式——矢量方案要额外养一套样式文件与 WebGL 桥接，而桥接层正是当时缩放空白的来源。
 - **气象数据**：初期使用 Open-Meteo / wttr.in 在线源；初赛阶段替换为比赛官方 CRA40 实况 + GOWFS 三小时预报格点接口（`/api/v1/*`），按 bbox + variables 切片返回，配合本地 Dijkstra 做路线风险评估。
 - **AI 降级链**：本地 Ollama（优先，数据不出境）→ 在线 DeepSeek → 规则引擎离线模板，保证断网环境演示不翻车；本地通道持有熔断冷却窗口（连续 2 次失败冷却 2 分钟），失败不阻断输出结构。
 - **AI 通道溯源**：`DeepseekService.chatWithChannel()` 返回 `{text, channel, model}`，三个智能体各自透传 `aiChannel`，`DecisionOrchestrator` 汇总时取“最远程”的一级（就重不就轻），前端 `AgentPanel.vue` 按通道分五档标签。本地与在线在合规上不等价，“调用成功”不能等同于“本地推理”。
@@ -179,3 +183,35 @@
 - **自检脚本也要自检**：`rate_audit.mjs` 用 `/api/ping` 判后端是否活着，而真实端点是无 `/api` 前缀的 `/ping`，
   404 后整段动态压测被静默跳过并打印「后端未运行」——看起来一切正常，其实 B1/B2/B3 从未跑过。护栏：探测失败要能
   区分「服务没起」与「探测路径写错」，且这类「静默 skip」比显式报错更危险，改完必须确认它真的产生了 PASS 行。
+- **交付图必须跟代码对一次，而不是跟记忆对一次**：`交付材料/08`、`09` 两张架构图的 PNG 比 HTML 旧，
+  而 HTML 自身也漏了不少已实现的能力。本轮逐项核过的偏差：官方接口实际是 **CRA40 实况 + GOWFS 3h 预报两条通道**（
+  预报独立窗口 30min/静默 600s），且本系统自身也按 `/api/v1/*` 标准对外暴露；AI 推理通道原图写的「本地→企业内网网关→在线→规则模板」
+  四档里**网关一档代码中不存在**，真实是 `DeepseekService` 的 local/online/cached 三常量 + 规则模板（`ollama.url` 可指向内网网关，
+  但不是独立一档）；图上还缺 `RoadRiskIndex` 多要素风险指数、`TyphoonRiskRule` 气压+风速双要素判据、
+  `CorridorAdvisoryService` 全域受阻（折返/等待、两端停止自动派单）、`TaskController` 派单→接单/拒单闭环、
+  `GeocodeService` 地名库→天地图 POI→Nominatim 三级与 5km 吸附半径、底图四级降级链与 per-key 熔断、企业画像模板。
+  成图用 `tools/_arch_shot.ps1 -Pattern '09-*.html' -H <脚本回报的内容高+10>`，先看它打印的 `content ends at y=` 再定窗口高度，
+  避免图底留白或裁切。
+- **“能跑”不等于“别人能复现”，要拿一台不存在的机器当假设重看一遍配置**：本轮提交前体检把三类“只在这台开发机上成立”的写法改掉——
+  ① `gradle.properties` 写死 `org.gradle.java.home=C:\Program Files\Java\jdk-21...`，别人机器上没这个目录就直接构建失败，
+  改为 toolchain `auto-detect` + `auto-download`（路径以注释形式保留供本机指定）；② 离线瓦片目录在 `WebConfig` 里写死成某个本机目录、
+  且只能用 `-Dosm.tiles.path` 这种 JVM 参数覆盖，改为 `@Value("${osm.tiles.path:}")` + 候选目录探测（`data/osm-tiles` 优先），
+  同时把 `osm.pbf.path` / `osm.graph.cache.path` 从 `D:/idea/...` 默认值改成 `data/...` 相对路径并环境变量化（`OsmDataLoader` 的
+  `@Value` 默认值与 `application.properties` 必须一致，否则“改了一处、另一处还在指旧路径”）；③ 数据加工与取证脚本里的绝对路径
+  （`gen_place_names.mjs`、`_arch_shot.ps1`、`restart_bootrun.cmd`）一律改成由脚本自身位置推导。
+  另外两条经验：文档里点名的取证脚本必须真能随仓库交出去（`tools/_*` 整体 ignore 会让 `01-技术文档` 引用的脚本在评委那边不存在，
+  需逐个 `!` 负向放行）；“前端零密钥”要落到文件上而不是口径上——`frontend/.env.local` 里那把 `VITE_TIANDITU_TK` 已无任何代码读取
+  （全项目只读 `import.meta.env.PROD`），留着就是一份会被打包带走的死密钥，直接删。
+- **字段在类里有、在序列化处漏了，只会静默不生效不会报错**：`Place.nodeId` 存在、JSON 里也有，但 `list()` 手工拼 Map 时没拼它，
+  于是下游所有“读 `p.nodeId`”的代码都是死路径。凡是前端/下游读了某个字段，就要反向确认服务端确实下发了该字段（看一次真实回包，
+  而不是看 DTO 定义）；同理，**取证脚本的计数正则也要跟代码对一次**：`_api_inventory.mjs` 旧正则强制要求 `@GetMapping(` 有括号，
+  把无路径根映射全漏掉，文档里的“94 端点”其实是 96。
+- **用布尔开关表达优先级，一定会漏出“同一类消息两套优先级”**：语音通道的规则只有两个布尔 `force`（安全关键，可打断独占）与
+  `lock`（独占通道，非 force 丢弃），于是“要不要带 `force`”变成每个调用点各自决定的一件事——运河禁航、全域受阻带了，
+  而触发频率最高的五个灾害入口（SSE 即时提示、绕行播报、概率骤升、调度下发、司机手点 AI 预警）全都忘了带，
+  表现为“红卡弹了、手机震了、语音一个字没有”。这类缺陷不报错，只能靠**枚举全部调用点列表化对齐**（23 个播报入口一次看全）
+  才发现；判据应当是消息的**安全语义**，而不是入口的实现位置。配套教训：抢占式通道必须回答“被打断方的信息去哪了”——
+  出发播报被抢走后，起讫点/里程/耗时/ETA 就永久丢了，所以补一条队尾补读回路；而补读登记必须带**世代校验**
+  （只在“原播报还在念、还没被别的链路顶替”时生效），否则很久之后的 force 播报会凭空补念一句陈年的“导航开始…”；
+  同一条播报的**自动重试会换世代**，首次与重试必须共用同一个登记入口，不然重试过一次之后补读就悄悄失效了。
+- **补读的粒度必须与朗读的粒度同源**：出发播报是被 `_expandToSentences` 拆成一条条短句逐条读的，登记却存了整句，于是「只补没念完的部分」这个意图无法表达，只能整句重读，念过的段跟着重复一遍。改成登记**同一个拆句数组**、由实际推进朗读的那条路径（`_doSpeak`）负责出列，“已读/未读”才有一条干净的判定线；正在念的那一条不能出列（只念到一半就被掐断），宁可重读一句也不能缺字。探针也必须按这个粒度写：在打断时刻快照待补读数组，比对补读尾部与快照是否逐条相等，而不是只数“出发片段出现了几次”——旧探针就是后者，把“整句重读”当成了通过条件。

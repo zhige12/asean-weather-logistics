@@ -4,7 +4,7 @@
       开放平台 · 智能体配置器
       <span class="route-state">千企千面</span>
     </h3>
-    <div class="muted plat-hint">同一套引擎，物流公司按自己的风险偏好、货物、触达范围配置专属智能体</div>
+    <div class="muted plat-hint">同一套引擎，物流公司按自己的风险偏好、货物、触达范围配置专属智能体——这就是众创的第 1 步，已经在做</div>
 
     <div v-if="cfg" class="cfg-body">
       <!-- 预设智能体模板库（开放点一）：一键套用行业预设 -->
@@ -98,12 +98,17 @@
       <div v-if="savedTip" class="saved-tip">配置已应用，沙盘与方案对比已联动更新</div>
     </div>
     <div v-else class="muted">加载中…</div>
+
+    <!-- 成长路径三步走并入本卡尾段：上面「企业正在做的事」与下面「三步走」是同一件事的
+         现在 / 1 年 / 2-3 年，拆成两张卡会把众创挤到第三步去，答辩时讲不成一条线 -->
+    <GrowthPath embedded class="plat-growth" />
   </section>
 </template>
 
 <script setup>
 import { onMounted, ref, watch } from "vue";
 import axios from "axios";
+import GrowthPath from "./GrowthPath.vue";
 
 const emit = defineEmits(["config-changed"]);
 
@@ -182,6 +187,12 @@ defineExpose({ load });
 .plat-hint {
   font-size: 11px;
   margin-bottom: 10px;
+}
+/* 子组件根元素会继承本组件的 scope 属性，直接加类即可 */
+.plat-growth {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed rgba(124, 92, 255, 0.35);
 }
 .cfg-body {
   display: flex;

@@ -126,8 +126,14 @@ if (L && L.Marker && L.Marker.prototype && !L.Marker.prototype.__animateZoomGuar
 //
 // 处理：DivOverlay（Popup/Tooltip 共同父类）与 Tooltip 自身的 _animateZoom /
 //       _updatePosition 顶部加同样的幂等守卫。
+//
+// 注意幂等标记必须用 hasOwnProperty 判断：Tooltip.prototype 继承自 DivOverlay.prototype，
+// 若用普通的 proto[tag] 读取，第一次打 DivOverlay 时写的标记会被 Tooltip 的第二次调用
+// “继承命中”而提前 return——而 Tooltip 自己定义了 _animateZoom（堆栈 leaflet.js
+// “reading '_latLngToNewLayerPoint'”的 4830 行就是它，DivOverlay 上的补丁对其不生效），
+// 结果幽灵 sticky Tooltip（大屏备选线的 bindTooltip）缩放时仍会崩——实测已踩中。
 function __guardDivOverlayProto(proto, tag) {
-  if (!proto || proto[tag]) return
+  if (!proto || Object.prototype.hasOwnProperty.call(proto, tag)) return
   const origAnimate = proto._animateZoom
   if (typeof origAnimate === 'function') {
     proto._animateZoom = function () {
@@ -146,6 +152,6 @@ function __guardDivOverlayProto(proto, tag) {
   proto[tag] = true
 }
 if (L) {
-  __guardDivOverlayProto(L.DivOverlay && L.DivOverlay.prototype, '__animateZoomGuarded')
-  __guardDivOverlayProto(L.Tooltip && L.Tooltip.prototype, '__animateZoomGuarded')
+  __guardDivOverlayProto(L.DivOverlay && L.DivOverlay.prototype, '__divOverlayZoomGuarded')
+  __guardDivOverlayProto(L.Tooltip && L.Tooltip.prototype, '__divOverlayZoomGuarded')
 }

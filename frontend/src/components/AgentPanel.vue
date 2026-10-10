@@ -90,7 +90,7 @@
         <div v-if="metricPlans.length" class="metrics-wrap">
           <div class="mode-tip" :class="isReroute ? 'mode-reroute' : 'mode-normal'">
             {{ isReroute
-              ? "已触发熔断/禁航：以下为相对原计划的增量（多花多少）"
+              ? "已触发熔断/禁航：主数字为相对原计划的增量（多花多少），灰字为整趟运输的全程实际值"
               : "常态方案对比：以下为整趟运输的全程数值（南宁→河内）" }}
           </div>
           <table class="metrics-table">
@@ -126,12 +126,14 @@
                 <td>油耗</td>
                 <td v-for="p in metricPlans" :key="p.id">
                   {{ isReroute ? fmtDelta(p.metrics.fuelL, "L") : fmtAbs(p.metrics.absFuelL, "L") }}
+                  <span v-if="isReroute && p.metrics.absFuelL" class="abs-sub">全程 {{ fmtAbs(p.metrics.absFuelL, "L") }}</span>
                 </td>
               </tr>
               <tr>
                 <td>综合费用</td>
                 <td v-for="p in metricPlans" :key="p.id" :class="isReroute ? costClass(p.metrics.costYuan) : ''">
                   {{ isReroute ? fmtDelta(p.metrics.costYuan, "元") : fmtAbs(p.metrics.absCostYuan, "元") }}
+                  <span v-if="isReroute && p.metrics.absCostYuan" class="abs-sub">全程 {{ fmtAbs(p.metrics.absCostYuan, "元") }}</span>
                 </td>
               </tr>
               <tr>
@@ -143,6 +145,7 @@
                   <span class="carbon-kg">
                     {{ isReroute ? fmtDelta(p.metrics.carbonKg, "kg") : fmtAbs(p.metrics.absCarbonKg, "kg") }}
                   </span>
+                  <span v-if="isReroute && p.metrics.absCarbonKg" class="abs-sub">全程 {{ fmtAbs(p.metrics.absCarbonKg, "kg") }}</span>
                 </td>
               </tr>
             </tbody>
@@ -165,16 +168,29 @@
               <span class="plan-name">{{ p.name }}</span>
               <span v-if="p.id === recommendedId" class="rec-tag">推荐</span>
               <span v-if="p.notApplicable" class="na-tag">对本行程不适用</span>
+              <!-- 全域受阻时方案A 的「能走」靠的是把已封闭路段降级放行，不是真的通 -->
+              <span v-if="p.advisoryAction" class="blocked-tag">走廊全部封闭 · 降级放行</span>
             </div>
             <div class="plan-metrics">
               <span :class="deltaClass(p.extraHours)">{{ fmtDelta(p.extraHours, "h") }}</span>
               <span :class="costClass(p.costDeltaYuan)">{{ fmtDelta(p.costDeltaYuan, "元") }}</span>
+              <span v-if="isReroute && p.totalHours" class="plan-abs">全程 {{ fmtAbs(p.totalHours, "h") }}</span>
               <span class="risk-chip" :class="'risk-' + riskLevelKey(p.damageRisk)">货损风险：{{ p.damageRisk }}</span>
             </div>
             <div v-if="p.damageRatePct != null" class="plan-damage">
               货损率 {{ p.damageRatePct }}%（约 ¥{{ fmtNum(p.damageLossYuan) }}）
             </div>
             <div class="plan-note">{{ p.note || p.damageNote }}</div>
+            <!-- 全域受阻：方案C 带上建议本体，调度员能看到断的是哪些走廊、折返多远 -->
+            <div v-if="p.advisory" class="plan-advisory">
+              <div class="pa-line">受阻走廊：{{ (p.advisory.blockedCorridors || []).join('、') || '全部出境走廊' }}</div>
+              <div class="pa-line">水运：{{ p.advisory.waterReason || '平陆运河禁航' }}</div>
+              <div v-if="p.advisory.returnDistanceKm != null" class="pa-line">
+                折返：约 {{ Math.round(p.advisory.returnDistanceKm) }}km / {{ p.advisory.returnHours }}h
+                <span v-if="p.advisory.returnLegBlocked" class="pa-lock">沿线仍含封闭段</span>
+              </div>
+              <div class="pa-line pa-basis">{{ p.advisory.waitBasis }}</div>
+            </div>
             <div v-if="p.legs" class="plan-legs">
               <span v-for="(leg, i) in p.legs" :key="i" class="leg-chip">{{ leg.mode }} {{ leg.from }}→{{ leg.to }}</span>
             </div>
@@ -199,6 +215,12 @@
       <!-- 开始导航模板（常态）：AI 决策分析下的多条路线，选一条派单给司机 -->
       <div v-if="!isReroute && (dispatchCandidates.length || dispatchCanal)" class="block">
         <div class="block-title">开始导航派单 · 从以下路线选一条派给司机</div>
+        <!-- 全域受阻：公路走廊全部封闭 + 运河禁航，以下候选都是降级放行的“向前”路线，
+             先把这个结论顶在候选列表上方，不让调度员把它当常态候选比选 -->
+        <div v-if="dispatchView" class="corridor-block">
+          <span class="cb-badge">{{ dispatchView.title }}</span>
+          <div class="cb-text">{{ dispatchView.text }}</div>
+        </div>
         <!-- 常态 AI 结论（方案生成智能体照常计算一次，只不展示风险对比表） -->
         <div class="recommend-box">{{ result.recommendation }}</div>
         <div class="dcand-list">
@@ -208,12 +230,14 @@
             class="dcand-row"
             :class="{ sel: c.key === dispatchSelected }"
           >
-            <input type="radio" name="agent-dispatch-route" :value="c.key" v-model="dispatchSelected" />
+            <input type="radio" name="agent-dispatch-route" :value="c.key" v-model="dispatchSelected" @change="previewDispatch(c.key)" />
             <span class="dcand-radio" :class="{ on: c.key === dispatchSelected }"></span>
             <span class="dcand-body">
               <span class="dcand-title">
                 {{ c.label }}
                 <span v-if="c.key === 'recommended'" class="rec-tag">推荐</span>
+                <!-- 全域受阻下靠降级才搜得出的路线：不能顶普通「推荐」继续派单 -->
+                <span v-if="c.notRecommended" class="rec-tag blocked">不建议通行</span>
               </span>
               <span class="dcand-via">{{ viaText(c) }}</span>
               <span class="dcand-meta">
@@ -234,26 +258,26 @@
           <label
             v-if="dispatchCanal"
             class="dcand-row canal-row"
-            :class="{ sel: dispatchSelected === 'canal', blocked: dispatchCanal.canalBlocked }"
+            :class="{ sel: dispatchSelected === 'canal', blocked: canalBlockedEff }"
           >
             <input type="radio" name="agent-dispatch-route" value="canal" v-model="dispatchSelected"
-                   :disabled="dispatchCanal.canalBlocked" />
+                   :disabled="canalBlockedEff" @change="previewDispatch('canal')" />
             <span class="dcand-radio" :class="{ on: dispatchSelected === 'canal' }"></span>
             <span class="dcand-body">
               <span class="dcand-title">
                 {{ dispatchCanal.label }}
-                <span v-if="!dispatchCanal.canalBlocked" class="rec-tag">可坐船</span>
+                <span v-if="!canalBlockedEff" class="rec-tag">可坐船</span>
                 <span v-else class="rec-tag blocked">已禁航</span>
               </span>
-              <span v-if="dispatchCanal.canalBlocked" class="canal-blocked-note">
-                {{ dispatchCanal.canalBlockedReason || '平陆运河触发通航安全红线' }}，水运方案暂不可派单，请选公路候选
+              <span v-if="canalBlockedEff" class="canal-blocked-note">
+                {{ canalBlockReasonEff }}，水运方案暂不可派单，请选公路候选
               </span>
               <span class="dcand-via">{{ dispatchCanal.via }}</span>
               <span class="dcand-meta">
                 {{ dispatchCanal.hours }}h · {{ dispatchCanal.distanceKm }}km · ¥{{ dispatchCanal.costYuan }}
               </span>
             </span>
-            <span v-if="!dispatchCanal.canalBlocked" class="risk-chip risk-low">水运</span>
+            <span v-if="!canalBlockedEff" class="risk-chip risk-low">水运</span>
             <span v-else class="risk-chip risk-high">禁航</span>
           </label>
         </div>
@@ -269,11 +293,16 @@
         </div>
       </div>
 
-      <!-- 触达预览：任务变更角色指令，改路线模板专属；常态下触达状态只看状态条 -->
+      <!-- 触达预览：任务变更角色指令，改路线模板专属；常态下触达状态只看状态条。
+           调度员改选非推荐方案时，指令按所选方案改写（与后端 dispatch 的 planId 语义一致）。 -->
       <div v-if="isReroute" class="block">
-        <div class="block-title">触达智能体 · 角色专属指令（{{ result.outreachPreview?.count || 0 }} 个角色）</div>
+        <div class="block-title">
+          触达智能体 · 角色专属指令（{{ result.outreachPreview?.count || 0 }} 个角色）
+          <span v-if="followingSelection" class="touch-follow">已按所选方案 {{ selectedPlan }}·{{ selectedPlanName }} 改写</span>
+          <span v-else class="touch-follow rec">按 AI 推荐方案 {{ recommendedId }}</span>
+        </div>
         <div class="touch-list">
-          <div v-for="t in result.outreachPreview?.targets || []" :key="t.role" class="touch-item">
+          <div v-for="t in activeOutreachTargets" :key="t.role" class="touch-item">
             <div class="touch-line">
               <span class="touch-role">{{ t.name }}</span>
               <span class="touch-instruction">{{ t.instruction }}</span>
@@ -306,14 +335,19 @@
 </template>
 
 <script setup>
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import axios from "axios";
+import { advisoryView } from "../utils/corridorAdvisory";
 
-const emit = defineEmits(["dispatched", "dispatch-task"]);
+const emit = defineEmits(["dispatched", "dispatch-task", "preview-candidate"]);
 
 const props = defineProps({
   originId: { type: String, default: "NN" },
   destinationId: { type: String, default: "HN" },
+  // 大屏 SSE 实时禁航态（App.canalBlockLive 下传）：null=还没收到事件，用本组件 fetch 快照兜底。
+  // 没有这条联动时，禁航翻转后派单候选仍按旧快照显示「可坐船」，会把注定走不了的水运任务派给司机
+  canalLiveBlock: { type: Boolean, default: undefined },
+  canalLiveReason: { type: String, default: "" },
 });
 
 const running = ref(false);
@@ -324,7 +358,10 @@ const selectedPlan = ref("");
 const trigger = ref("manual");
 const triggerTag = computed(() => {
   if (trigger.value === "normal") return "派单前 · 常态分析";
-  if (trigger.value === "hazard") return "灾害触发 · 熔断重算";
+  if (trigger.value === "hazard") {
+    // 灾害只打到别的走廊时后端不会进 reroute 模式，这里也不能谎称「熔断重算」
+    return result.value?.analysisMode === "reroute" ? "灾害触发 · 熔断重算" : "灾害触发 · 本程未受影响";
+  }
   return "";
 });
 
@@ -333,16 +370,16 @@ const triggerTag = computed(() => {
 // “模型返回了非空文本”——本地 Ollama 一抖（超时 / 显存被占 / 连续 2 次失败进入 2 分钟
 // 冷却）就会静默降级到在线 DeepSeek，屏幕上的「本地大模型」当场变成假话，
 // 而 README 里写的“数据不出境”是最容易被评委追问的一句。现在只认后端回报的通道。
-const CHANNEL_KIND = { local: "local", online: "online", unrecorded: "unrecorded", template: "template" };
+const CHANNEL_KIND = { local: "local", online: "online", unrecorded: "unrecorded", template: "template", cached: "cached" };
 function channelKind(ch) {
   const s = String(ch || "");
   return CHANNEL_KIND[s.split(":")[0]] || "template";
 }
 function channelClass(ch) {
-  return "chip-" + { local: "local", online: "remote", unrecorded: "unknown", template: "template" }[channelKind(ch)];
+  return "chip-" + { local: "local", online: "remote", unrecorded: "unknown", template: "template", cached: "unknown" }[channelKind(ch)];
 }
 function channelShort(ch) {
-  return { local: "本地", online: "在线", unrecorded: "未记录", template: "模板" }[channelKind(ch)];
+  return { local: "本地", online: "在线", unrecorded: "未记录", template: "模板", cached: "缓存" }[channelKind(ch)];
 }
 const aiChip = computed(() => {
   const r = result.value;
@@ -376,6 +413,13 @@ const aiChip = computed(() => {
       title: "本机 Ollama 不可用，已静默降级到公网大模型。\n提示词里的路线、货值、口岸状态已离开本机，不属于本地推理：" + label,
     };
   }
+  if (kind === "cached") {
+    return {
+      text: "缓存",
+      cls: "chip-unknown",
+      title: "当前离线：本地与在线模型都不通，这句是从历史 AI 生成、本机留存的文案池中轮换取用的，措辞与上一次不同。\n恢复联网或启动本地 Ollama 后将重新实时生成。",
+    };
+  }
   return {
     text: "模板",
     cls: "chip-template",
@@ -390,6 +434,27 @@ const dispatchCandidates = ref([]);
 const dispatchSelected = ref("");
 // 公路候选之外的「可坐船出境」（平陆运河陆水联运）推荐位：目的地在越南侧时后端会并带回
 const dispatchCanal = ref(null);
+// 全域受阻建议（后端与大屏/司机端同一份判据）：非空时候选都是降级放行的“向前”路线
+const dispatchAdvisory = ref(null);
+const dispatchView = computed(() => advisoryView(dispatchAdvisory.value, -1));
+// 禁航生效态：SSE 实时优先、抓取快照兜底——与司机端 canalBlockedNow/canalBlockReasonNow 同一套判据，
+// 两端不会出现「司机端已标禁航、大屏派单面板还可坐船」的自相矛盾
+const canalBlockedEff = computed(() =>
+  props.canalLiveBlock != null
+    ? props.canalLiveBlock
+    : !!(dispatchCanal.value && dispatchCanal.value.canalBlocked));
+const canalBlockReasonEff = computed(() => {
+  if (props.canalLiveBlock && props.canalLiveReason) return props.canalLiveReason;
+  return (dispatchCanal.value && dispatchCanal.value.canalBlockedReason) || '平陆运河触发通航安全红线';
+});
+// 禁航在派单面板打开期间翻转：若当前选中的是水运方案，自动取消选中并就地提示，
+// 不给调度员留“选中着禁航方案直接点派单”的口子
+watch(canalBlockedEff, (blocked) => {
+  if (blocked && dispatchSelected.value === "canal") {
+    dispatchSelected.value = "";
+    dispatchFeedback.value = "平陆运河禁航：水运方案已停用，请重选公路路线";
+  }
+});
 // 派单就地反馈文案（成功显示几秒后自清）；与 dispatching 一起构成按钮全链路状态
 const dispatchFeedback = ref("");
 let dispatchFbTimer = null;
@@ -452,6 +517,71 @@ function selectPlan(id) {
   if (!p || p.notApplicable) return;
   selectedPlan.value = id;
 }
+
+// ---------- 触达预览跟随所选方案 ----------
+// 后端 outreachPreview 是按 AI 推荐方案(recommendedId)一次性生成的润色文案；
+// 而真正下发时 OutreachService.dispatch 本就按所选 planId 生成各角色指令。
+// 若调度员改选非推荐方案，预览仍讲推荐方案就会出现“选C却满屏平陆运河”的自相矛盾，
+// 故这里按所选方案改写各角色指令（口径与后端 dispatch 的 A公路/B水运/C等待 语义一致）。
+const selectedPlanName = computed(() => {
+  const p = (result.value?.plans || []).find((x) => x.id === selectedPlan.value);
+  return p ? p.name : "";
+});
+// 方案性质：A=公路绕行 / B=陆水联运(平陆运河) / C=原地等待
+const selectedPlanKind = computed(() => ({ A: "road", B: "water", C: "wait" }[selectedPlan.value] || ""));
+// 是否处于“改选了非推荐方案”状态（此时预览按所选方案改写，否则展示后端润色原文）
+const followingSelection = computed(() =>
+  isReroute.value && !!selectedPlan.value && selectedPlan.value !== recommendedId.value);
+
+function overrideInstruction(role, kind, name) {
+  const n = name || "所选方案";
+  switch (role) {
+    case "DISPATCHER":
+      return kind === "water"
+        ? `确认切换${n}方案，任务变更指令自动下发各端，全程闭环回执。`
+        : kind === "road"
+        ? `确认切换${n}方案，新路线与口岸通关安排已下发各端。`
+        : `确认${n}，暂缓发车，待任一通道解除红线后再行动，指令已下发各端。`;
+    case "DRIVER":
+      return kind === "water"
+        ? `已切${n}，随船补贴/专项保险/休息舱/返程交通全保障，不算违约，确认后自动导航。前方熔断禁行，勿驶入。`
+        : kind === "road"
+        ? `已切${n}，绕行增加工时按出勤计、发放补贴，不算违约；按新导航行驶，熔断路段禁行勿驶入。`
+        : `原地等待：就近停靠安全区，冷链机组持续运行，每小时回报车厢温度；等待按出勤计，不算违约。`;
+    case "DRIVER_VN":
+      return kind === "water"
+        ? `Đã chuyển sang phương án thủy bộ qua kênh đào Bình Lục. Xác nhận lịch mới, ưu tiên thông quan, bảo đảm quyền lợi; không đi vào đoạn cấm.`
+        : kind === "road"
+        ? `Chuyển sang đường bộ vòng qua cửa khẩu khác. Lộ trình mới đã gửi, đi theo chỉ dẫn, không vào đoạn cấm.`
+        : `Chờ tại chỗ: đỗ xe nơi an toàn, giữ máy lạnh hoạt động, báo nhiệt độ mỗi giờ; không tính vi phạm.`;
+    case "SHIPOWNER":
+      return kind === "water"
+        ? `${n}过闸：实时研判流速/能见度，建议装船窗口与锚泊预案，服从调度。`
+        : kind === "road"
+        ? `本次走公路，水运暂不启用；如回切水运，装船窗口与锚泊预案听调度指令。`
+        : `暂缓装船，船舶就近锚泊值守，关注流速/能见度变化，等待调度进一步指令。`;
+    case "PUBLIC":
+      return kind === "water"
+        ? `气象预警：平陆运河沿线风雨影响，请远离岸线，收到请回执闭环。`
+        : kind === "road"
+        ? `气象预警：沿线强降雨，请减少外出、注意防范，收到请回执闭环。`
+        : `气象预警：区域强降雨持续，请沿岸人员远离河道，收到请回执闭环。`;
+    default:
+      return "";
+  }
+}
+
+const activeOutreachTargets = computed(() => {
+  const base = result.value?.outreachPreview?.targets || [];
+  if (!followingSelection.value) return base;
+  const kind = selectedPlanKind.value;
+  const name = selectedPlanName.value;
+  return base.map((t) => ({
+    ...t,
+    instruction: overrideInstruction(t.role, kind, name) || t.instruction,
+    aiPolished: false,
+  }));
+});
 
 function fmtDelta(v, unit) {
   if (v == null) return "不可用";
@@ -575,6 +705,7 @@ async function loadDispatchCandidates() {
   dispatchCandidates.value = [];
   dispatchSelected.value = "";
   dispatchCanal.value = null;
+  dispatchAdvisory.value = null;
   try {
     const { data } = await axios.get("/api/route/candidates", {
       params: { originId: props.originId, destinationId: props.destinationId, cargoType: "cold" },
@@ -584,6 +715,8 @@ async function loadDispatchCandidates() {
     dispatchCandidates.value = list;
     // 与公路并列的「坐船出境」推荐位（后端 serves 命中时才有）
     dispatchCanal.value = (data && data.canalOption) || null;
+    // 全域受阻建议：公路走廊全部封闭且运河禁航时后端才带，此时候选全为降级放行线
+    dispatchAdvisory.value = (data && data.advisory) || null;
     // 默认选中推荐路线（无则选灾害概率最低的一条）
     const withProb = list.filter((c) => c.hazardProbability >= 0);
     const def = list.find((c) => c.key === "recommended")
@@ -598,17 +731,32 @@ function viaText(c) {
   return Array.isArray(c.via) ? c.via.join(" → ") : (c.via || "");
 }
 function probKey(p) {
-  if (p >= 60) return "high";
-  if (p >= 30) return "mid";
-  return "low";
+  // 与司机端 probClass 同口径：高风险判据只有一档（≥50% 标红），
+  // 旧的 60/30 三档会让 45% 这类候选在大屏显黄、司机端显绿，
+  // 调度员据此派下去的线在司机端就是「高风险 · 不推荐」，两端自相矛盾
+  return p >= 50 ? "high" : "low";
 }
 /** 低阈值不显示百分比：平静天气下各候选都堆在同一个地板值（如 9%），
- * 直接标「通畅」更诚实；已发生灾害或概率达阈值才显示具体数字 */
+ * 直接标「通畅」更诚实；已发生灾害或概率达阈值才显示具体数字（文案与司机端 probText 一致） */
 function probText(c) {
   const p = c.hazardProbability;
-  if (p < 0) return "暂无";
+  if (p < 0) return "暂无预测";
   if (!c.hazardOccurred && p < 15) return "通畅";
   return p + "%";
+}
+
+/**
+ * 调度员在派单候选里点选某条：立即让大屏地图预览这条真实几何。
+ * 此前选候选只决定“派单发哪条”，从不联动地图，导致地图主线一直停在默认推荐（友谊关）。
+ * 候选自带 coords/edgeIds/edgeSpans（与大屏 /api/routes/candidates 同一后端方法），直接把选中项几何上抛。
+ */
+function previewDispatch(key) {
+  if (key === "canal") {
+    emit("preview-candidate", { key: "canal", canal: dispatchCanal.value });
+    return;
+  }
+  const c = dispatchCandidates.value.find((x) => x.key === key);
+  if (c) emit("preview-candidate", { key, candidate: c });
 }
 
 /** 开始导航派单：把选定路线快照 + 本次 AI 分析递上去，由父组件合并订单信息后调 /api/task/dispatch */
@@ -618,9 +766,10 @@ function dispatchToDriver() {
   dispatchFeedback.value = "";
   // 调度员选定「坐船出境」：派 routeChoice='canal'，司机端接单后走陆水联运导航
   if (dispatchSelected.value === "canal" && dispatchCanal.value) {
-    // 防御：选上之后运河才禁航（SSE 翻转）时不允许把注定走不了的方案派下去
-    if (dispatchCanal.value.canalBlocked) {
-      window.alert(`平陆运河禁航：${dispatchCanal.value.canalBlockedReason || '触发通航安全红线'}，请改选公路路线`);
+    // 防御：选上之后运河才禁航（SSE 翻转）时不允许把注定走不了的方案派下去；
+    // 判据用 canalBlockedEff（SSE 实时优先），不看会过期的 fetch 快照
+    if (canalBlockedEff.value) {
+      window.alert(`平陆运河禁航：${canalBlockReasonEff.value}，请改选公路路线`);
       return;
     }
     const cn = dispatchCanal.value;
@@ -643,6 +792,12 @@ function dispatchToDriver() {
     // 旧版这里静默 return：点了按钮像没反应一样，补上提示
     window.alert("未选中任何路线，请先在上方候选里点选一条");
     return;
+  }
+  // 全域受阻 + 选的是降级放行候选：与运河禁航同理，不阻断但必须人工确认一次
+  if (dispatchAdvisory.value && c.notRecommended) {
+    const v = dispatchView.value;
+    const ok = window.confirm(`${v.title}\n\n${v.text}\n\n仍要按「${c.label}」派单吗？`);
+    if (!ok) return;
   }
   const aiText = (result.value?.recommendation || "")
     + (c.hazardReason ? ` 本线风险：${c.hazardReason}` : "");
@@ -809,6 +964,20 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
   color: var(--text-h, #1c2a44);
   margin-bottom: 6px;
 }
+/* 触达预览当前跟随的方案口径：改选非推荐方案时高亮提示，避免与推荐语混淆 */
+.touch-follow {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: rgba(217, 119, 6, 0.16);
+  color: #d97706;
+}
+.touch-follow.rec {
+  background: rgba(22, 163, 74, 0.16);
+  color: #16a34a;
+}
 .explain-box {
   display: flex;
   flex-direction: column;
@@ -919,6 +1088,12 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
   gap: 12px;
   margin-top: 6px;
   font-size: 12px;
+}
+/* 方案卡上“全程”时数：增量口径下 A 常为 0h，补一个全程实际值避免看着像没算 */
+.plan-abs {
+  align-self: center;
+  font-size: 11px;
+  color: #93a2ba;
 }
 .delta-warn {
   color: #d97706;
@@ -1177,6 +1352,53 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
   filter: saturate(0.6);
   pointer-events: none;
   transition: opacity 0.3s;
+}
+/* 全域受阻：候选列表上方的结论条，先说清“下面的线都是降级放行” */
+.corridor-block {
+  border: 1px solid rgba(225, 29, 72, 0.45);
+  background: rgba(225, 29, 72, 0.07);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.cb-badge {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 700;
+  color: #be123c;
+}
+.cb-text {
+  font-size: 12px;
+  line-height: 1.7;
+  margin-top: 4px;
+}
+/* 方案A 在全部走廊封闭下靠降级才能通行，不能当作普通可用方案 */
+.blocked-tag {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: rgba(225, 29, 72, 0.12);
+  color: #be123c;
+  white-space: nowrap;
+}
+.plan-advisory {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-left: 3px solid #e11d48;
+  background: rgba(225, 29, 72, 0.05);
+  border-radius: 0 8px 8px 0;
+}
+.pa-line {
+  font-size: 11px;
+  line-height: 1.7;
+}
+.pa-lock {
+  color: #be123c;
+  font-weight: 600;
+}
+.pa-basis {
+  color: #64748b;
 }
 .dispatch-row {
   margin-top: 14px;

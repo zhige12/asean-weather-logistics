@@ -16,8 +16,9 @@ import org.springframework.stereotype.Service;
  * 输入：风险研判结果 + 货物画像；
  * 计算：公路绕行（真实路网 Dijkstra 重算）、陆水联运（平陆运河模型）、原地等待（货损模型）
  *       ——方案数据全部由确定性引擎产出，数字可信、可复现；
- * 输出：三方案对比 + 推荐语。本地大模型可用时生成推荐理由（决策沟通），
- *       不可用时规则模板兜底；方案的时效/成本/货损数字不交给模型生成。
+ * 输出：三方案对比 + 推荐语。推荐语每次都走大模型生成（常态与改道一视同仁），
+ *       本地不可用 ≤1s 自动切在线，两通道都断时从历史 AI 文案池轮换取用；
+ *       池中也无对应情境时才落规则模板。方案的时效/成本/货损数字不交给模型生成。
  */
 @Service
 public class SolutionAgent {
@@ -46,18 +47,24 @@ public class SolutionAgent {
     private final DecisionSandboxService sandbox;
     private final IntermodalService intermodal;
     private final DeepseekService deepseekService;
+    private final RecommendationPool recommendationPool;
+    /** 全域受阻建议：路网级“全部走廊熔断 + 运河禁航”判据，与大屏/司机端同一份口径 */
+    private final CorridorAdvisoryService corridorAdvisoryService;
 
     private final CostCalculator costCalculator;
 
     public SolutionAgent(RouteService routeService, DemoConfigService config,
                          DecisionSandboxService sandbox, IntermodalService intermodal,
-                         DeepseekService deepseekService, CostCalculator costCalculator) {
+                         DeepseekService deepseekService, RecommendationPool recommendationPool,
+                         CostCalculator costCalculator, CorridorAdvisoryService corridorAdvisoryService) {
         this.routeService = routeService;
         this.config = config;
         this.sandbox = sandbox;
         this.intermodal = intermodal;
         this.deepseekService = deepseekService;
+        this.recommendationPool = recommendationPool;
         this.costCalculator = costCalculator;
+        this.corridorAdvisoryService = corridorAdvisoryService;
     }
 
     /**
@@ -81,39 +88,53 @@ public class SolutionAgent {
         String recommendedId = recommend(plans);
         String mode = resolveMode(plans);
 
-        // 大模型推荐理由（升级方案 §3.2）：数字喂给它，只让它说"为什么推荐"。
-        // 常态（刚出发、走廊正常）不调模型：buildPrompt 是为熔断对比场景写的，
-        // 常态下调用会输出"推荐陆水联运"这类与事实矛盾的论述，直接用常态模板。
+        // 大模型推荐语（升级方案 §3.2）：数字喂给它，只让它说"为什么推荐"。
+        // 常态与改道一视同仁——每次都现调模型（本地优先、≤1s 切在线、再落缓存池），
+        // 不再给常态写死一句固定话，避免"接了 AI 却每句雷同"的硬编码观感。
         String recommendation = null;
         boolean aiPowered;
         String aiChannel = null;
-        if ("normal".equals(mode)) {
-            recommendation = "去河内不必只有公路：本走廊常态下即可走平陆运河陆水联运（方案B），车辆滚装上船、随船经运河转海运到海防，"
-                    + "不赶时间甚至不带货也能全程坐船出境；追求时效则直走全程公路（方案A）最快。两条都是正常可选项，不是备选兜底。";
-            aiPowered = false;
+        // 情境签名：模式 + 推荐方案 + 成因，让缓存池按当前局势归置文案，
+        // 断网兜底时取到的措辞与眼前景况一致（常态不会拿到改道话术）。
+        String situationKey = situationKey(mode, recommendedId, plans);
+        String userPrompt = "normal".equals(mode) ? buildNormalPrompt(plans) : buildPrompt(risk, plans);
+        String replyTag = null;
+        try {
+            DeepseekService.AiReply reply = deepseekService.chatWithChannel(
+                    "你是多式联运方案生成专家。只输出 JSON，不要输出任何其他文字。",
+                    userPrompt, 500);
+            replyTag = reply.tag();
+            JsonNode parsed = AgentJson.extractObject(reply.text());
+            recommendation = AgentJson.text(parsed, "recommendation");
+            // 模型给出的方案名/推荐若与计算不一致，以计算为准（只取其文字表达）
+            if (recommendation == null) {
+                recommendation = AgentJson.text(parsed, "reason");
+            }
+        } catch (Exception e) {
+            log.info("方案生成智能体大模型调用失败，转缓存池/模板：{}", e.toString());
+        }
+        aiPowered = recommendation != null;
+        if (aiPowered) {
+            // 文字确实来自模型：记下它是哪一级通道写的，并存进缓存池供日后断网复用
+            aiChannel = replyTag;
+            recommendationPool.record(situationKey, recommendation);
         } else {
-            String replyTag = null;
-            try {
-                DeepseekService.AiReply reply = deepseekService.chatWithChannel(
-                        "你是多式联运方案生成专家。只输出 JSON，不要输出任何其他文字。",
-                        buildPrompt(risk, plans), 500);
-                replyTag = reply.tag();
-                JsonNode parsed = AgentJson.extractObject(reply.text());
-                recommendation = AgentJson.text(parsed, "recommendation");
-                // 模型给出的方案名/推荐若与计算不一致，以计算为准（只取其文字表达）
-                if (recommendation == null) {
-                    recommendation = AgentJson.text(parsed, "reason");
-                }
-            } catch (Exception e) {
-                log.info("方案生成智能体大模型调用失败，使用规则模板：{}", e.toString());
-            }
-            aiPowered = recommendation != null;
-            if (aiPowered) {
-                // 文字确实来自模型：记下它是哪一级通道写的
-                aiChannel = replyTag;
+            // 两条模型通道都不通（断网）：先从缓存池轮换取一句历史 AI 文案，避免每次同一句模板
+            String cached = recommendationPool.pick(situationKey);
+            if (cached != null) {
+                recommendation = cached;
+                aiChannel = DeepseekService.CHANNEL_CACHED;
             } else {
-                recommendation = templateRecommendation(recommendedId, plans);
+                // 池里也没有该情境的历史文案：才落确定性规则模板
+                recommendation = "normal".equals(mode) ? normalRecommendation() : templateRecommendation(recommendedId, plans);
             }
+        }
+        // 口岸确实熔断了、但断的不是司机这条线：无论推荐语出自模型还是模板，
+        // 都先 deterministic 地补一句实况，否则「常态」口吻会让调度员以为什么灾害都没发生。
+        String unaffected = unaffectedNote(plans);
+        if (unaffected != null) {
+            recommendation = (recommendation == null || recommendation.isBlank())
+                    ? unaffected : unaffected + "；" + recommendation;
         }
         // 在途分析：推荐语里带一句进度上下文，让调度员看得出"这是按车当前位置算的"
         if (!"normal".equals(mode) && progressRatio >= 0 && recommendation != null) {
@@ -123,19 +144,40 @@ public class SolutionAgent {
     }
 
     /**
-     * 判定本次分析模式：公路已熔断绕行 / 水运禁航 / 双线风险 → reroute（展示增量）；
+     * 「有口岸熔断，但本程路线不受影响」时的一句实况说明。
+     * 路线真被改道过（routeAffected）时绝不能说这句话——那时确实绕了，返回 null。
+     */
+    private String unaffectedNote(List<Map<String, Object>> plans) {
+        String blocked = sandbox.blockedPortNames();
+        if (blocked == null || sandbox.waterBlocked()) {
+            return null;
+        }
+        Map<String, Object> planA = planById(plans, "A");
+        if (planA == null || Boolean.TRUE.equals(planA.get("routeAffected"))) {
+            return null;
+        }
+        String cause = sandbox.fuseCause();
+        String causeText = cause == null ? "" : ("typhoon".equals(cause) ? "因台风" : "rain+typhoon".equals(cause) ? "因暴雨叠加台风" : "因暴雨");
+        return blocked + causeText + "熔断，但不在本程路线上，当前路线维持不变、无需绕行";
+    }
+
+    /**
+     * 判定本次分析模式：本程路线真被灾害打到（重算过 / 公路已无路）或水运禁航 → reroute（展示增量）；
      * 否则为 normal（车刚出发、走廊正常，展示整趟运输的绝对值，避免出现全 0 的对比）。
+     * <p>
+     * 原来这里用 {@code sandbox.anyPortFused()} 触发：给芒街注入台风、司机本来就走友谊关时
+     * 也会翻成 reroute，大屏于是出一句「推荐绕行友谊关」——绕的还是当前这条线，绕了个寂寞。
+     * 改道只对「灾害打到了司机正在走的这条线」有意义，判据必须是路线本身有没有被改。
      */
     private String resolveMode(List<Map<String, Object>> plans) {
-        // 任一公路口岸熔断（含台风致芒街熔断）都要触发绕路决策：
-        // 只看 roadBlocked() 会漏掉台风场景，使方案对比退回常态、六维用绝对值展示。
-        if (sandbox.anyPortFused() || sandbox.waterBlocked()) {
+        if (sandbox.waterBlocked()) {
             return "reroute";
         }
-        boolean rerouted = plans.stream()
+        return plans.stream()
                 .filter(p -> "A".equals(p.get("id")))
-                .anyMatch(p -> p.get("extraHours") instanceof Number n && n.doubleValue() > 0);
-        return rerouted ? "reroute" : "normal";
+                .anyMatch(p -> Boolean.TRUE.equals(p.get("routeAffected"))
+                        || p.get("extraHours") instanceof Number n && n.doubleValue() > 0)
+                ? "reroute" : "normal";
     }
 
     // ==================== 确定性方案计算 ====================
@@ -152,14 +194,34 @@ public class SolutionAgent {
         }
         double baselineHours = route != null ? route.getBaselineHours() : 8.5;
         double baselineKm = route != null ? route.getTotalDistanceKm() : 390;
+        // 全域受阻建议（路线自带 corridorAllFused，不重复搜索）：后面方案C 的形态与推荐语都用它
+        Map<String, Object> advisory = null;
+        if (route != null) {
+            try {
+                advisory = corridorAdvisoryService.forRoute(origin, dest,
+                        route.getPathNodeIds(), route.getPathEdgeIds(), progressRatio,
+                        route.isCorridorAllFused());
+            } catch (Exception e) {
+                log.warn("方案生成：全域受阻建议算失败 {}", e.toString());
+            }
+        }
 
-        // ---- 方案A：公路绕行（真实重算结果） ----
-        // 名称按实际绕行口岸动态生成：台风熔断芒街时，绕行目标应是友谊关；
-        // 若写死"公路绕行芒街"，就会出现"标题说绕行芒街、说明说无需绕行"的自相矛盾。
+        // ---- 本程到底有没有被灾害打到 ----
+        // 唯一判据：风险感知路线与无气象基准路线是否不同（route.isRerouted()），或干脆无路可走。
+        // 这条线决定了后面所有措辞——没打到就不许出现「绕行」，也不进改道模式，
+        // 否则会出现「标题：公路绕行友谊关 / 说明：当前路线本就不经友谊关」这种自相矛盾。
+        String portOnRoute = routePortOf(route);
+        boolean routeAffected = route == null || route.isRerouted();
+
+        // ---- 方案A：公路（真实重算结果） ----
+        // 名称由 routeAffected 决定：真被改道了才叫绕行（暴雨熔断友谊关→绕行芒街），
+        // 没改道就只报“直达哪个口岸”。写死"公路绕行X"就会出现
+        // "标题说绕行友谊关、说明说本就不经友谊关"这种把司机已在走的路说成新方案的矛盾。
         Map<String, Object> planA = new LinkedHashMap<>();
         planA.put("id", "A");
         planA.put("type", "road-detour");
-        planA.put("name", planAName());
+        planA.put("routeAffected", routeAffected);
+        planA.put("name", planAName(routeAffected, portOnRoute));
         if (route != null && route.isRerouted()) {
             double extraKm = route.getExtraHours() * DETOUR_AVG_SPEED_KMH;
             planA.put("extraHours", round1(route.getExtraHours()));
@@ -171,9 +233,8 @@ public class SolutionAgent {
             planA.put("extraHours", 0.0);
             planA.put("totalHours", round1(route.getCurrentHours()));
             planA.put("costDeltaYuan", 0);
-            // 路网没绕行 ≠ 没有口岸熔断：台风打芒街时主通道友谊关不受影响，
-            // 路线确实不用绕，但方案A叫"公路绕行芒街"，此时若只说"无需绕行"
-            // 会和沙盘"芒街已熔断"矛盾，必须点明断的是哪个、主通道为何仍通。
+            // 路网没绕行且本程未受影响：仍要区分“真没口岸熔断”与“熔断的是别的走廊”。
+            // 后者若只说"无需绕行"，会与沙盘"芒街已熔断"看起来矛盾，必须点明断的是哪个。
             planA.put("note", sandbox.anyPortFused() ? blockedButPassableNote() : "当前公路走廊仍可用，无需绕行");
         } else {
             planA.put("extraHours", null);
@@ -193,6 +254,10 @@ public class SolutionAgent {
         double costA = route != null && route.isRerouted()
                 ? route.getExtraHours() * DETOUR_COST_PER_HOUR + extraKmA * DETOUR_COST_PER_KM : 0;
         double carbonA = costCalculator.carbonKgForRoad(extraKmA);
+        // 全域受阻时打上动作标记：A 的“能走”靠的是把已封闭路段降级放行，不能当作正常优选
+        if (advisory != null) {
+            planA.put("advisoryAction", advisory.get("action"));
+        }
         // 全程绝对值：方案A 走完整趟公路（含绕行增量里程）
         double absKmA = baselineKm + extraKmA;
         double absFuelA = costCalculator.fuelLiters(absKmA);
@@ -250,11 +315,12 @@ public class SolutionAgent {
         }
         plans.add(planB);
 
-        // ---- 方案C：原地等待（货物延误敏感度模型） ----
+        // ---- 方案C：原地等待（货物延误敏感度模型）----
+        // 全域受阻时同一个槽位按局势变形：未出境→返回起点，已出境→就近停靠，未发车→暂缓发车
         Map<String, Object> planC = new LinkedHashMap<>();
         planC.put("id", "C");
         planC.put("type", "wait");
-        planC.put("name", "原地等待");
+        planC.put("name", planCName(advisory));
         planC.put("extraHours", WAIT_HOURS);
         planC.put("costDeltaYuan", 0);
         double rate = cargo.damageRate(WAIT_HOURS);
@@ -268,6 +334,13 @@ public class SolutionAgent {
         planC.put("note", String.format("%s延误 %.0f 小时，货损率预计 %.1f%%（货值 %.0f 万元，损失约 %.0f 元）",
                 cargo.name(), WAIT_HOURS, rate * 100, cargo.cargoValueYuan() / 10_000.0,
                 cargo.damageLossYuan(WAIT_HOURS)));
+        // 全域受阻时把建议本体挂到方案C：大屏与 AgentPanel 直接渲染 title/advice，
+        // 不必再从散落字段拼出一句与局势不符的「原地等待」
+        if (advisory != null) {
+            planC.put("advisory", advisory);
+            planC.put("note", advisory.get("advice")
+                    + "（货物延误 " + hoursText(WAIT_HOURS) + "，货损率预计 " + round1(rate * 100) + "%）");
+        }
         // 六维指标：等待期间无位移，但等待结束后仍需走完全程公路，故全程油耗/费用/碳排放按全程计
         planC.put("metrics", costCalculator.build(WAIT_HOURS, baselineHours + WAIT_HOURS,
                 rate > 0.03 ? "高" : (rate > 0 ? "中" : "低"), cargo, WAIT_HOURS, 0, 0, 0,
@@ -276,6 +349,19 @@ public class SolutionAgent {
         plans.add(planC);
 
         return plans;
+    }
+
+    /** 方案C 的卡片标题：全域受阻时按建议动作改写，否则仍是「原地等待」 */
+    private static String planCName(Map<String, Object> advisory) {
+        if (advisory == null) {
+            return "原地等待";
+        }
+        return switch (String.valueOf(advisory.getOrDefault("action", ""))) {
+            case CorridorAdvisoryService.ACTION_RETURN -> "返回起点待命";
+            case CorridorAdvisoryService.ACTION_HOLD -> "就近安全停靠等待";
+            case CorridorAdvisoryService.ACTION_DEFER -> "暂缓发车待命";
+            default -> "原地等待";
+        };
     }
 
     /** 双向推荐：公路断了推荐水运，水运禁航推荐公路，双线风险推荐等待；被进度闸门禁用的方案不参与推荐。 */
@@ -287,6 +373,11 @@ public class SolutionAgent {
         // A 不可用的唯一情形：公路走廊全部熔断（buildPlans 里 route==null → extraHours=null）
         boolean aUsable = planA != null && planA.get("extraHours") != null;
         boolean bUsable = planB != null && !Boolean.TRUE.equals(planB.get("notApplicable")) && !waterBlocked;
+        // 路网级全域受阻优先于一切单断面判定：此时 A 的“有解”是把已封闭边降级换来的，
+        // 再推「继续前进」等于从一个风险区换进另一个风险区，此时只有返回或等待是安全的选择
+        if (planA != null && planA.get("advisoryAction") != null) {
+            return "C";
+        }
         if (roadBlocked && waterBlocked) {
             return "C"; // 双线风险 → 原地等待
         }
@@ -328,12 +419,23 @@ public class SolutionAgent {
                     rec.get("extraHours"), rec.get("costDeltaYuan"));
         }
         if ("A".equals(recommendedId) && waterBlocked) {
+            // 公路未被波及时会得到「公路直达X」这种名字，再拼“改走公路绕行”就与标题矛盾
+            Map<String, Object> pa = planById(plans, "A");
+            String tail = Boolean.TRUE.equals(pa == null ? null : pa.get("routeAffected"))
+                    ? "改走公路绕行，时效与成本最优。"
+                    : "公路走廊不经该熔断口岸，维持当前公路路线即可。";
             return String.format(
-                    "推荐方案A（%s）：平陆运河禁航（%s），水运不可用；改走公路绕行，时效与成本最优。",
+                    "推荐方案A（%s）：平陆运河禁航（%s），水运不可用；%s",
                     rec.get("name"),
-                    sandbox.waterBlockedReason() == null ? "通航条件超限" : sandbox.waterBlockedReason());
+                    sandbox.waterBlockedReason() == null ? "通航条件超限" : sandbox.waterBlockedReason(),
+                    tail);
         }
         if ("C".equals(recommendedId)) {
+            // 全域受阻：措辞取自 advisory 本体，动作（返回/停靠/暂缓）与大屏、司机端完全一致
+            Object advRaw = rec.get("advisory");
+            if (advRaw instanceof Map<?, ?> adv) {
+                return "推荐方案C（" + rec.get("name") + "）：" + adv.get("advice");
+            }
             return "推荐方案C（原地等待）：公路与水运双线风险叠加，强行通行货损与安全风险均不可控；"
                     + "建议原地等待，待任一通道解除红线后再发车。";
         }
@@ -355,11 +457,20 @@ public class SolutionAgent {
                     ? String.valueOf(risk.llmJson().getOrDefault("blockedSegment", "友谊关")) : "友谊关";
         }
         String detour = detourPorts(blocked);
+        // 本程路线是否真被灾害改过：没改过就不能给模型「可用绕行：友谊关」这种提示——
+        // 司机本来就走友谊关，模型拿到这句必然推荐“绕行友谊关”。
+        boolean routeAffected = Boolean.TRUE.equals(planA.get("routeAffected"));
 
         StringBuilder p = new StringBuilder();
         p.append("你是多式联运方案生成专家。已知：\n");
-        p.append("- 熔断路段：").append(blocked).append('\n');
-        p.append("- 可用绕行：").append(detour == null ? "无（两个口岸均不可用）" : detour).append('\n');
+        if (routeAffected) {
+            p.append("- 熔断路段：").append(blocked).append('\n');
+            p.append("- 可用绕行：").append(detour == null ? "无（两个口岸均不可用）" : detour).append('\n');
+        } else {
+            p.append("- 熔断路段：").append(blocked).append("（不在本程路线上）\n");
+            p.append("- 本程公路路线：").append(planA.get("name"))
+                    .append("，未被上述熔断波及；禁止建议公路绕行或改道\n");
+        }
         String cause = sandbox.fuseCause();
         if (cause != null) {
             p.append("- 熔断成因：").append("typhoon".equals(cause) ? "台风（强风，非降雨）"
@@ -374,12 +485,17 @@ public class SolutionAgent {
                 }
             }
         }
-        p.append("- 公路绕行数据：时间").append(fmtDelta(planA.get("extraHours")))
+        p.append(routeAffected ? "- 公路绕行数据：时间" : "- 公路维持当前路线数据：时间").append(fmtDelta(planA.get("extraHours")))
                 .append("h，成本").append(fmtDelta(planA.get("costDeltaYuan"))).append("元\n");
         p.append("- 陆水联运数据：时间").append(fmtDelta(planB.get("extraHours")))
                 .append("h，成本").append(fmtDelta(planB.get("costDeltaYuan"))).append("元\n");
         p.append("- 原地等待数据：时间+").append(String.format("%.0f", WAIT_HOURS))
                 .append("h，货损率").append(planC.get("damageRatePct")).append("%\n");
+        // 全域受阻时必须把这条结论喂给模型：否则它会按「还有绕行余地」的正常改道口吻推荐前进
+        Object advRaw = planC.get("advisory");
+        if (advRaw instanceof Map<?, ?> adv) {
+            p.append("- 全域受阻结论（必须采纳，不得建议继续前进）：").append(adv.get("advice")).append('\n');
+        }
         p.append("- 货物：").append(cargo.name())
                 .append(cargo.coldChain() ? "，冷链" : "").append('\n');
         // 全要素货损对比 + 综合研判摘要，让模型在方案对比里引用"环境+延误"货损而非只谈时效
@@ -397,11 +513,80 @@ public class SolutionAgent {
                 .append("    {\"name\":\"").append(planA.get("name"))
                 .append("\",\"time\":\"...\",\"cost\":\"...\",\"risk\":\"...\"},\n")
                 .append("    {\"name\":\"陆水联运平陆运河\",\"time\":\"...\",\"cost\":\"...\",\"risk\":\"...\"},\n")
-                .append("    {\"name\":\"原地等待\",\"time\":\"...\",\"cost\":\"...\",\"risk\":\"...\"}\n")
+                .append("    {\"name\":\"").append(planC.get("name"))
+                .append("\",\"time\":\"...\",\"cost\":\"...\",\"risk\":\"...\"}\n")
                 .append("  ],\n")
                 .append("  \"recommendation\": \"推荐方案及理由（不超过80字）\"\n")
                 .append("}");
         return p.toString();
+    }
+
+    /**
+     * 常态推荐语 Prompt：车刚出发、走廊正常，公路（A）与平陆运河联运（B）都可行，
+     * 只让模型讲清"两条都能走、各自适合什么情况"，不得出现"熔断/绕行/等待"这类改道口吻。
+     * <p>
+     * 例外：口岸熔断了但断的不是本程这条线（如台风打芒街、司机走友谊关）也走常态，
+     * 此时不能再写"无熔断"（那是假话），要如实说明断在哪、本程为何不用改道。
+     */
+    private String buildNormalPrompt(List<Map<String, Object>> plans) {
+        Map<String, Object> planA = planById(plans, "A");
+        Map<String, Object> planB = planById(plans, "B");
+        DemoConfigService.CargoType cargo = config.cargo();
+        String blocked = sandbox.blockedPortNames();
+        StringBuilder p = new StringBuilder();
+        p.append("你是多式联运方案生成专家。");
+        if (blocked == null) {
+            p.append("当前南宁→河内走廊无熔断、无禁航，属常态。已知：\n");
+        } else {
+            p.append("当前有口岸熔断（").append(blocked).append("），但不在本程路线上，"
+                    + "本程维持「").append(planA == null ? "公路" : planA.get("name"))
+                    .append("」，属常态通行。已知：\n")
+                    .append("- 禁止建议绕行、改道、等待：需要绕开的口岸根本不在这条线上\n");
+        }
+        p.append("- 方案A 全程公路：约 ").append(fmtHours(planA)).append(" 小时，时效最优\n");
+        if (planB != null && !Boolean.TRUE.equals(planB.get("notApplicable"))) {
+            p.append("- 方案B 陆水联运（平陆运河）：约 ").append(fmtHours(planB))
+                    .append(" 小时，车辆滚装上船、经运河转海运到海防，成本与碳排放更低\n");
+        }
+        p.append("- 货物：").append(cargo.name()).append(cargo.coldChain() ? "，冷链" : "").append('\n');
+        if (blocked == null) {
+            p.append("\n请用不超过80字说明：两条路线都是正常可选项（不是备选兜底）——")
+                    .append("赶时效选全程公路，不急、想省成本/低碳甚至可不带货全程坐船出境则选平陆运河联运。\n");
+        } else {
+            p.append("\n请用不超过80字说明：受影响的只是").append(blocked)
+                    .append("，本程不受影响，维持当前公路路线即可（不提绕行/改道/等待）；")
+                    .append("若不想只跑公路，平陆运河陆水联运同样是正常选项。\n");
+        }
+        p.append("只输出 JSON：{\"recommendation\":\"...\"}");
+        return p.toString();
+    }
+
+    /**
+     * 缓存池情境签名：模式 + 推荐方案 + 熔断成因。
+     * 粒度适中——同一局势下不同轮次的文案进同一池供轮换，不同局势（常态/改道、不同口岸）不串用。
+     * <p>
+     * 额外包一层：有口岸熔断但本程未受影响时单独建池。否则一句
+     * 「芒街熔断不影响本程」会混进“什么都没断”的常态池里，断网时被拿到无关场合去说。
+     */
+    private String situationKey(String mode, String recommendedId, List<Map<String, Object>> plans) {
+        String cause = sandbox.fuseCause();
+        String key = mode + ":" + recommendedId + ":" + (cause == null ? "none" : cause);
+        return unaffectedNote(plans) == null ? key : key + ":unaffected";
+    }
+
+    /**
+     * 常态兜底的最后一句固定话术（仅当模型不可用且缓存池也无对应情境时才用）。
+     * 保留旧措辞，保证离线首次、无任何历史时仍与“常态双选项都合法”的事实一致。
+     */
+    private String normalRecommendation() {
+        return "去河内不必只有公路：本走廊常态下即可走平陆运河陆水联运（方案B），车辆滚装上船、随船经运河转海运到海防，"
+                + "不赶时间甚至不带货也能全程坐船出境；追求时效则直走全程公路（方案A）最快。两条都是正常可选项，不是备选兜底。";
+    }
+
+    /** 从方案卡读全程小时数（常态 Prompt 用）；缺失时给占位符，不影响模型生成。 */
+    private static String fmtHours(Map<String, Object> plan) {
+        Object h = plan == null ? null : plan.get("totalHours");
+        return h instanceof Number n ? String.format("%.0f", n.doubleValue()) : "—";
     }
 
     /**
@@ -425,24 +610,55 @@ public class SolutionAgent {
     }
 
     /**
-     * 方案A 名称：按实际要绕往的口岸命名。
+     * 方案A 名称：只在「本程真的被改道了」时才叫绕行。
      * <ul>
      *   <li>友谊关被熔断 → 绕行芒街（原剧本场景）</li>
-     *   <li>芒街被熔断 → 绕行友谊关（台风场景；此时主通道本就走友谊关，实际无需改道）</li>
+     *   <li>芒街被熔断但司机本来就走友谊关 → 路线一根线没动，叫「公路直达友谊关」，
+     *       不能再叫「绕行友谊关」——那是把司机已经在走的路说成是新方案</li>
      *   <li>两个都断 → 无可用公路绕行</li>
      *   <li>都没有断 → 默认主通道友谊关</li>
      * </ul>
      */
-    private String planAName() {
+    private String planAName(boolean routeAffected, String portOnRoute) {
         String blocked = sandbox.blockedPortNames();
-        if (blocked == null) {
-            return "公路直达友谊关";
+        // 没绕行（或压根没熔断）：名字只报「这趟走哪个口岸」，不出现“绕行”二字
+        if (!routeAffected || blocked == null) {
+            String on = shortPort(portOnRoute != null ? portOnRoute
+                    : (blocked == null ? sandbox.ygg().name : detourPorts(blocked)));
+            return on == null ? "维持当前公路路线" : "公路直达" + on;
         }
         String detour = detourPorts(blocked);
         if (detour == null) {
             return "公路绕行（无可用口岸）";
         }
         return "公路绕行" + detour;
+    }
+
+    /**
+     * 本程路线实际踩在哪个口岸断面上（两口岸都不经时返回 null，如国内段南宁→六景）。
+     * 供方案命名用：司机走的是芒街线时就不能把方案写成「直达友谊关」。
+     */
+    private String routePortOf(RouteResponse route) {
+        if (route == null || route.getPathEdgeIds() == null) {
+            return null;
+        }
+        List<String> ids = route.getPathEdgeIds();
+        if (ids.contains(sandbox.mc().edgeId)) {
+            return sandbox.mc().name;
+        }
+        if (ids.contains(sandbox.ygg().edgeId)) {
+            return sandbox.ygg().name;
+        }
+        return null;
+    }
+
+    /** 口岸名去掉「口岸」后缀，方案标题更短（友谊关口岸 → 友谊关） */
+    private static String shortPort(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        String s = name.replace("口岸", "").trim();
+        return s.isEmpty() ? null : s;
     }
 
     /**
@@ -491,6 +707,11 @@ public class SolutionAgent {
 
     private static double round0(double v) {
         return Math.round(v);
+    }
+
+    /** 小时数文案（整值不保留小数），与 CorridorAdvisoryService 的等待时长写法一致 */
+    private static String hoursText(double h) {
+        return h == Math.floor(h) ? String.format("%.0f小时", h) : String.format("%.1f小时", h);
     }
 
     /** 货损说明：有因子时"建议：因子…"，无不利要素时如实说安全。 */

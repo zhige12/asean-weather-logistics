@@ -15,7 +15,8 @@
       @keyup.enter="onEnter"
     />
     <div v-if="open" class="pi-pop">
-      <div v-if="loading" class="pi-item pi-muted">搜索中…</div>
+      <div v-if="hotMode" class="pi-group">常用地点（点一下即填入，也可直接输入其它地名）</div>
+      <div v-if="loading && !hotMode" class="pi-item pi-muted">搜索中…</div>
       <div
         v-for="(it, i) in items"
         :key="i"
@@ -27,7 +28,7 @@
         <span class="pi-name">{{ it.name }}</span>
         <span class="pi-tag">{{ it.tag || (it.source === 'local' ? '地名库' : '在线') }}</span>
       </div>
-      <div v-if="!loading && !items.length" class="pi-item pi-muted">
+      <div v-if="!hotMode && !loading && !items.length" class="pi-item pi-muted">
         无匹配候选，可直接按回车在线解析「{{ text }}」
       </div>
     </div>
@@ -37,12 +38,15 @@
 
 <script>
 import axios from 'axios'
-import { geocodeName, snapCoords, apiErrorMessage } from '../utils/geocoder.js'
+import { geocodeName, snapCoords, apiErrorMessage, fetchPlaceList } from '../utils/geocoder.js'
 
 /**
- * 导航软件式起终点输入框：自由输入 + 关键字联想下拉 + 选中即吸附路网节点。
- * - 候选来自 GET /api/geocode/suggest（本地地名库前缀/包含命中优先，不足补天地图 POI）；
- * - 点选/回车选中后调 /api/geocode/snap 吸附成 nodeId，v-model 输出节点 id、name 输出显示名；
+ * 导航软件式起终点输入框：自由输入 + 关键字联想下拉 + 常用地点下拉 + 选中即吸附路网节点。
+ * - 输入为空时点开输入框，直接展开「常用地点」（地名库 hot 标记，见 place-names.json），
+ *   调度员不必每次手打；一输入关键字就切回联想候选；
+ * - 联想候选来自 GET /api/geocode/suggest（本地地名库前缀/包含命中优先，不足补天地图 POI）；
+ * - 候选带 nodeId（路网内置节点）的点选直接写入，否则调 /api/geocode/snap 吸附成 nodeId，
+ *   v-model 输出节点 id、name 输出显示名；
  * - ensure() 供宿主在「确认规划」时兜底：用户只打字没选候选时，在线解析当前文本。
  */
 export default {
@@ -63,8 +67,26 @@ export default {
       active: 0,
       errMsg: '',
       picked: null,
+      // 当前下拉是否为「常用地点」列表（区别于关键字联想）
+      hotMode: false,
+      // 后端地名库（geocoder.js 内全局缓存，两个输入框共用一份）
+      placeList: [],
       _timer: null
     }
+  },
+  computed: {
+    /** 常用地点：后端地名库带 hot 标记的条目，按 hot 升序（数字小的在前） */
+    hotItems() {
+      return this.placeList
+        .filter(p => p && p.name && p.hot)
+        .slice()
+        .sort((a, b) => a.hot - b.hot)
+        .map(p => ({ name: p.name, lat: p.lat, lng: p.lng, tag: p.tag, source: 'local', nodeId: p.nodeId }))
+    }
+  },
+  created() {
+    // 地名库拉不到时下拉只是不展示常用地点，手输与在线解析仍可用
+    fetchPlaceList().then(l => { this.placeList = l || [] }).catch(() => {})
   },
   watch: {
     // 宿主程序性改显示名（地图选点/规划结果回填）时同步输入框
@@ -84,7 +106,18 @@ export default {
       if (this.text.trim()) {
         this.open = true
         if (!this.items.length) this.fetchSuggest()
+      } else {
+        // 空输入点开：直接摆常用地点，不让调度员面对一个空下拉
+        this.showHot()
       }
+    },
+    /** 把下拉切成「常用地点」列表；地名库未加载到（后端不可达）时保持关闭，不阻断手输 */
+    showHot() {
+      const list = this.hotItems
+      this.hotMode = list.length > 0
+      this.items = list
+      this.active = 0
+      this.open = this.hotMode
     },
     onBlur() {
       // 候选项 mousedown.prevent 先于 blur 触发，这里延迟关闭只为点击外部时收起
@@ -104,7 +137,9 @@ export default {
     },
     async fetchSuggest() {
       const q = this.text.trim()
-      if (!q) { this.items = []; this.open = false; return }
+      // 清空文本：回到常用地点列表，而不是收起下拉
+      if (!q) { this.showHot(); return }
+      this.hotMode = false
       this.loading = true
       try {
         const r = await axios.get('/api/geocode/suggest', { params: { q }, timeout: 8000 })
@@ -122,6 +157,15 @@ export default {
     },
     async pick(it) {
       this.errMsg = ''
+      // 常用地点 / 本地库候选带路网节点 id：直接写入，不花一次吸附请求
+      if (it.nodeId) {
+        this.picked = { name: it.name, nodeId: it.nodeId }
+        this.$emit('update:modelValue', it.nodeId)
+        this.$emit('update:name', it.name)
+        this.text = it.name
+        this.open = false
+        return
+      }
       this.loading = true
       try {
         const s = await snapCoords(it.lat, it.lng, it.name)
@@ -194,6 +238,15 @@ export default {
   cursor: pointer;
 }
 .pi-item.on { background: rgba(37, 99, 235, 0.08); }
+.pi-group {
+  padding: 6px 10px 4px;
+  font-size: 11px;
+  color: #9aa5b8;
+  background: #f7f9fc;
+  border-bottom: 1px solid rgba(120, 140, 180, 0.2);
+  position: sticky;
+  top: 0;
+}
 .pi-name { color: #111827; }
 .pi-tag { color: #9aa5b8; font-size: 11px; align-self: center; white-space: nowrap;
   max-width: 52%; overflow: hidden; text-overflow: ellipsis; }

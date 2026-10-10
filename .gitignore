@@ -58,10 +58,20 @@ frontend/android/capacitor-cordova-android-plugins/
 # ---------- 备份 / 临时 / 调试 ----------
 *.bak
 *.tmp
-tools/_*.ps1
-tools/_*.txt
-tools/_*.mjs
+*.out
+*.err
 __pycache__/
+# tools 下以 _ 开头的都是开发期一次性探针脚本，默认不入库；
+# 只有下面这些是技术文档/图里点名的可复现取证脚本，显式放行。
+tools/_*
+!tools/_ui_shots.mjs
+!tools/_ui_pack.mjs
+!tools/_api_inventory.mjs
+!tools/_arch_shot.ps1
+!tools/_e2e_test.ps1
+!tools/_geo_e2e.mjs
+!tools/_wx_e2e.mjs
+!tools/_task_sync_e2e.mjs
 
 # ---------- 运行时缓存 ----------
 /decision-cache/

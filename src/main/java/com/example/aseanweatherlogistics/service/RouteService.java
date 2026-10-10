@@ -293,8 +293,10 @@ public class RouteService {
         PathResult baseline = joinOrThrow(CompletableFuture.supplyAsync(
                 () -> shortestPath(originId, destinationId, Map.of()), planExecutor));
         syncRealWeather(false, baseline.pathNodeIds);
-        PathResult current = computeCurrentPath(originId, destinationId, baseline);
-        return buildResponse(baseline, current, lastCargoType);
+        ResilientPath rec = computeCurrentPath(originId, destinationId, baseline);
+        RouteResponse resp = buildResponse(baseline, rec.path, lastCargoType);
+        resp.setCorridorAllFused(rec.softened);
+        return resp;
     }
 
     /**
@@ -305,8 +307,11 @@ public class RouteService {
         validate(originId, destinationId);
         PathResult baseline = joinOrThrow(CompletableFuture.supplyAsync(
                 () -> shortestPath(originId, destinationId, Map.of()), planExecutor));
-        PathResult current = computeCurrentPath(originId, destinationId, baseline);
-        return buildResponse(baseline, current, lastCargoType);
+        ResilientPath rec = computeCurrentPath(originId, destinationId, baseline);
+        RouteResponse resp = buildResponse(baseline, rec.path, lastCargoType);
+        // 公路是否已无路可走（靠降级才出得了路）：同一趟搜索的产物，不让下游再跑一次注定失败的搜索
+        resp.setCorridorAllFused(rec.softened);
+        return resp;
     }
 
     // ==================== 多路线候选（司机端"多条路线→自选→导航"）====================
@@ -336,7 +341,7 @@ public class RouteService {
 
         List<Map<String, Object>> out = new ArrayList<>();
         for (CandidatePath c : buildCandidates(originId, destinationId, baseline, riskMap)) {
-            out.add(toCandidate(c.key, c.label, c.path, riskMap, c.note, originId, destinationId));
+            out.add(toCandidate(c.key, c.label, c.path, riskMap, c.note, originId, destinationId, c.softened));
         }
         return out;
     }
@@ -454,9 +459,26 @@ public class RouteService {
                         ? "绕开主通道，经另一走廊抵达（含 " + risks + " 处风险路段）"
                         : "绕开主通道，经另一走廊抵达";
             }
-            out.add(new CandidatePath(key, label, note, p, rec.softened));
+            // 备选线是否也属于「降级放行」：逐条看它自己踩没踩熔断边，不直接继承推荐线的结论。
+            // 降级搜出来的备选里完全可能有整条都不穿熔断段的安全线，一刀切继承会把安全线
+            // 也标成「谨慎通行」（橙色降级虚线、不建议通行徽标都跟着误报）。
+            boolean altSoftened = rec.softened && pathTouchesFusedEdge(p, riskMap);
+            out.add(new CandidatePath(key, label, note, p, altSoftened));
         }
         return out;
+    }
+
+    /** 该路径上是否存在硬熔断边（penalty ≥ {@code IMPASSABLE_PENALTY}） */
+    private boolean pathTouchesFusedEdge(PathResult p, Map<String, RiskSegment> riskMap) {
+        if (p == null || p.pathEdgeIds() == null) {
+            return false;
+        }
+        for (String eid : p.pathEdgeIds()) {
+            if (isImpassable(riskMap.get(eid))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 与候选路径集合比较：存在相似度超过阈值的路线即视为重复 */
@@ -523,6 +545,101 @@ public class RouteService {
         return soft;
     }
 
+    // ==================== 全域受阻判据（供 CorridorAdvisoryService 出「返回/等待」建议）====================
+
+    /**
+     * 公路走廊是否已「全部硬熔断」：按当前风险图搜不出任何路径，必须把熔断边降级为软惩罚才出得了路。
+     * <p>
+     * 这条判据比「看沙盘两个口岸断面是否熔断」可靠：沙盘只建模了友谊关/芒街两个点，
+     * 而走廊是否真断要看路网——河口等其它出境边被注入同等风险时同样计入，
+     * 也不会出现「AI 说建议等待、算路引擎却照常给出一条向前路线」两套口径打架。
+     * 起终点非法等业务异常不等于受阻（返回 false，让调用方照常报错）。
+     */
+    public boolean roadCorridorsAllFused(String originId, String destinationId) {
+        try {
+            shortestPath(originId, destinationId, weatherSimulator.currentRiskMap());
+            return false;
+        } catch (IllegalStateException noPath) {
+            return true;
+        } catch (Exception badRequest) {
+            return false;
+        }
+    }
+
+    /**
+     * 出境点（路径上最后一条口岸虚拟边）在全程里程中的位置比例 0~1；路径不含口岸边返回 -1。
+     * 各端据此判断车在「境内段」还是「已出境」：境内可以折返，出境后折返要重新通关、不经济，只能就地等。
+     */
+    public double customsCrossRatio(List<String> edgeIds) {
+        if (edgeIds == null || edgeIds.isEmpty()) {
+            return -1;
+        }
+        double total = 0;
+        double cum = 0;
+        double crossAt = -1;
+        for (String eid : edgeIds) {
+            RoadEdge e = findEdge(eid);
+            if (e == null) {
+                continue;
+            }
+            if (e.isCustoms()) {
+                crossAt = cum; // 反复覆盖 → 最终留下最后一条口岸边（出境地）的位置
+            }
+            cum += e.getDistanceKm();
+            total += e.getDistanceKm();
+        }
+        if (crossAt < 0 || total <= 0) {
+            return -1;
+        }
+        return Math.min(1.0, crossAt / total);
+    }
+
+    /** 按进度比例取路线上的当前节点 ID（供「返回起点」估算折返里程），不在途时传负数即起点 */
+    public String nodeAtProgress(List<String> nodeIds, List<String> edgeIds, double ratio) {
+        return findCurrentNode(nodeIds, edgeIds, ratio);
+    }
+
+    /** 某边的展示名（口岸名剥掉「通道/通行/通关」后缀），查不到时退回边 ID 本身 */
+    public String edgeLabel(String edgeId) {
+        RoadEdge e = edgeId == null ? null : edgeById.get(edgeId);
+        if (e == null || e.getName() == null || e.getName().isBlank()) {
+            return edgeId;
+        }
+        return e.getName().replace("通道", "").replace("通行", "").replace("通关", "").trim();
+    }
+
+    /**
+     * 两点间在当前风险口径下的里程/耗时。正常搜不出时降级再搜一次并标 {@code blocked=true}
+     * ——折返路线本身也穿过熔断区，前端要如实提示减速慢行；彻底不可达返回 null。
+     */
+    public Map<String, Object> legSummary(String fromId, String toId) {
+        if (fromId == null || toId == null) {
+            return null;
+        }
+        if (fromId.equals(toId)) {
+            return Map.of("fromId", fromId, "toId", toId, "distanceKm", 0.0, "hours", 0.0, "blocked", false);
+        }
+        Map<String, RiskSegment> riskMap = weatherSimulator.currentRiskMap();
+        try {
+            return legOf(shortestPath(fromId, toId, riskMap), fromId, toId, false);
+        } catch (IllegalStateException blocked) {
+            try {
+                return legOf(shortestPath(fromId, toId, softenRiskMap(riskMap)), fromId, toId, true);
+            } catch (Exception stillNothing) {
+                return null;
+            }
+        } catch (Exception badRequest) {
+            return null;
+        }
+    }
+
+    private Map<String, Object> legOf(PathResult p, String fromId, String toId, boolean blocked) {
+        return Map.of(
+                "fromId", fromId, "toId", toId,
+                "distanceKm", round(p.totalDistanceKm()), "hours", round(p.hours()),
+                "blocked", blocked);
+    }
+
     /**
      * 司机选定候选后按偏好重算完整路线（导航轮询保持一致）。
      * choice: recommended=实时风险感知（默认）；fastest=纯时间基准；alternate=绕行走廊。
@@ -541,8 +658,10 @@ public class RouteService {
         Map<String, RiskSegment> riskMap = weatherSimulator.currentRiskMap();
         PathResult chosen;
         boolean softened = false;
+        boolean allFused;
         if ("fastest".equals(choice)) {
             chosen = baseline; // 最快 = 无风险纯时间基准（沿线风险段仍会标注，供司机权衡）
+            allFused = roadCorridorsAllFused(originId, destinationId);
         } else {
             // 与 planCandidates 复用同一套候选生成，按 key 精确取回司机所选的同一条路线
             List<CandidatePath> candidates = buildCandidates(originId, destinationId, baseline, riskMap);
@@ -558,8 +677,11 @@ public class RouteService {
             }
             chosen = picked.path;
             softened = picked.softened;
+            // 候选生成时已经跑过同一张风险图的判定，直接复用，不再重复一次注定失败的搜索
+            allFused = softened;
         }
         RouteResponse resp = buildResponse(baseline, chosen, cargoType);
+        resp.setCorridorAllFused(allFused);
         if (softened) {
             // 兜底方案里含「已熔断但被降级放行」的边，必须留痕提示
             String warn = "部分路段已硬熔断，当前为可通行兜底方案，请减速慢行";
@@ -753,11 +875,14 @@ public class RouteService {
 
     private Map<String, Object> toCandidate(String key, String label, PathResult p,
                                             Map<String, RiskSegment> riskMap, String note,
-                                            String originId, String destinationId) {
+                                            String originId, String destinationId, boolean softened) {
         Map<String, Object> m = new HashMap<>();
         m.put("key", key);
         m.put("label", label);
         m.put("note", note);
+        // 是否为「硬熔断降级放行」的兜底路线：此前只存在于后端内部记录里、从不下发，
+        // 大屏图例写着「降级兜底（橙色虚线）」却永远不会亮，司机端也看不出自己选的是条穿灾区的路
+        m.put("softened", softened);
         m.put("via", routeVia(p.pathNodeIds(), originId, destinationId));
         m.put("hours", round(p.hours()));
         m.put("distanceKm", round(p.totalDistanceKm()));
@@ -844,10 +969,10 @@ public class RouteService {
      * 用当前风险图（weatherSimulator.currentRiskMap）算当前路径。
      * 全线硬熔断时走 resilientPath 的两级兜底，避免「灾害一来就彻底没有路线」导致前端报错停摆。
      */
-    private PathResult computeCurrentPath(String originId, String destinationId, PathResult baseline) {
+    private ResilientPath computeCurrentPath(String originId, String destinationId, PathResult baseline) {
         Map<String, RiskSegment> riskMap = weatherSimulator.currentRiskMap();
-        CompletableFuture<PathResult> currentFuture = CompletableFuture.supplyAsync(
-                () -> resilientPath(originId, destinationId, riskMap, baseline).path, planExecutor);
+        CompletableFuture<ResilientPath> currentFuture = CompletableFuture.supplyAsync(
+                () -> resilientPath(originId, destinationId, riskMap, baseline), planExecutor);
         return joinOrThrow(currentFuture);
     }
 
@@ -1321,7 +1446,7 @@ public class RouteService {
         }
     }
 
-    private PathResult joinOrThrow(CompletableFuture<PathResult> future) {
+    private <T> T joinOrThrow(CompletableFuture<T> future) {
         try {
             return future.join();
         } catch (CompletionException e) {

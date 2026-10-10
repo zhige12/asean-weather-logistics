@@ -54,4 +54,11 @@ public class RouteResponse {
     private double carbonEmissionKg;
     /** 风险剖面：沿路径采样点，每点含 distanceKm/riskLevel/penalty/hazardType */
     private List<java.util.Map<String, Object>> riskProfile;
+
+    /**
+     * 该 O/D 的公路走廊是否已全部硬熔断（必须把封闭边降级才搜得出路）。
+     * 随路线一并下发，而不是让下游各自重跑一次“注定失败的搜索”；
+     * 再结合水运禁航，就是「返回/等待」建议（{@link com.example.aseanweatherlogistics.service.CorridorAdvisoryService}）的公路侧判据。
+     */
+    private boolean corridorAllFused;
 }

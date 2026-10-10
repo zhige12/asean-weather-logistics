@@ -30,6 +30,8 @@ public class RouteAgentService {
 
     private final RouteService routeService;
     private final WeatherSimulator weatherSimulator;
+    /** 全域受阻（多走廊同时熔断 + 运河禁航）时的「返回/等待」建议 */
+    private final CorridorAdvisoryService corridorAdvisoryService;
 
     /** SSE 订阅者（调度大屏 / 司机端） */
     private final List<SseEmitter> emitters = new CopyOnWriteArrayList<>();
@@ -63,9 +65,11 @@ public class RouteAgentService {
         return t;
     });
 
-    public RouteAgentService(RouteService routeService, WeatherSimulator weatherSimulator) {
+    public RouteAgentService(RouteService routeService, WeatherSimulator weatherSimulator,
+                             CorridorAdvisoryService corridorAdvisoryService) {
         this.routeService = routeService;
         this.weatherSimulator = weatherSimulator;
+        this.corridorAdvisoryService = corridorAdvisoryService;
     }
 
     @PostConstruct
@@ -215,6 +219,12 @@ public class RouteAgentService {
             payload.put("destination", destinationId);
             payload.put("reason", reason);
             payload.put("advice", buildAdvice(resp));
+            // 熔断等级到「全部走廊都过不去 + 运河禁航」时附返回/等待建议：
+            // 各端据此不再把降级兜底路线当普通新线自动派单/自动换线。
+            // 推送时不知道车在哪（progress 只有司机端本地才有），故按「不在途」口径出，
+            // 司机端拿 customsCrossRatio 与自己的进度复算出返回还是就地等。
+            payload.put("advisory", corridorAdvisoryService.forRoute(originId, destinationId,
+                    resp.getPathNodeIds(), resp.getPathEdgeIds(), -1, resp.isCorridorAllFused()));
             payload.put("route", resp);
             payload.put("risks", risks);
             payload.put("hazardEdgeIds", hazardEdgeIds);
@@ -228,6 +238,9 @@ public class RouteAgentService {
             payload.put("destination", destinationId);
             payload.put("reason", reason);
             payload.put("advice", "当前风险配置下无可用路径，请人工介入或解除部分封路。");
+            // 重算直接失败 = 公路确实无路，补上同一份返回/等待建议（没有几何就只能给「暂缓发车」）
+            payload.put("advisory", corridorAdvisoryService.forRoute(originId, destinationId,
+                    List.of(), List.of(), -1, true));
             payload.put("error", String.valueOf(e.getMessage()));
             payload.put("risks", risks);
             payload.put("hazardEdgeIds", hazardEdgeIds);
@@ -245,10 +258,22 @@ public class RouteAgentService {
                     "⚠ %s。已自动重算绕行路线：基准 %.0f h → 当前 %.0f h，预计延误 %.0f h。请调度中心确认后推送司机端。",
                     top, resp.getBaselineHours(), resp.getCurrentHours(), resp.getExtraHours());
         }
-        if (resp.getRiskSegments() != null && !resp.getRiskSegments().isEmpty()) {
+        List<RiskSegment> risks = resp.getRiskSegments();
+        if (risks != null && !risks.isEmpty()) {
+            // riskSegments 是全网风险，不是本路线风险：芒街熔断而本程走友谊关时，
+            // 说"沿线存在 1 处风险"是把别的走廊报成自己前方有灾。
+            List<String> onPath = resp.getPathEdgeIds();
+            List<RiskSegment> mine = onPath == null ? risks : risks.stream()
+                    .filter(x -> x.getEdgeId() != null && onPath.contains(x.getEdgeId()))
+                    .collect(Collectors.toList());
+            if (mine.isEmpty()) {
+                return String.format(
+                        "另一走廊有 %d 处风险（如 %s），不在当前路线上，本程无需绕行，预计 %.0f h 到达。",
+                        risks.size(), risks.get(0).getReason(), resp.getCurrentHours());
+            }
             return String.format(
                     "沿线存在 %d 处风险（如 %s），当前路线已避开或风险可控，请谨慎驾驶、实时关注气象。",
-                    resp.getRiskSegments().size(), resp.getRiskSegments().get(0).getReason());
+                    mine.size(), mine.get(mine.size() - 1).getReason());
         }
         return "风险已解除，路线恢复正常通行，预计 %.0f h 到达。".formatted(resp.getCurrentHours());
     }

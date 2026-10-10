@@ -231,13 +231,15 @@
                 <div v-else class="empty">暂无任务变更。调度中心确认方案后，任务变更指令将实时推送到这里。</div>
               </section>
 
-              <!-- AI 方案建议（让司机理解调度决策依据） -->
+              <!-- AI 方案建议（让司机理解调度决策依据）：过“接单闸门”——未接单不展示调度端的 A/B/C
+                   运输方式决策（那是调度端权限），确认接单后才可查看，避免与“司机只收执行指令”的定位矛盾。 -->
               <section class="card">
                 <div class="card-head">
                   <span>AI 方案建议</span>
-                  <button class="refresh" @click="loadAgentPlans" :disabled="agentPlansLoading">{{ agentPlansLoading ? '分析中…' : '查看方案' }}</button>
+                  <button v-if="isTaskAccepted" class="refresh" @click="loadAgentPlans" :disabled="agentPlansLoading">{{ agentPlansLoading ? '分析中…' : '查看方案' }}</button>
                 </div>
-                <template v-if="agentPlans">
+                <div v-if="!isTaskAccepted" class="empty">确认接单后，这里可查看调度端 AI 的路线决策依据。切换运输方式是调度端的决策权限。</div>
+                <template v-else-if="agentPlans">
                   <div v-for="p in agentPlans.plans" :key="p.id" class="plan-item" :class="{ rec: p.id === (agentPlans.plans.find(x=>x.id==='B')?'B':'A') }">
                     <div class="plan-head">
                       <span class="plan-badge">{{ p.id }}</span>
@@ -475,6 +477,8 @@
                     {{ c.label }}
                     <span v-if="c.key === safestKey" class="pv-flag safest-flag">AI 最安全</span>
                     <span v-else-if="selectedMode === 'road' && c.key === selectedKey" class="pv-flag">已选</span>
+                    <!-- 全域受阻：这些候选都是把已封闭路段降级放行才「能走」的，卡片必须自己说清楚 -->
+                    <span v-if="c.notRecommended" class="pv-flag blocked-flag">不建议通行</span>
                   </div>
                   <div class="pv-via">{{ c.via }}</div>
                   <div class="pv-meta">
@@ -658,6 +662,52 @@
         </div>
       </transition>
 
+      <!-- 全域受阻：台风这类区域性灾害同时盖住友谊关/芒街/河口等全部出境走廊、平陆运河也禁航时，
+           绕行只是从一个风险区换进另一个风险区。所以不自动换线、不自动局部绕行，
+           改为按本地进度给出「返回起点 / 就近停靠等待 / 暂缓发车」，由司机点一下才执行 -->
+      <transition name="fade">
+        <div v-if="corridorNotice" class="corridor-panel">
+          <div class="hazard-head">
+            <span class="hazard-icon">🌀</span>
+            <div class="hazard-head-text">
+              <div class="hazard-title">{{ corridorNotice.title }}</div>
+              <div class="hazard-sub">{{ corridorNotice.actShort }} · {{ corridorNotice.waitText || '待灾害解除后复判' }}</div>
+            </div>
+            <button class="hazard-close" @click="dismissCorridorNotice" title="本轮不再提醒">✕</button>
+          </div>
+          <div class="cp-text">{{ corridorNotice.text }}</div>
+          <div v-if="corridorNotice.blockedText" class="cp-blocked">{{ corridorNotice.blockedText }}</div>
+          <div class="cp-basis">{{ corridorNotice.basis }}</div>
+          <div class="hazard-actions">
+            <button v-if="waitHold" class="hazard-btn ok" @click="resumeFromHold">解除等待 · 恢复行驶</button>
+            <button v-else class="hazard-btn danger" @click="executeCorridorAction">{{ corridorNotice.primaryLabel }}</button>
+            <button class="hazard-btn ghost" @click="dismissCorridorNotice">暂不处置</button>
+          </div>
+        </div>
+      </transition>
+
+      <!-- 接单模式遇险：路线标红 + 弹警告 + 风险语音之后，司机端**不自动绕路**，
+           只把「正在等待调度中心下发换线指令」挂在屏底，换线入口仍是 outreach-update。
+           不抢全域受阻面板的位置：走廊全封时该听的是「返回/停靠」，不是干等换线 -->
+      <transition name="fade">
+        <div v-if="waitDispatch && !corridorNotice" class="wait-panel">
+          <div class="hazard-head">
+            <span class="hazard-icon">⏳</span>
+            <div class="hazard-head-text">
+              <div class="hazard-title">正在等待调度中心下发换线指令</div>
+              <div class="hazard-sub">已等待 {{ waitDispatchElapsed() }} · 本条路线已标红，不自动绕行</div>
+            </div>
+            <button class="hazard-close" @click="dismissWaitDispatch" title="知道了">✕</button>
+          </div>
+          <div class="wp-text">{{ waitDispatch.reason }}。请保持当前路线、减速慢行，换线指令到达后会提示您确认接收。</div>
+          <div class="hazard-actions">
+            <button v-if="waitHold" class="hazard-btn ok" @click="resumeFromHold">解除等待 · 恢复行驶</button>
+            <button v-else class="hazard-btn danger" @click="holdForDispatch">就近安全停靠等待</button>
+            <button class="hazard-btn ghost" @click="dismissWaitDispatch">知道了</button>
+          </div>
+        </div>
+      </transition>
+
       <!-- 绕行方案点选：灾害触发后的换路面板（高风险灾害标红） -->
       <transition name="fade">
         <div v-if="rerouteOptions.length" class="hazard-panel">
@@ -783,6 +833,7 @@ import { BASE_CHAIN, baseDef, makeTileLayer, tileUrlFromDef } from '../utils/til
 import '../utils/leafletCanvasGuard.js'
 import { normalizeForTTS, detectLanguage, HAZARD_VN_MAP } from '../utils/ttsNormalizer.js'
 import { fetchPlaceList, resolvePlaceToNode, apiErrorMessage } from '../utils/geocoder.js'
+import { hasAdvisory, resolveAction, advisoryView, advisorySpeakText, ACTION_SHORT } from '../utils/corridorAdvisory.js'
 
 /**
  * EPSG:3857 墨卡托 Y（单位：度当量）：lat → 180/π · ln(tan(π/4 + φ/2))。
@@ -920,6 +971,14 @@ export default {
       // 方案 C「原地等待」生效中：车辆停驶，模拟行驶不许推进、也不许被任何降级/重建路径重新拉起。
       // 原来收到 C 只弹一条提示、定时器照跑 —— 屏上写「就近停靠等待」，车标却继续沿路线前进。
       waitHold: false,
+      // 全域受阻建议（后端下发）：区域性灾害同时盖住全部出境走廊、平陆运河也禁航。
+      // 判据只认后端那一份，本端不用本地进度去重算它成不成立，只用它复算「返回还是就地等」。
+      corridorAdvisory: null,
+      // 呈现给司机的建议卡（已按本地进度纠正动作）；null=不显示
+      corridorNotice: null,
+      // 接单模式下遇险的当前处置：不自动绕路，挂一张「正在等待调度中心下发换线指令」卡。
+      // { reason, at }；null=不显示。调度下发到达 / 风险解除 / 重新开始导航时清掉
+      waitDispatch: null,
       // GPS 定位状态
       gpsStatus: 'searching', // searching | locked | unavailable | simulating | hold
       // 导航状态
@@ -1017,10 +1076,18 @@ export default {
       _voiceSeq: 0,
       // 最近一次 _cancelVoice() 的 Promise：起播前要 await 它，确保旧语音（尤其原生 TTS）真的停了
       _cancelPromise: null,
-      // 最高优先级播报占用标记（导航开始播报专用）：占用期间其它播报一律不许抢占/取消
+      // 独占播报占用标记（导航开始播报专用）：占用期间**非安全类**播报一律不许抢占/取消；
+      // 带 force 的安全播报（灾害预警 / 运河禁航 / 全域受阻）仍能打断它——安全信息优先于行程信息
       _voiceLocked: false,
       _voiceLockTimer: null,
       _criticalVoiceSeq: 0,
+      // 出发播报的开场核心行（起讫点 + 全程里程 + 耗时 + ETA 都在这一句）及其播报世代：
+      // 出发播报被灾害这类 force 播报打断时，挂到灾害播报队尾补读一次（见 speakQueue）。
+      // chunks 是这句按标点拆好的短句，随播报推进逐条出列（见 _doSpeak）：补读只补
+      // **还没完整念到的那几段**，否则整句从头重来，司机会听两遍「导航开始，从A到B」
+      _departureIntro: '',
+      _departureIntroChunks: [],
+      _departureIntroSeq: 0,
       // 最近一次确认真正开始发声的播报世代；用于出发播报"未出声自动重试"
       _voiceLastStartAt: 0,
       _voiceLastStartSeq: 0,
@@ -1451,6 +1518,9 @@ export default {
     if (this._voiceLockTimer) { clearTimeout(this._voiceLockTimer); this._voiceLockTimer = null }
     this._voiceLocked = false
     this._criticalVoiceSeq = 0
+    this._departureIntro = ''
+    this._departureIntroChunks = []
+    this._departureIntroSeq = 0
     this._stopRealTimeGPS()
     if (this._agentEs) this._agentEs.close()
     this._destroyMap()
@@ -1472,13 +1542,25 @@ export default {
      *
      * 注意：这是方法不是计算属性 —— 它要接收任意 route 对象（checkPush/_buildStatus* 传入的
      * 未必是 this.route）。曾误放进 computed 块，被当函数调用时直接抛 is not a function。
+     *
+     * this.route 还要额外并入 this.risks：接单模式不自动换线时后端新风险只落到 risks，
+     * route.riskSegments 是滞后快照，不并就会出现在「红线 + 灾害弹窗」同屏时
+     * 状态条仍写“全线通畅”的自相矛盾。
      */
     _risksOnRoute(r) {
       const segs = (r && r.riskSegments) || []
-      if (!segs.length) return []
+      const pool = (r === this.route && this.risks && this.risks.length) ? [].concat(segs, this.risks) : segs
+      if (!pool.length) return []
       const ids = new Set(((r && r.pathEdgeIds) || []).map(String))
-      if (!ids.size) return segs
-      return segs.filter(x => x && ids.has(String(x.edgeId)))
+      const hit = ids.size ? pool.filter(x => x && ids.has(String(x.edgeId))) : pool
+      // 两个来源可能给同一条风险边（合并后不能重复计数，风险列表会出现双份条目）
+      const seen = new Set()
+      return hit.filter(x => {
+        const k = String(x.edgeId)
+        if (seen.has(k)) return false
+        seen.add(k)
+        return true
+      })
     },
     // ---------- 首页概览地图（高德风格首页背景） ----------
     /**
@@ -2429,48 +2511,57 @@ export default {
       const previewRisky = this.previewing && !this.navigating && this.isHighRisk(this.selectedCandidate)
       const riskSet = this._riskEdgeSet()
 
-      // 核心：按「风险 / 安全」把路径拆成连续多段 —— 风险段红、安全段绿
+      // 核心：按「风险 / 安全」把路径拆成连续多段，用来判定「本条线到底命没命中当前灾害」
       const groups = this._buildColoredGroups(z, riskSet)
-      const safeGroups = groups.filter(g => !g.risk).map(g => g.pts)
       const riskGroups = groups.filter(g => g.risk).map(g => g.pts)
       // 预览高风险但拿不到逐段风险时，整条按风险处理
-      const wholeRisk = previewRisky && riskGroups.length === 0
-      const safeDraw = wholeRisk ? [] : safeGroups
-      const riskDraw = wholeRisk ? [cur] : riskGroups
+      const previewWhole = previewRisky && riskGroups.length === 0
+      /*
+       * 命中即整条染红，不命中即整条绿。
+       * 旧做法只把受灾那一截染红、其余保持亮绿：司机在车上是贴着路面看的，
+       * 一屏里往往全是安全段，灾害触发了线却「看起来还是绿的」，反馈等于没有。
+       * 整条红的语义也更准——「这条线现在不能走」，而不是「这条线里有一小段要小心」。
+       * 换到不命中风险的路线（调度下发新线 / 风险解除）后 groups.some(risk) 自然为假，整条回到绿。
+       */
+      const lineRisk = previewWhole || riskGroups.length > 0
+      // 红色光晕只压在实际受灾那一截上，指出「灾害在这个位置」
+      const riskDraw = previewWhole ? [cur] : riskGroups
 
-      // 底层静态线：作为 Flow 特效之外的兜底，配色与 Flow 保持一致（高德风亮绿）
+      // 底层静态线：作为 Flow 特效之外的兜底，配色与 Flow 保持一致
       const baseWidth = this.navigating ? 7 : 5
-      this.routeLine.setStyle({ color: '#1ec95f', weight: baseWidth, opacity: 1, dashArray: null })
-      this.routeLine.setLatLngs(safeDraw)
+      this.routeLine.setStyle({
+        color: lineRisk ? '#e53935' : '#1ec95f', weight: baseWidth, opacity: 1, dashArray: null
+      })
+      this.routeLine.setLatLngs(lineRisk ? [cur] : groups.filter(g => !g.risk).map(g => g.pts))
       // 风险段：Flow 特效层（markerPane）更高，会把这里细红线整条盖住，
       // 因此用更宽的半透明红色脉冲光晕，让风险段在地图上一眼可辨
       this.riskLine.setStyle({ color: '#e53935', weight: baseWidth + 9, opacity: 0.45, dashArray: null })
       this.riskLine.setLatLngs(riskDraw)
-      // 风险闪烁：preferCanvas 后折线无 SVG 元素可挂 risk-blink 类名，改 JS opacity 脉冲
-      this._setRiskBlink(!!wholeRisk, riskDraw.length > 0)
+      // 风险闪烁：preferCanvas 后折线无 SVG 元素可挂 risk-blink 类名，改 JS opacity 脉冲。
+      // 整条受灾时连主线一起闪，比只晃一下光晕更难被当成误触。
+      this._setRiskBlink(lineRisk, riskDraw.length > 0)
 
-      // 前进箭头 + 流动主线（高德风：深绿描边 + 亮绿主线 + 白色 V 形前进箭头）
-      // 特效层在 markerPane（600）之上，必须按段着色，否则单色特效会盖住红线
+      // 前进箭头 + 流动主线（高德风：深描边 + 粗主线 + 白色 V 形前进箭头）
+      // 特效层在 markerPane（600）之上，整条同色即可，不必再按段拆（拆了也只会被同色覆盖）
       if (cur.length > 1) {
-        const segs = []
         // 安全=亮绿+深绿描边；风险=红+暗红描边，与风险卡片/红线语义一致
         const SAFE = '#1ec95f'; const SAFE_CASE = '#0a7a3c'
         const RISK = '#ef4444'; const RISK_CASE = '#8f1d1d'
-        if (!wholeRisk) groups.forEach(g => segs.push({
-          latlngs: g.pts,
-          color: g.risk ? RISK : SAFE,
-          casing: g.risk ? RISK_CASE : SAFE_CASE
-        }))
-        if (wholeRisk || !segs.length) segs.push({ latlngs: cur, color: RISK, casing: RISK_CASE })
+        const segs = [{
+          latlngs: cur,
+          color: lineRisk ? RISK : SAFE,
+          casing: lineRisk ? RISK_CASE : SAFE_CASE
+        }]
         // 移动端降配：staticArrows 箭头等距固定不推进（不起 rAF 循环，省 CPU）；
         // lite 关闭 drop-shadow 滤镜与流光/脉冲 CSS 动画（CSS 动画不受 fps 约束，是滑动掉帧主因）。
         // 大屏不传这些，保持全特效。coreWidth 10 + casingBorder 6 ≈ 高德主线视觉粗度。
         // 静态箭头零逐帧开销：改为视口内等距铺放后，密度与缩放无关，放大跟随也不会空。
-        // spacingPx 收紧到 68（同屏更密）、maxArrows 放宽到 40（仅在整条路线尽缩尽览时兜底封顶）。
+        // spacingPx 48（手机上约每屏 8~12 个箭头，看着像高德那种连续方向标）、
+        // maxArrows 64（仅在整条路线尽缩尽览时兜底封顶）。
         if (!this._routeFlow) this._routeFlow = createRouteFlow(this.map, {
           color: SAFE, casing: SAFE_CASE,
           arrowShape: 'chevron', arrowColor: '#ffffff',
-          coreWidth: 10, lite: true, spacingPx: 68, maxArrows: 40, staticArrows: true
+          coreWidth: 10, lite: true, spacingPx: 48, maxArrows: 64, staticArrows: true
         })
         this._routeFlow.setSegments(segs)
       } else if (this._routeFlow) {
@@ -2631,9 +2722,20 @@ export default {
       if (s.risk) this.riskLine.setStyle({ opacity: on ? 0.45 : 0.15 })
       else this.riskLine.setStyle({ opacity: 0.45 })
     },
-    /** 当前路径上命中风险的边 ID 集合（导航用 riskSegments，预览用候选自带 riskEdgeIds） */
+    /**
+     * 当前路径上命中风险的边 ID 集合（导航用 riskSegments，预览用候选自带 riskEdgeIds）。
+     *
+     * 额外并入 this.risks：那是 SSE/轮询**刚收到**的风险清单，比 route.riskSegments 快一拍。
+     * 接单模式已不再自动换线（换线权在调度中心），this.route 会长时间停在司机正在跑的
+     * 那一条上，只读 route.riskSegments 就得等后端整条重算回来才变红——司机的眼睛比耳朵慢半拍。
+     * riskEdgeSet 本身不过滤路径，真正判定「在不在本线上」是在 splitRouteByRisk 里按
+     * pathEdgeIds 做的，所以把全网风险混进来也只会标红确实属于这条路线的那些边。
+     */
     _riskEdgeSet() {
-      return riskEdgeSet(this.route.riskSegments, this.route.riskEdgeIds)
+      return riskEdgeSet(
+        [].concat(this.route.riskSegments || [], this.risks || []),
+        this.route.riskEdgeIds
+      )
     },
     /**
      * 把路径按「风险 / 安全」拆成连续多段（相邻同类边合并），并逐段按 zoom 塑形。
@@ -2918,7 +3020,13 @@ export default {
       this._triTimer = setInterval(() => {
         if (!this.navigating || this.waitHold) { this._stopTripSimulation(); return }
         this._simDistM = Math.min(this._simDistM + SIM_SPEED_MPS * SIM_TICK_MS / 1000, this._simTotalM)
-        const p = this._simPointAt(this._simDistM)
+        let p = this._simPointAt(this._simDistM)
+        if (!p) {
+          // 路线刚被替换、里程表与新 coords 长度不一致（_simPointAt 会返回 null）：
+          // 不处理就会让车标原地冻住——就地重标定一次再取点。
+          this._syncTripProgress()
+          p = this._simPointAt(this._simDistM)
+        }
         if (p && this.map) {
           // 车辆标记就地自愈：整图重建（底图降级 / 健康检查硬重建 / 容器失效重建）会走
           // _destroyMap 把 _meMarker 置空、却不停本定时器，导致重建后 if(_meMarker) 恒假、
@@ -3416,6 +3524,9 @@ export default {
         // 后端按边相似度去重，同一走廊的两种走法仍可能返回两条（末端口岸支线不同）；
         // 这里按「途经」指纹再合并一次，杜绝"同一条路两张卡、红绿自相矛盾"
         this.candidates = this._mergeCorridorDuplicates((r.data && r.data.candidates) || [])
+        // 全域受阻：这批候选都是把已封闭路段降级放行才“能走”的，先落建议卡；
+        // 下面的“规划完成”成功提示让位给它，否则一边说全线封闭、一边报喜
+        const blockedNow = this._applyCorridorAdvisory(r.data && r.data.advisory)
         // 走廊命中时后端会并带回 canalOption：把「坐船出境」作为与公路并列的一条推荐（非风险兜底）
         this.canalOption = (r.data && r.data.canalOption) || null
         this.selectedMode = 'road'
@@ -3433,10 +3544,12 @@ export default {
         const safest = withProb.length
           ? withProb.reduce((a, b) => (a.hazardProbability <= b.hazardProbability ? a : b))
           : null
-        this.showPush('success', '路线规划完成',
-          `为您找到 ${this.candidates.length} 条可选路线`
-          + (safest ? `，最安全的是「${safest.label}」${this.topHazardName(safest)}概率 ${safest.hazardProbability}%` : '')
-          + '，请在地图上点选一条后开始导航')
+        if (!blockedNow) {
+          this.showPush('success', '路线规划完成',
+            `为您找到 ${this.candidates.length} 条可选路线`
+            + (safest ? `，最安全的是「${safest.label}」${this.topHazardName(safest)}概率 ${safest.hazardProbability}%` : '')
+            + '，请在地图上点选一条后开始导航')
+        }
       } catch (e) {
         this.online = false
         this.showPush('danger', '路线规划失败', e.response?.data?.message || '网络异常，请稍后重试')
@@ -3572,6 +3685,13 @@ export default {
       this.activePlanId = null
       // 司机自己出发 = 新的一程，上一轮的「原地等待」停驶态不能带过来
       this.waitHold = false
+      // 同上：上一程的全域受阻建议不能残留（起终点已变，新 O/D 会重新算一份）
+      this.corridorAdvisory = null
+      this.corridorNotice = null
+      // 新一程还没开始，上一轮的「等调度换线」不能跟着带过来
+      this.waitDispatch = null
+      this._corridorAck = ''
+      this._corridorSig = ''
       this.routeLoading = true
       try {
         // 注册为 Agent 活跃任务（灾害触发时自动重算并推送）；公路模式
@@ -3696,6 +3816,25 @@ export default {
         timeout: 30000
       })
       const resp = plan.data.route || plan.data
+      // 接单模式不自动绕路：后端已按注入的风险把这条 O/D 重算成了绕行线（resp.rerouted），
+      // 而下面那句 this.route = resp 是无条件采纳的——等于司机没点任何东西、也没收到调度指令，
+      // 车就在 15 秒轮询里自己改道了，刚好绕开刚立起来的「等调度」约束。
+      // 因此接单导航中只收风险不收路线：标红 + 挂等待卡，线仍是司机正在跑的那一条。
+      // 本线上没命中风险时不拦（那是起终点重算之类的非灾因刷新，不能让车标卡住）。
+      const guardRisks = plan.data.risks || resp.riskSegments || []
+      const guardCurIds = new Set(((this.route && this.route.pathEdgeIds) || []).map(String))
+      const guardMine = guardCurIds.size
+        ? guardRisks.filter(x => x && guardCurIds.has(String(x.edgeId)))
+        : guardRisks
+      if (this.navigating && this.isTaskAccepted && resp.rerouted
+          && !(this.route && this.route.rerouted) && guardMine.length) {
+        this.online = true
+        this._markRouteRisky(guardMine)
+        this._notifyHazard({ hazardEdgeIds: [], risks: guardRisks }, guardMine)
+        this._armWaitDispatch(guardMine[guardMine.length - 1].reason || '前方路段风险')
+        this.loadWeatherForRoute().catch(() => {})
+        return
+      }
       this.route = resp
       this.online = true
       this.risks = plan.data.risks || this.risks
@@ -3703,7 +3842,14 @@ export default {
         const via = this._viaFromNodes(resp.pathNodeIds)
         if (via) this.viaText = via
       }
-      this.checkPush(resp)
+      // 轮询用 _navOriginId()（车当前所在节点）重算，新路线坐标数组与旧的 _simCum
+      // 里程表长度不一致：不重标定就会让 _simPointAt 每 tick 返回 null（车标冻住不动），
+      // 里程累加到旧总里程后 _stopTripSimulation，表现就是“模拟行驶图标有时停下来”。
+      this._syncTripProgress()
+      // 全域受阻：导航轮询也要接住（SSE 是主通道，但断线重连期间只能靠这条兜底）；
+      // 成立时不再走「新增风险→弹换线面板」的常规链路
+      const blocked = this._applyCorridorAdvisory(plan.data.advisory)
+      if (!blocked) this.checkPush(resp)
       // 轮询刷新时同步更新沿线天气
       this.loadWeatherForRoute().catch(() => {})
     },
@@ -3807,16 +3953,24 @@ export default {
         // 推送文案不再引导「点选其他方案」，有得选时面板自己会出来
         this.showPush('success', '路线已绕行',
           `${reason}，已切换绕行路线，预计延误 ${r.extraHours}h。请按新路线行驶。`)
-        this.loadRerouteOptions(reason).catch(() => {})
+        // 接单导航中不自动弹绕行面板（换线权在调度）；这条绕行线已经生效，
+        // 再挂一个“自己选一条”的面板会与「等调度指令」自相矛盾
+        if (!(this.navigating && this.isTaskAccepted)) this.loadRerouteOptions(reason).catch(() => {})
         this.lastRerouted = r.rerouted
         this.lastRiskCount = segs.length
         return true
       }
       if (segs.length > this.lastRiskCount) {
-        // 新增风险（尚未绕行）：同样播报并提供替代方案
-        const reason = segs[segs.length - 1].reason
-        this.showPush('danger', '新增气象风险', `${reason}。正在为您规划替代路线…`)
-        this.loadRerouteOptions(reason).catch(() => {})
+        // 新增风险（尚未绕行）：两种模式给不同的出口——
+        // 普通用户自动弹出绕行方案面板自助点选；接单司机只标红 + 等调度，不弹面板
+        const reason = segs[segs.length - 1].reason || '前方路段风险'
+        if (this.navigating && this.isTaskAccepted) {
+          this._markRouteRisky(segs)
+          this._armWaitDispatch(reason)
+        } else {
+          this.showPush('danger', '新增气象风险', `${reason}。已为您准备绕行方案，请在屏幕上点选。`)
+          this.loadRerouteOptions(reason).catch(() => {})
+        }
         this.lastRerouted = r.rerouted
         this.lastRiskCount = segs.length
         return true
@@ -3824,6 +3978,158 @@ export default {
       this.lastRerouted = r.rerouted
       this.lastRiskCount = segs.length
       return false
+    },
+    /**
+     * 全域受阻建议的统一入口：SSE route-update、15 秒轮询、候选拉取三处都汇到这里。
+     *
+     * 判据完全取自后端（公路全部走廊已封闭 且 运河禁航），本端只补一件事——
+     * 后端推送时不知道车在哪，只会按「不在途」给 DEFER；司机端手上有实时进度，
+     * 进度越过 customsCrossRatio 就该改 HOLD（已出境，折返要重新通关、不经济），否则改 RETURN。
+     *
+     * @returns true = 本轮已由全域受阻接管，调用方必须停止自动换线与自动局部绕行
+     */
+    _applyCorridorAdvisory(a) {
+      const prev = this.corridorAdvisory
+      const next = hasAdvisory(a) ? a : null
+      this.corridorAdvisory = next
+      if (!next) {
+        if (prev) {
+          // 走廊或运河恢复：撤卡并明确告知恢复，否则司机不知道可以走了
+          this.corridorNotice = null
+          this._corridorAck = ''
+          this._corridorSig = ''
+          this.showPush('ok', '全域受阻解除', '出境走廊与平陆运河已恢复通行，可按导航继续行驶。')
+          if (this.voiceOn) this._interruptAndSpeak(['全域受阻解除，出境走廊与运河已恢复通行，可按导航继续行驶。'])
+        }
+        return false
+      }
+      const notice = this._buildCorridorNotice(next)
+      // 签名含本地算出的动作：车越过口岸后 DEFER→HOLD 也算局势升级，必须重新提醒
+      const sig = ((notice && notice.action) || '') + '|' + String(next.detail || '')
+      if (sig === this._corridorAck) {
+        // 司机已表态「暂不处置」：不再抢屏，但仍然拦着自动换线（换了也是换进另一个风险区）
+        this.corridorNotice = null
+        return true
+      }
+      const fresh = !this.corridorNotice || sig !== this._corridorSig
+      this._corridorSig = sig
+      this.corridorNotice = notice
+      if (fresh) this._notifyCorridorBlock(notice)
+      return true
+    },
+    /**
+     * 按本地进度把后端的 advisory 翻成司机看得懂的一张卡。
+     *
+     * 折返里程：后端只有在拿到在途进度时才算（action=RETURN 那一次），而司机端的 RETURN
+     * 是本地复算出来的，后端那一次给的是 DEFER、没带里程——就按当前线已走里程估：
+     * 沿原路掉头，回去走的就是刚过来那一段，里程 = 进度 × 全程。
+     */
+    _buildCorridorNotice(a) {
+      const ratio = this._localProgressRatio()
+      const action = resolveAction(a, ratio)
+      const src = { ...a }
+      if (action === 'RETURN' && (src.returnDistanceKm == null || src.returnHours == null)) {
+        const total = Number(this.route && this.route.totalDistanceKm) || 0
+        const planned = Number(this.route && this.route.estimatedHours) || 0
+        if (ratio > 0 && total > 0) {
+          src.returnDistanceKm = ratio * total
+          src.returnHours = ratio * planned > 0 ? Math.round(ratio * planned * 10) / 10 : null
+        }
+      }
+      const view = advisoryView(src, ratio)
+      if (!view) return null
+      const origin = a.originName || this.originName || '起点'
+      let primaryLabel = '暂缓发车，留在原地待命'
+      if (view.action === 'RETURN') {
+        primaryLabel = '按建议折返' + origin
+          + (src.returnDistanceKm != null ? '（约 ' + Math.round(src.returnDistanceKm) + 'km）' : '')
+      } else if (view.action === 'HOLD') {
+        primaryLabel = '就近安全停靠等待'
+      }
+      return {
+        action: view.action,
+        actShort: ACTION_SHORT[view.action] || '返回 / 等待',
+        title: view.title,
+        text: view.text,
+        waitText: view.waitText,
+        blockedText: view.blockedText,
+        basis: a.waitBasis || '',
+        originName: origin,
+        primaryLabel
+      }
+    },
+    /** 全域受阻强提醒：震动 + 顶部推送条 + 抢占语音（只念一句结论，长说明留给卡片） */
+    _notifyCorridorBlock(notice) {
+      if (!notice) return
+      if (navigator.vibrate) navigator.vibrate([300, 120, 300])
+      this.showPush('danger', notice.title, notice.text)
+      this.pushLog.unshift({
+        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+        text: '全域受阻 · ' + notice.actShort
+      })
+      // 换线面板里的候选全是降级放行出来的，留着只会误导司机“有得选”
+      this.rerouteOptions = []
+      if (this.voiceOn) this._interruptAndSpeak([advisorySpeakText(notice, notice.originName)], true)
+    },
+    /** 车在当前行程线上的进度（0~1）；不在途返回 -1，与后端 progressRatio 同一口径 */
+    _localProgressRatio() {
+      const pos = this._meMarker ? this._meMarker.getLatLng() : null
+      if (pos && Number.isFinite(pos.lat)) return this._computeProgressRatio(pos.lat, pos.lng)
+      // 刚进导航、车标还没落位：直接查里程表，口径与 _computeProgressRatio 一致
+      if (this.navigating && this._simTotalM) {
+        return Math.max(0, Math.min(1, (this._simDistM || 0) / this._simTotalM))
+      }
+      return -1
+    },
+    /** 司机点「暂不处置 / ✕」：记住本轮签名，走廊与成因未变就不再抢屏（但仍不自动换线） */
+    dismissCorridorNotice() {
+      this._corridorAck = this._corridorSig || ''
+      this.corridorNotice = null
+      this.pushLog.unshift({
+        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+        text: '司机未采纳全域受阻建议，保持当前路线行驶'
+      })
+    },
+    /** 采纳建议：RETURN 走真实折返算路，HOLD/DEFER 复用方案 C 的停驶链路 */
+    async executeCorridorAction() {
+      const n = this.corridorNotice
+      const a = this.corridorAdvisory
+      if (!n || !a) return
+      if (n.action === 'RETURN') { await this._startReturnToOrigin(a, n); return }
+      this.pushLog.unshift({
+        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+        text: '全域受阻 · 司机采纳' + n.actShort
+      })
+      if (this.navigating) {
+        // 已出境或未出境但选择等待：真的把车停下来（停 GPS/模拟推进），不是只在屏上写一行
+        this._applyWaitHold()
+        this.showPush('warn', '已停靠等待', '已按建议停在当前位置等待解除，冷链机组保持运行；走廊恢复会再提醒。')
+      } else {
+        this.showPush('warn', '暂缓发车', '已按建议留在' + n.originName + '待命，出境走廊与运河恢复后会再提醒。')
+      }
+    },
+    /**
+     * 执行折返：把这一程的终点换成行程起点，从车辆当前所在节点往回算路。
+     * 走既有的 searchRoutes 链路（候选→预览→开始导航都按新 O/D 重走），
+     * 不自带掉头线——回程同样要过一遍风险图，该绕的还得绕。
+     */
+    async _startReturnToOrigin(a, n) {
+      const backTo = a.originId
+      if (!backTo) return
+      const cur = this._navOriginId()
+      this.pushLog.unshift({
+        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+        text: '全域受阻 · 司机执行折返返回' + n.originName
+      })
+      this._releaseWaitHold()
+      this.rerouteOptions = []
+      this.corridorNotice = null
+      // 折返是新的一程：本轮签名归档，回程途中同一局势不再按原 O/D 反复弹屏
+      this._corridorAck = this._corridorSig || ''
+      this.originId = cur
+      this.destinationId = backTo
+      this.showPush('warn', '正在规划回程', '按建议折返' + n.originName + '，正在从当前位置重新算路…')
+      await this.searchRoutes()
     },
     // Agent 实时守护：SSE 订阅，灾害发生后后端立即重算并推送新路线（毫秒级），轮询仅作兜底
     connectAgent() {
@@ -3837,57 +4143,75 @@ export default {
               && (data.origin !== this.resolvedOriginId || data.destination !== this.resolvedDestinationId)) {
             return
           }
+          // 全域受阻优先于一切自动处置：全部出境走廊已封闭且运河禁航时，
+          // 不管是自动换线还是局部绕行，都只把车从一个风险区搬进另一个风险区，
+          // 必须交给司机决定“返回还是就地等”。建议是按本 O/D 算的，与灾害边是否命中无关，
+          // 所以闸门放在边集过滤之前。
+          if (this._applyCorridorAdvisory(data.advisory)) return
           // 未开始导航但已选好这条线（或目的地是越南端）：风险变化要立即预警并静默刷新路线，
           // 让司机在上路前就知道前方有灾、路线已调整；只是没强提醒打断。
           if (!this.navigating) {
             this._watchPreviewRisk(data)
             return
           }
-          // 灾害必须**先提示**：下面的分支（局部绕行 / 重新拉取路线）都要多一次 HTTP 往返，
+          // 灾害边必须与**当前在跑的这一条行程线**求交集：后端把全网 hazardEdgeIds
+          // 原样塞进每条关注路线的推送里，友谊关熔断时，导航去南宁港（NN→LJ，国内段）
+          // 的司机也会收到自己这条线的“前方灾害”，并据此误调 /api/route/detour 触发
+          // 局部绕行——那条熔断边根本不在这条路上。路线没带边信息（离线降级线）时保持全局清单不误伤。
+          const curIds = new Set(((this.route && this.route.pathEdgeIds) || []).map(String))
+          const allHaz = data.hazardEdgeIds || []
+          const hazIds = curIds.size ? allHaz.filter(id => curIds.has(String(id))) : allHaz
+          const risksMine = curIds.size
+            ? (data.risks || []).filter(x => x && curIds.has(String(x.edgeId)))
+            : (data.risks || [])
+          const hazData = { ...data, hazardEdgeIds: hazIds }
+          // 本轮灾害既不在当前路线上、风险清单里也没有本路线命中的边：那是别的廊道/别的行程的事，
+          // 不打扰；但自己这条线重算失败（route 为空）是硬信息，不能吞
+          if (data.route && allHaz.length && !hazIds.length && !risksMine.length) {
+            return
+          }
+          // 灾害必须**先提示**：后面无论哪种模式都还有 HTTP 往返，
           // 其中 fetchRoute 走 /api/route/plan-with-weather，注入风险后实测 4 秒以上。
           // 等它回来才提示，司机端会明显滞后于大屏（后端 SSE 只需 ~350ms）。
-          this._notifyHazard(data)
+          // 标红放在提示之前：_notifyHazard 内部也会标红，但风险解除分支不进它，
+          // 这里先上一道保险，保证「有新风险就一定有红线」。
+          this._markRouteRisky(risksMine.length ? risksMine : (data.risks || []))
+          this._notifyHazard(hazData, risksMine)
           if (!data.route) {
             // 硬熔断：所有路线均不可通行，红色告知司机停车等待调度指令
             this.showPush('danger', '无可用路径', data.advice || '所有路线均不可通行，请停车等待调度指令。')
             return
           }
-          // 未接单的普通用户：气象/调度控制不得自动改变其导航路线。
-          // 灾害到达时只弹出可绕行路线面板，由司机自行点选是否换线——绝不自动换线。
-          if (!this.isTaskAccepted) {
-            const hasRiskNow = !!(data.hazardEdgeIds && data.hazardEdgeIds.length)
-              || !!(data.risks && data.risks.length)
-            if (!hasRiskNow) {
-              // 风险清除：收起可能开着的绕行面板，只提示解除；
-              // 不换线不播报灾害，换线控制权仍在用户手里
-              this.rerouteOptions = []
+          const hasRiskNow = hazIds.length > 0 || risksMine.length > 0
+          const reason = (risksMine.length ? risksMine[risksMine.length - 1].reason
+            : (data.risks && data.risks.length ? data.risks[data.risks.length - 1].reason : ''))
+            || '前方路段风险'
+          if (!hasRiskNow) {
+            // 风险解除：两种模式共用。红线退回绿线、面板一起收起。
+            // 只在确实有过灾害时才提示，否则每条无风险的 SSE 事件都会报一次「已解除」刷屏。
+            const hadHazard = !!this._hazardNotifyKey || (this.risks || []).length > 0
+            this.rerouteOptions = []
+            this.waitDispatch = null
+            this._hazardNotifyKey = ''
+            if (hadHazard) {
+              this.risks = []
               this.showPush('ok', '风险解除', data.advice || '沿线风险已解除，通行条件恢复正常。')
-              return
             }
-            const reason = (data.risks && data.risks.length)
-              ? data.risks[data.risks.length - 1].reason
-              : '前方路段风险'
+            return
+          }
+          // 未接单的普通用户：气象/调度控制不得自动改变其导航路线。
+          // 灾害到达时自动弹出可绕行路线面板，由司机自行点选是否换线——绝不自动换线。
+          if (!this.isTaskAccepted) {
             this.loadRerouteOptions(reason)
             return
           }
-          // 司机选了备选/最快路线：Agent 推送（系统推荐线）不强制覆盖其选择，
-          // 提示后按司机所选走廊重新拉取（自动避开新增风险）
-          if (this.navigating && this.selectedKey && this.selectedKey !== 'recommended') {
-            this.showPush('info', 'Agent 实时更新',
-              (data.advice || '已按最新风险重新评估，正在刷新您所选的路线…') +
-              `（${new Date(data.ts || Date.now()).toLocaleTimeString('zh-CN', { hour12: false })}）`)
-            this.fetchRoute().catch(() => {})
-            return
-          }
-          // 尝试局部绕行：有 GPS + 有灾害边 ID + 有当前路线 → 调 /api/route/detour
-          if (data.hazardEdgeIds && data.hazardEdgeIds.length > 0
-              && this.route && this.route.pathEdgeIds && this.route.pathEdgeIds.length > 0) {
-            this._tryDetour(data).catch(() => {
-              this._applyAgentRoute(data)
-            })
-            return
-          }
-          this._applyAgentRoute(data)
+          // 已接单的物流司机：**不自动绕路**。
+          // 换线权在调度中心（原来这里会走 _tryDetour 局部绕行 / _applyAgentRoute 整条换线 /
+          // selectedKey≠recommended 时重新拉取路线，三条路都会让车在司机没点的情况下自己改道），
+          // 现在只标红 + 警告 + 语音播「正在等待调度中心」，并挂出等待卡；
+          // 调度下发经 outreach-update 到达（见 _loadTaskChange），那才是唯一的换线入口。
+          // _tryDetour / _applyAgentRoute 方法本体保留未删，恢复自动绕行只需把这一行换回去。
+          this._armWaitDispatch(reason)
         } catch (e) {
           console.error('agent event parse failed', e)
         }
@@ -3962,6 +4286,10 @@ export default {
           || prev.planId !== data.planId
           || (data.dispatchedAt && prev.dispatchedAt !== data.dispatchedAt)
         this.taskChange = data
+        if (isNew) {
+          // 调度指令已到达：等待卡完成使命，再挂在那就是重复信息
+          this.waitDispatch = null
+        }
         if (isNew && !driverTarget.confirmed) {
           if (this.navigating) {
             // 司机正在导航中：走「播报灾害 → 预览调度路线 → 播报天气 → 弹确认接收」编排
@@ -4078,6 +4406,9 @@ export default {
         })
         this.candidates = this._mergeCorridorDuplicates((r.data && r.data.candidates) || [])
         canalOpt = (r.data && r.data.canalOption) || null
+        // 派单到达时的全域受阻：调度员在大屏已人工确认过一次，这里只把结论告知司机，
+        // 不拦住接单（接单与导航链路照旧），司机可随时点卡片上的返回/停靠
+        this._applyCorridorAdvisory(r.data && r.data.advisory)
       } catch (e) {
         console.error('task route preload failed', e)
       } finally {
@@ -4214,7 +4545,8 @@ export default {
         this.showPush('danger', '⚠ 调度任务变更', '前方气象灾害，调度中心已下发新路线，正在为您切换到预览…')
         this.pushLog.unshift({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text: '导航中收到调度任务变更，进入路线预览' })
         if (this.voiceOn) {
-          this._interruptAndSpeak([`气象灾害预警。${hazardWord}。调度中心已介入，正在为您重新规划安全路线，请注意屏幕。`])
+          // force：调度下发的灾害预警同样优先于出发播报（出发信息改由队尾补读）
+          this._interruptAndSpeak([`气象灾害预警。${hazardWord}。调度中心已介入，正在为您重新规划安全路线，请注意屏幕。`], true)
         }
 
         // C=原地等待：无新路线可预览，保持当前导航，仅弹出确认接收抽屉
@@ -4468,12 +4800,44 @@ export default {
       }
     },
     /**
+     * 把刚收到的风险并进 this.risks —— 这是「路线立刻变红」的开关。
+     *
+     * 为什么单独一个方法：路线变红原本完全依赖 route.riskSegments，而它只在后端整条重算
+     * 回来时才更新。接单模式不再自动换线后，这条更新链路被有意掐断，红线必须改由
+     * this.risks 驱动（_riskEdgeSet 已并读它，watch risks → drawRoute 负责重绘）。
+     * 按 edgeId 去重**合并**而非整体覆盖：不要顺手把其它廊道已标红的风险抹掉。
+     */
+    _markRouteRisky(risks) {
+      const add = (risks || []).filter(x => x && x.edgeId)
+      if (!add.length) return
+      const cur = this.risks || []
+      const seen = new Set(cur.map(x => String(x && x.edgeId)))
+      const merged = cur.concat(add.filter(x => !seen.has(String(x.edgeId))))
+      if (merged.length === cur.length) return
+      this.risks = merged
+    },
+    /**
      * 收到灾害推送时**立刻**提示，不等后续「局部绕行 / 重新拉取路线」返回。
      * 按"当前灾害边集合"去重：同一批灾害只提醒一次，避免 SSE 重复推送刷屏；
      * 风险清空后重置去重键，这样同一场景关掉再打开能再次提醒。
+     *
+     * 一次灾害反馈要三处同时到位，少一处司机就觉得系统没反应：
+     *   1) 变红 —— _markRouteRisky 把本线风险并进 this.risks，触发 drawRoute 重绘；
+     *   2) 弹窗 —— showPush('danger')；
+     *   3) 语音 —— 按模式给不同尾句。
+     * 尾句必须与实际控制策略一致：接单模式已不自动绕路，就绝不能再念「正在为您绕行」，
+     * 否则司机听一套、屏幕做一套。这里也不说「已上报调度中心」——后端没有司机→调度的
+     * 上报端点，只能如实说「正在等待调度中心下发换线指令」。
+     *
+     * @param risksMine 已按当前路线 pathEdgeIds 过滤过的命中风险（可为空数组）
      */
-    _notifyHazard(data) {
-      const ids = (data.hazardEdgeIds || []).slice().sort()
+    _notifyHazard(data, risksMine) {
+      const mine = risksMine || []
+      // 去重键同时吃灾害边与本线命中风险：只有 hazardEdgeIds 时，
+      // 「风险已在这条线上但没被判定为熔断边」那种情况会被整体吞掉
+      const ids = [...new Set(
+        [].concat(data.hazardEdgeIds || [], mine.map(x => x && x.edgeId).filter(Boolean))
+      )].map(String).sort()
       if (!ids.length) {
         this._hazardNotifyKey = ''
         return
@@ -4481,16 +4845,76 @@ export default {
       const key = ids.join(',')
       if (key === this._hazardNotifyKey) return
       this._hazardNotifyKey = key
-      const risks = data.risks || []
-      const reason = risks.length ? risks[risks.length - 1].reason : '检测到路段气象风险'
-      this.showPush('danger', '⚠ 前方灾害', `${reason}。正在为您评估可绕行路线…`)
+      // 先标红再弹窗：重绘排在 watcher 的下一帧，但红线一定赶在司机抬眼看地图之前
+      this._markRouteRisky(mine.length ? mine : (data.risks || []))
+      const reason = (mine.length ? mine[mine.length - 1].reason
+        : ((data.risks || []).length ? data.risks[data.risks.length - 1].reason : ''))
+        || '检测到路段气象风险'
+      const port = this.inferPortFromNodeIds(this.route.pathNodeIds)
+      const where = port ? `${port}方向` : '前方路段'
+      const accepted = this.isTaskAccepted
+      this.showPush('danger', '⚠ 前方灾害',
+        `${where}：${reason}。本条路线已标红。`
+        + (accepted
+          ? '正在等待调度中心下发换线指令，请保持当前路线、减速慢行。'
+          : '已为您准备绕行方案，请在屏幕上点选。'))
       this._hazardNotifiedAt = Date.now()
-      // 强提醒：司机在路上主要靠听，震动 + 语音与任务变更提醒保持同一套处理
-      if (navigator.vibrate) navigator.vibrate([200, 100, 200])
+      // 强提醒：司机在路上主要靠听，震动 + 语音与任务变更提醒保持同一套处理。
+      // 震动加到三段连击，比原来的 [200,100,200] 更难被当成误触忽略掉
+      if (navigator.vibrate) navigator.vibrate([300, 120, 300, 120, 300])
       if (this.voiceOn) {
         const speak = reason.length > 50 ? reason.slice(0, 50) : reason
-        this._interruptAndSpeak([`气象预警。${speak}`])
+        // force：灾害预警优先于「导航开始」的独占播报，出发信息改由队尾补读，不再整段听不到
+        this._interruptAndSpeak([
+          `气象预警。${where}${speak}，当前路线已标为红色。`,
+          accepted
+            ? '正在等待调度中心下发换线指令，请保持当前路线，减速慢行，不要自行改道。'
+            : '绕行方案已经准备好，请在屏幕上点选新的路线。'
+        ], true)
       }
+    },
+    /**
+     * 接单模式遇险的唯一处置：挂出「正在等待调度中心」状态卡。
+     *
+     * 幂等按 reason：同一条致灾原因重复进入（15 秒轮询兜底、SSE 重推）不重置 at，
+     * 否则卡上的「已等待 X」会被轮询每秒清零，司机永远看不出自己已经等了多久。
+     * 文案不写「已上报调度中心」：后端没有司机→调度的上报端点，这里只能描述真实状态——等指令。
+     */
+    _armWaitDispatch(reason) {
+      const r = reason || '前方路段风险'
+      if (this.waitDispatch && this.waitDispatch.reason === r) return
+      this.waitDispatch = { reason: r, at: Date.now() }
+      this.pushLog.unshift({
+        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+        text: `前方灾害（${r}）：已标红本路线，不自动绕路，等待调度中心下发换线指令`
+      })
+    },
+    /** 司机确认知道了，收起等待卡（不改路线、不解除风险，只是不再占屏） */
+    dismissWaitDispatch() {
+      this.waitDispatch = null
+    },
+    /**
+     * 等待期间就近安全停靠：复用调度方案 C 的停驶实现（真停车，不只是 UI 写一行字）。
+     * 不撤等待卡：卡片换成「恢复行驶」按钮，否则司机停完就找不到继续的入口了。
+     */
+    holdForDispatch() {
+      this._applyWaitHold()
+      this.showPush('warn', '已停驶等待', '车辆已在当前位置停稳，继续等待调度中心下发换线指令。')
+    },
+    /**
+     * 等待卡上的「已等待」计时。
+     *
+     * 必须是方法不能是计算属性：computed 把 Date.now() 当普通依赖缓存住，
+     * 即使 mounted 里 _clockTimer 每秒 $forceUpdate 也不会让它重算，
+     * 表现就是“已等待 0 秒”永远不动。方法跟着渲染跑，才能真正走表。
+     */
+    waitDispatchElapsed() {
+      const at = this.waitDispatch && this.waitDispatch.at
+      if (!at) return ''
+      const s = Math.max(0, Math.floor((Date.now() - at) / 1000))
+      const m = Math.floor(s / 60)
+      const sec = String(s % 60).padStart(2, '0')
+      return m > 0 ? `${m} 分 ${sec} 秒` : `${s} 秒`
     },
     /**
      * 未开始导航（已选好线 / 目的地越南端）收到风险更新的处理：
@@ -4547,7 +4971,20 @@ export default {
       const pos = this._meMarker ? this._meMarker.getLatLng() : null
       const coords = this.route && this.route.pathCoords
       if (!coords || coords.length < 2) return
-      if (!pos) { this._triIdx = 0; return }
+      // 先把里程表按新路线重建：即使拿不到车标位置也要让 _simCum 与新 coords 对齐，
+      // 否则 _simPointAt 会因 cum.length !== coords.length 恒返回 null，车标永久冻住。
+      const cum = [0]
+      for (let i = 1; i < coords.length; i++) {
+        cum.push(cum[i - 1] + this._distM(coords[i - 1], coords[i]))
+      }
+      this._simCum = cum
+      this._simTotalM = cum[cum.length - 1]
+      if (!pos) {
+        // 无车标：把里程钳制到新路线范围内（路线变短时旧 _simDistM 可能越界），不回起点
+        this._triIdx = 0
+        this._simDistM = Math.min(this._simDistM || 0, this._simTotalM)
+        return
+      }
       let minDist = Infinity
       let minIdx = 0
       for (let i = 0; i < coords.length; i++) {
@@ -4556,14 +4993,6 @@ export default {
         if (d < minDist) { minDist = d; minIdx = i }
       }
       this._triIdx = minIdx
-      // 换路线后重新标定模拟里程：累计里程表是按旧坐标数组算的，
-      // 与新路线长度不一致会导致 _simPointAt 取到错误位置（车辆瞬间跳走）。
-      const cum = [0]
-      for (let i = 1; i < coords.length; i++) {
-        cum.push(cum[i - 1] + this._distM(coords[i - 1], coords[i]))
-      }
-      this._simCum = cum
-      this._simTotalM = cum[cum.length - 1]
       this._simDistM = cum[minIdx] || 0
     },
     /** 尝试用当前 GPS 位置做局部绕行，只替换灾害段 */
@@ -4687,13 +5116,14 @@ export default {
      * 排队并抢占播报最新内容。
      *
      * @param texts 依次朗读的文本
-     * @param opts  force=true 无视高优先级占用强行播报；lock=true 本条为高优先级，
-     *              占用期间别的播报既不能抢占、也不入队（导航开始播报用）
+     * @param opts  force=true 安全关键播报（灾害预警 / 运河禁航 / 全域受阻），
+     *              即使导航开始播报正占着通道也强行打断它；lock=true 本条为独占播报，
+     *              占用期间非 force 的播报既不能抢占、也不入队（导航开始播报用）
      */
     speakQueue(texts, opts) {
       if (!this.voiceOn) { this._vdbg('拦截：语音已关闭(voiceOn=false)'); return }
       const o = opts || {}
-      // 高优先级播报（导航开始）正在念：其它播报一律让路
+      // 导航开始播报（lock）正在念：只有 force 类安全播报能打断，其它一律让路
       if (this._voiceLocked && !o.force) { this._vdbg('拦截：高优先级播报占用中'); return }
       const list = (texts || []).filter(t => t && String(t).trim())
       if (!list.length) { this._vdbg('拦截：文本为空'); return }
@@ -4709,7 +5139,14 @@ export default {
       this._lastVoiceText = key
       this._lastVoiceAt = now
       // 抢占：取消当前播报与排队内容，马上播最新的这条。
-      // 非最高优先级播报连取消当前播报的权利都没有，确保导航开始播报不被任何预警抢走。
+      // force 的安全播报此刻有权打断「导航开始」（灾害信息优先）；
+      // 反过来非 force 的播报连取消当前播报的权利都没有，出发播报不会被轮询噪音切碎。
+      // 出发播报被打断时，它那句「从A到B、全程X公里」不能跟着一起丢：挂到本次队尾补读。
+      // 判据是「登记时记录的播报世代仍等于当前世代」——即出发播报还在念、还没被别的链路顶替。
+      // 只给非独占播报补读：出发播报自身的重试（force+lock）整段重来，不需要再加一句。
+      const introRescue = (o.force && !o.lock && this._departureIntroChunks.length && this._departureIntroSeq === this._voiceSeq)
+        ? this._departureIntroChunks.slice() : []
+      if (introRescue.length) { this._departureIntro = ''; this._departureIntroChunks = []; this._departureIntroSeq = 0 }
       this._cancelPromise = this._cancelVoice(o.force)
       this._voiceQueue.length = 0
       // 拆句播报：Web Speech 引擎（尤其 Android WebView / Chrome）对单条长文本常在念到一半时
@@ -4717,6 +5154,10 @@ export default {
       // 里程 / 耗时 / 到达时间没读出来。按句末标点切成短句逐条读可规避；
       // 去重键与上锁时长仍按整段（list）计，只改真正入队朗读的粒度，跨语言顺序不变。
       this._voiceQueue.push(this._expandToSentences(list))
+      // 补读段排在本次播报的最后：先把灾害说完，再回头补行程信息。
+      // 直接用登记时拆好的短句（与上面同一套 _expandToSentences 规则，每条都在引擎能读完的长度内），
+      // 并且只补还没完整念到的那几段——已念过的不重复，正在念而被掐断的那一条留在里面重读
+      if (introRescue.length) this._voiceQueue.push(introRescue)
       // 高优先级：锁住语音通道，直到本条念完（或超时兜底）
       let lockSec = 0
       if (o.lock) {
@@ -4724,6 +5165,7 @@ export default {
         this._lockVoice(this._estimateSpeechMs(list))
       }
       this._vdbg('入队 ' + list.length + ' 条' + (lockSec ? '（上锁 ' + lockSec + 's）' : '')
+        + (introRescue.length ? '（队尾补读出发核心行剩余 ' + introRescue.length + ' 段）' : '')
         + '｜首条：' + String(list[0]).slice(0, 18))
       this._flushVoice()
     },
@@ -4782,12 +5224,12 @@ export default {
 
     /**
      * 取消当前正在进行的播报：清掉计时器、作废旧播报链路、停掉 web speech 与原生 TTS。
-     * force=false 时不能取消最高优先级的导航开始播报；司机主动退出/卸载会显式传 true。
+     * force=false 时不能取消正独占通道的导航开始播报；安全关键播报与司机主动退出/卸载会显式传 true。
      * 递增 _voiceSeq 后，旧链路里所有 onend / onerror / 降级回调都会自行退出，不会续播旧内容。
      */
     _cancelVoice(force = false) {
       if (this._criticalVoiceSeq && !force) {
-        this._vdbg('拦截取消：导航开始播报最高优先级占用中')
+        this._vdbg('拦截取消：导航开始播报独占中（本条非安全关键播报）')
         return Promise.resolve(false)
       }
       if (this._voiceTimer) { clearTimeout(this._voiceTimer); this._voiceTimer = null }
@@ -4876,9 +5318,21 @@ export default {
     _doSpeak(texts, i, seq) {
       if (seq !== this._voiceSeq) return // 已被抢占，整条旧播报链路作废
       this._voiceActiveSeq = seq
+      // 出发播报推进到下一条 = 上一条已完整念完，把它从待补读短句里出列；
+      // 正在念的这条可能只念到一半就被打断，所以留在里面，补读时重读一遍才不缺字
+      if (i > 0 && this._departureIntroSeq === seq && texts[i - 1] === this._departureIntroChunks[0]) {
+        this._departureIntroChunks.shift()
+      }
       if (i >= texts.length) {
         // 整条念完：只释放本次最高优先级锁，旧播报回调不能误开新播报的锁
         this._unlockVoice(this._criticalVoiceSeq)
+        // 出发播报完整念完且队里没接别的段：那份「被打断才需要补读」的开场行作废，
+        // 不清的话很久之后来的 force 播报会凭空补念一句陈年的「导航开始…」
+        if (this._departureIntroSeq && this._departureIntroSeq === seq && !this._voiceQueue.length) {
+          this._departureIntro = ''
+          this._departureIntroChunks = []
+          this._departureIntroSeq = 0
+        }
         if (this._voiceQueue.length) {
           // 队列里还有整段要连读：不再等 1500ms 冷却，接上立刻续播
           this._voiceTimer = setTimeout(() => {
@@ -5068,14 +5522,17 @@ export default {
     /**
      * 打断当前语音并立即播报新内容（用于预警等重要播报）。
      * speakQueue 现在本身就是抢占式的，这里额外跳过文本去重，保证重要预警一定播出来。
+     * force=true：安全关键播报（灾害预警 / 运河禁航 / 全域受阻）允许打断「导航开始播报」的独占锁——
+     * 旧实现遇锁直接丢弃且不排队，出发播报念到一半时灾害事件进来就全程无声，只弹卡。
+     * 打断后出发播报的开场核心行（起讫点/里程/ETA）由 speakQueue 挂到队尾补读，不会整个听不到。
      */
-    _interruptAndSpeak(texts) {
+    _interruptAndSpeak(texts, force) {
       if (!this.voiceOn) return
-      // 导航开始播报期间，任何预警/任务播报都只保留界面提示，不能抢语音通道
-      if (this._criticalVoiceSeq) { this._vdbg('拦截预警播报：导航开始播报中'); return }
+      // 导航开始播报独占期间，普通预警/任务播报仍只保留界面提示，不抢语音通道
+      if (this._criticalVoiceSeq && !force) { this._vdbg('拦截预警播报：导航开始播报中'); return }
       this._lastVoiceText = ''
       this._lastVoiceAt = 0
-      this.speakQueue(texts)
+      this.speakQueue(texts, force ? { force: true } : undefined)
     },
     /** 预热语音引擎：Chrome 要求用户手势后才能播放语音，每次交互都调用保持引擎活跃 */
     _warmUpSpeech() {
@@ -5364,17 +5821,30 @@ export default {
       ].filter(Boolean)
       const viText = viParts.join('. ')
 
-      // 最高优先级：force 抢占当前一切播报；lock 让本条念完之前别的播报不许抢占它。
-      // 这是"导航开始 + 全程里程 + 预计到达时间"这类关键信息，被灾害/轮询播报打断会听不全。
+      // 独占播报：force 抢占当前一切播报；lock 让本条念完之前，非安全类的轮询/普通播报不许打断它。
+      // 这保证「导航开始 + 全程里程 + 预计到达时间」不被一般噪声切碎；
+      // 但灾害预警这类 force 播报仍能打断本条（安全信息优先），届时下面登记的开场核心行会补读一次。
       this._vdbg(`announceDeparture：里程=${km}km 耗时=${durZh || '--'} ETA=${this.etaArrivalZh}，准备入队`)
-      this.speakQueue([zhText, viText], { force: true, lock: true })
+      // 入队并登记「被打断时要补读的那一句」：世代号取 speakQueue 之后的当前值（内部 cancel 已递增完），
+      // 且只在确实入队（占用锁已生效）时登记，语音关闭等未入队情形不留脏值。
+      // 重试也必须走这里：重试会顶替旧链路开新世代，不把 _departureIntroSeq 一起换掉的话，
+      // 重试之后再来灾害就不补读出发信息了。
+      const speakDeparture = () => {
+        this.speakQueue([zhText, viText], { force: true, lock: true })
+        // 登记的短句数组与实际逐条朗读的内容同源（都出自 _expandToSentences），_doSpeak 才能按条对齐；
+        // 每次重新入队（含 4.5 秒未出声的自动重试）都要重置进度
+        this._departureIntro = this._voiceLocked ? zhOpening : ''
+        this._departureIntroChunks = this._voiceLocked ? this._expandToSentences([zhOpening]) : []
+        this._departureIntroSeq = this._voiceLocked ? this._voiceSeq : 0
+      }
+      speakDeparture()
       const seq = this._voiceSeq
-      // 4.5 秒后仍没确认本次播报发声，自动重试一次；期间所有普通播报仍被最高优先级锁拦截。
+      // 4.5 秒后仍没确认本次播报发声，自动重试一次；期间非安全类播报仍被本条的占用锁拦截。
       setTimeout(() => {
         if (!this.navigating || !this.voiceOn) return
         if (seq !== this._voiceSeq || this._voiceLastStartSeq === seq) return
         this._vdbg('出发播报未检测到出声，自动重试一次')
-        this.speakQueue([zhText, viText], { force: true, lock: true })
+        speakDeparture()
       }, 4500)
     },
 
@@ -5477,10 +5947,11 @@ export default {
         vnAdvice = `Đã có ${optionCount} tuyến thay thế, tuyến ít rủi ro nhất là ${best.label} (${best.hazardProbability}%), vui lòng chọn trên màn hình。`
       }
       const zh = `紧急提示，${where}路段发生${hazard}。${status}。${zhAdvice}`
+      // force：灾害播报要能打断正占着通道的「导航开始」播报，不能只弹卡不出声
       this.speakQueue([
         zh,
         `Cảnh báo khẩn cấp: ${hazardVN} tại ${where}。Dự kiến chậm ${this.route.extraHours || 0} giờ。${vnAdvice}`
-      ])
+      ], { force: true })
     },
     /** 当前是否「走平陆运河」通勤态：选定坐船方案 / 联运导航中（目的地=六景港） */
     _isCanalCommuting() {
@@ -5503,7 +5974,8 @@ export default {
           `${reason}。车辆滚装航段暂停，调度中心将在大屏为您改换公路方案，请留意调度任务变更通知并确认接收。`)
         this.pushLog.unshift({ time, text: '平陆运河禁航：等待调度大屏换线' })
         if (this.voiceOn) {
-          this._interruptAndSpeak([`紧急提示。平陆运河禁航，${reason}。调度中心将为您改换公路路线，请留意调度通知。`])
+          // force：禁航是安全关键提示，出发播报占用中也要打断出声，不能静默丢弃
+          this._interruptAndSpeak([`紧急提示。平陆运河禁航，${reason}。调度中心将为您改换公路路线，请留意调度通知。`], true)
         }
         return
       }
@@ -5512,10 +5984,11 @@ export default {
         `${reason}，船舶航段暂停行驶。已为您规划公路替代路线，点选即可切换。`)
       this.pushLog.unshift({ time, text: '平陆运河禁航：已弹出公路替代路线供选择' })
       if (this.voiceOn) {
+        // 同样 force：禁航播报不容许被出发播报的占用锁静默吞掉
         this.speakQueue([
           `紧急提示。平陆运河禁航，${reason}。已为您规划公路替代路线，请在屏幕上选择。`,
           `Cảnh báo khẩn cấp: kênh đào Bình Lục cấm hành. Đã lên phương án đường bộ thay thế, vui lòng chọn trên màn hình。`
-        ])
+        ], { force: true })
       }
       // 回到公路出行方式：清掉坐船选定与运河方案标记，不再展示「可坐船」选项
       this.selectedMode = 'road'
@@ -5549,6 +6022,21 @@ export default {
         (data && data.reason) || '通航条件回到禁航红线之上，陆水联运方案恢复可用（如需坐船请重新选择水运方案）')
       this.pushLog.unshift({ time, text: '平陆运河恢复通航' })
     },
+    /**
+     * 「这条候选就是我正在走的那条线吗」——用于灾害只打到别的走廊时不再弹换线面板。
+     *
+     * 只比 key 不够：后端按边集 Jaccard 出候选，同一条友谊关走廊的两种走法会拿到
+     * 不同 key（`alternate` 与 `recommended`），于是司机看到「绕行方案：公路经友谊关」
+     * 而脚下就是友谊关——绕了个寂寞。这里补上口岸走廊比对（与 _mergeCorridorDuplicates
+     * 同源思路，但用 inferPortFromNodeIds 的口岸节点做指纹，比 via 文本更稳）。
+     */
+    _isOnCorridor(c) {
+      if (!c) return false
+      if (c.key === this.selectedKey) return true
+      const cur = this.inferPortFromNodeIds(this.route && this.route.pathNodeIds)
+      const mine = this.inferPortFromNodeIds(c.nodeIds)
+      return !!cur && cur === mine
+    },
     /** 拉取当前 O/D 的可选路线（含灾害概率），作为灾害发生后的绕行方案。
      *  suppressIfOnBest：当前已走在风险最低的一条上时不再弹面板（默认开）；
      *  运河禁航传 false——人在水运方案上，公路候选全是新选项，必须弹。 */
@@ -5563,6 +6051,9 @@ export default {
           timeout: 30000
         })
         const list = r.data.candidates || []
+        // 全域受阻：这些替代路线本身就是降级放行的产物，弹换线面板只会让司机
+        // 以为“有得选”，实际只是换一个风险区——改为返回/停靠建议
+        if (this._applyCorridorAdvisory(r.data && r.data.advisory)) return
         // 展示所有候选走廊（按途经指纹合并同走廊重复项），司机自行选择
         const merged = this._mergeCorridorDuplicates(list)
         // 自动绕行后当前线本身就是排序置顶的那条（与面板「风险最低」同一套判据）：
@@ -5570,7 +6061,7 @@ export default {
         // （optionCount 传 0，播报不会引导「请在屏幕上选择」）。
         const rank = p => (p == null || p < 0) ? Infinity : p
         const top = [...merged].sort((a, b) => rank(a.hazardProbability) - rank(b.hazardProbability))[0]
-        if (suppressIfOnBest && top && top.key === this.selectedKey) {
+        if (suppressIfOnBest && top && this._isOnCorridor(top)) {
           this.announceHazard(reason, 0)
           return
         }
@@ -5623,10 +6114,11 @@ export default {
           const status = this._buildStatusZh()
           this.showPush('warn', '概率上升',
             `当前路线${this.topHazardName(r.data)}概率升至 ${p}%（${r.data.level}）：${r.data.reason || ''}`)
+          // force：灾害概率骤升属于安全信息，允许打断「导航开始」的独占播报
           this.speakQueue([
             `请注意，当前路线${this.topHazardName(r.data)}概率上升至百分之${p}。${status}`,
             `Cảnh báo: xác suất thiên tai trên tuyến đường hiện tại tăng lên ${p} phần trăm。Thời gian trễ dự kiến ${this.route.extraHours || 0} giờ。`
-          ])
+          ], { force: true })
         }
         return r.data
       } catch (e) {
@@ -5668,7 +6160,8 @@ export default {
           // 从双语内容中完整提取中文和越南语段落，确保播报内容与屏幕文案一致
           const { zh, vi } = this._extractBilingualParts(this.warning)
           // 预警播报打断当前语音，立即播放
-          this._interruptAndSpeak(vi ? [zh, vi] : [zh, 'Cảnh báo thời tiết đã được cập nhật。Vui lòng kiểm tra và lái xe cẩn thận。'])
+          // force：这条由司机主动点「AI 预警」触发，被出发播报的占用锁吞掉会让按钮像是坏了
+          this._interruptAndSpeak(vi ? [zh, vi] : [zh, 'Cảnh báo thời tiết đã được cập nhật。Vui lòng kiểm tra và lái xe cẩn thận。'], true)
         }
       } catch (e) {
         if (!this.warning) this.warning = '生成失败，请检查后端服务'
@@ -6374,6 +6867,28 @@ export default {
 .hazard-btn:active { transform: scale(.98); }
 .hazard-btn.ghost { background: #fff; border-color: #e3e8ee; color: #607d8b; }
 .hazard-btn.ghost:active { background: #f5f7f9; }
+/* ===== 全域受阻面板：区域灾害同时封住全部出境走廊与运河，给「返回 / 停靠 / 暂缓」三态动作 =====
+   与绕行面板同一形态但层级更高：绕行是「有得选」，全域受阻是「没得选」，
+   语义不能混，所以主调改成深红+紫（风暴）而不是绕行的橙色 */
+.corridor-panel { position: fixed; bottom: 0; left: 0; right: 0; z-index: 260; background: linear-gradient(180deg, #fff5f5 0%, #f8faff 100%); border-radius: 20px 20px 0 0; padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px)); box-shadow: 0 -12px 36px rgba(12,26,45,.32), inset 0 1px 0 rgba(255,255,255,.9); max-height: 66vh; overflow: auto; animation: rz-up .32s cubic-bezier(.2,.9,.3,1.1) both; }
+.corridor-panel::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, transparent, #be123c, #7c3aed, #be123c, transparent); background-size: 200% 100%; animation: eta-flow 2.4s linear infinite; }
+.corridor-panel .hazard-title { color: #9f1239; }
+/* ===== 接单模式「等待调度中心」面板：不自动绕路时的唯一常驻状态 =====
+   形态沿用同一系列底部卡，但语义与绕行面板相反：绕行是「司机自己选一条」，
+   这里是「换线权在调度、司机先别动」，所以主调用橙色流光（比全域受阻的深红+紫轻一档，
+   也明显不是可点方案列表）；层级 255 卡在绕行面板(250)与全域受阻面板(260)之间 */
+.wait-panel { position: fixed; bottom: 0; left: 0; right: 0; z-index: 255; background: linear-gradient(180deg, #fffaf3 0%, #fdf4e9 100%); border-radius: 20px 20px 0 0; padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px)); box-shadow: 0 -10px 34px rgba(12,26,45,.28), inset 0 1px 0 rgba(255,255,255,.9); animation: rz-up .32s cubic-bezier(.2,.9,.3,1.1) both; }
+.wait-panel::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, transparent, #ea7a2e, #f5b76a, #ea7a2e, transparent); background-size: 200% 100%; animation: eta-flow 2.2s linear infinite; }
+.wait-panel .hazard-title { color: #b45309; }
+.wait-panel .hazard-icon { background: linear-gradient(135deg, #fff2e0, #ffe3c7); color: #c2410c; }
+.wp-text { font-size: 13px; line-height: 1.7; color: #263238; }
+.cp-text { font-size: 13px; line-height: 1.7; color: #263238; }
+.cp-blocked { margin-top: 8px; font-size: 12px; line-height: 1.6; color: #9f1239; background: rgba(225,29,72,.08); border: 1px solid rgba(225,29,72,.28); border-radius: 10px; padding: 7px 10px; }
+.cp-basis { margin-top: 8px; font-size: 11px; line-height: 1.55; color: #90a4ae; }
+.hazard-btn.danger { border: none; background: linear-gradient(135deg, #e11d48, #be123c); color: #fff; box-shadow: 0 4px 12px rgba(190,18,60,.3); }
+.hazard-btn.ok { border: none; background: linear-gradient(135deg, #16a34a, #34d399); color: #fff; box-shadow: 0 4px 12px rgba(46,125,50,.28); }
+/* 预览候选卡片上的「不建议通行」旗标：与卡片自带的「AI 最安全」同一位置，互不遮挡 */
+.pv-flag.blocked-flag { background: rgba(225,29,72,.12); color: #be123c; border: 1px solid rgba(225,29,72,.4); }
 .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .fade-enter-active, .fade-leave-active { transition: opacity .25s; }
@@ -6454,6 +6969,10 @@ export default {
   .phone.phone-mini.nav-mode { max-width: 420px; }
   .phone.phone-mini .nav-screen { position: absolute; }
   .phone.phone-mini .hazard-panel { max-width: 420px; margin-left: auto; margin-right: auto; }
+  /* 全域受阻面板与绕行面板同样收回手机列内（同为 fixed 通栏） */
+  .phone.phone-mini .corridor-panel { max-width: 420px; margin-left: auto; margin-right: auto; }
+  /* 等待调度中心卡也是 fixed 通栏，跟着一起收进手机列 */
+  .phone.phone-mini .wait-panel { max-width: 420px; margin-left: auto; margin-right: auto; }
   /* 侧滑返回指示条同样对齐手机列左缘（列宽 420 居中 → 左缘在 50vw - 210px），
      与 _initSwipeBack 里按列矩形算的起手区保持一致 */
   .phone.phone-mini .swipe-edge { left: calc(50vw - 210px); }

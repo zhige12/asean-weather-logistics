@@ -9,8 +9,8 @@
           <button class="tile-switch" title="切换底图（底图1→底图4 循环）" @click="cycleTileSource">{{ tileSourceName }}</button>
         </div>
         <div class="overlay-row"><span class="dot" style="background:orange"></span> 路网风险边</div>
-        <div class="overlay-row"><span class="dot" style="background:#16a34a"></span> 安全路段</div>
-        <div class="overlay-row"><span class="dot" style="background:#e53935"></span> 风险路段</div>
+        <div class="overlay-row"><span class="dot" style="background:#1ec95f"></span> 安全路段（白箭头=行进方向）</div>
+        <div class="overlay-row"><span class="dot" style="background:#ef4444"></span> 风险路段</div>
         <div class="overlay-row"><span class="dot" style="background:#22b8cf;border:1px dashed #22b8cf"></span> 备选路线（点击切换主线）</div>
         <div class="overlay-row"><span class="dot" style="background:#ea7a2e;border:1px dashed #ea7a2e"></span> 降级兜底（硬熔断降级）</div>
         <div class="overlay-row"><span class="dot" style="background:#888;border:1px dashed #555"></span> 基准原路线（红虚线=已避开的风险段）</div>
@@ -88,6 +88,8 @@ export default {
     selectedEdge: { handler() { this.styleSelected(); } },
     pickOrigin: { handler(v) { this.drawPickMarker('origin', v); } },
     pickDestination: { handler(v) { this.drawPickMarker('destination', v); } },
+    // 选点模式切换：给地图容器挂 picking 类（光标变十字 + 让地名/线图层不再截获点击）
+    pickMode: { handler() { this._syncPickingClass(); } },
     // 候选列表变化（拉回 / 选中切换）→ 重新画备选线
     candidates: { handler() { this.drawAlternates(); }, deep: true },
     selectedCandidateKey: { handler() { this.drawAlternates(); } },
@@ -180,15 +182,15 @@ export default {
       if (!this.pickMode) return '';
       if (this.pickOrigin && !this.pickDestination) return '已选起点，请点击地图选择终点';
       if (!this.pickOrigin) return '请点击地图选择起点';
-      return '再次点击地图重新规划（先点起点再点终点）';
+      return '已选起终点，继续点击可更换终点并自动重新规划';
     }
   },
   mounted() {
     this.initMap();
     this.loadTiles(this.tileSourceIdx);
-    this.map.on('click', e => {
-      if (this.pickMode) this.$emit('map-click', { lat: e.latlng.lat, lon: e.latlng.lng });
-    });
+    // 点击派发已在 initMap 内每个新地图实例上绑定，这里不能再绑一次：
+    // 一次点击会触发两回 map-click，onMapClick 会把同一点当作「起点 + 终点」，
+    // 于是弹出「起终点不能是同一节点」并清空终点 —— 看起来就是点了没反应。
     // 轻界面开关中途切换时重建特效层：特效是创建时按 lite 一次性定下的，
     // 不重建就还得刷新才生效（观众可不想为此按 F5）
     this._offLiteChange = onLiteChange(() => this._rebuildRouteFlow());
@@ -247,6 +249,14 @@ export default {
       // 旧实例的监听随之失效；默认加载路径（mounted → initMap → loadTiles）根本不经过
       // cycleTileSource，所以默认情况下**压根没有缩放重绘**。改绑到这里，每个新实例都绑。
       this.map.on('zoomend', this._onZoomRedraw);
+      // 地图是重建出来的，容器上的 picking 类随旧 DOM 一起没了，按当前模式补回
+      this._syncPickingClass();
+    },
+    /** 选点模式下给地图容器加 picking 类：光标提示 + 让注记/线图层不截获点击 */
+    _syncPickingClass() {
+      if (!this.map || !this.map.getContainer) return;
+      const el = this.map.getContainer();
+      if (el) el.classList.toggle('picking', !!this.pickMode);
     },
     // 手动切换底图源（按 tileSources 顺序循环：底图1 → 底图2 → 底图3 → 底图4）
     cycleTileSource() {
@@ -466,7 +476,7 @@ export default {
         this.drawRoute(this.route);
       });
     },
-    // 按「风险 / 安全」分段着色绘制路线：风险段红、安全段绿（与司机端 DriverApp 一致）
+    // 按「风险 / 安全」着色绘制路线：本条线命中灾害则整条红，否则整条绿（与司机端一致）
     drawRoute(coords) {
       // 无谓重绘免疫：签名不变且图层仍在时直接返回。
       // 大屏每 15 秒轮询都会给同一份路线，清空再重建 5~6 个图层会让线闪一下，
@@ -494,36 +504,55 @@ export default {
       // 风险边集合：路网风险列表 ∩ 当前路径（splitRouteByRisk 内部只认路径上的边）
       const riskSet = riskEdgeSet(this.risks, []);
       const groups = splitRouteByRisk(raw, this.routeEdgeIds, this.routeEdgeSpans, riskSet);
+      /*
+       * 本条线命中当前灾害 → 整条染红；换到不命中风险的路线 → 整条回到绿。
+       * 旧逻辑只把受灾那一截标红：大屏全景下那一截往往只占线的一小段，
+       * 而触发灾害后后端又会顺手把线重算到安全口岸（新线不含致灾边），
+       * 两段红夹在一大片绿里，调度员眼里就是「灾害触发了线还是绿的」。
+       * 风险光晕仍只打在实际致灾那一截上，既能一眼看出整条线已受灾，也保留位置信息。
+       */
+      const lineRisk = groups.some(g => g.risk);
 
       const flowSegs = [];
+      // 与司机端同一套高德风配色：亮绿/红主线 + 深色描边（casing）
+      const FLOW_SAFE = '#1ec95f'; const FLOW_SAFE_CASE = '#0a7a3c'
+      const FLOW_RISK = '#ef4444'; const FLOW_RISK_CASE = '#8f1d1d'
       groups.forEach(g => {
         // 逐段塑形（段间共用衔接点，塑形后不会断口），保证线仍贴合公路走向
         const latlngs = reshapeForZoom(g.pts, z, this.map);
         if (latlngs.length < 2) return;
-        if (g.risk) {
-          // 风险段：宽半透明红光晕 + 亮红主线（光晕在下层，主线在上层）
+        if (lineRisk) {
+          // 受灾线：整条亮红实线；真正命中风险的那截再垫一层宽半透明光晕
           this.riskRouteLayers.push(L.polyline(latlngs, {
-            color: '#e53935', weight: 14, opacity: 0.28, pane: 'markerPane'
-          }).addTo(this.map));
-          this.riskRouteLayers.push(L.polyline(latlngs, {
-            color: '#e53935', weight: 6, opacity: 0.95, pane: 'markerPane'
+            color: '#e53935', weight: g.risk ? 14 : 6, opacity: g.risk ? 0.28 : 0.95, pane: 'markerPane'
           }).addTo(this.map));
         } else {
           // 安全段：绿色实线
           this.routeLayers.push(L.polyline(latlngs, {
-            color: '#16a34a', weight: 5, opacity: 0.9, pane: 'markerPane'
+            color: FLOW_SAFE, weight: 5, opacity: 0.9, pane: 'markerPane'
           }).addTo(this.map));
         }
-        flowSegs.push({ latlngs, color: g.risk ? '#e94560' : '#16a34a' });
+        flowSegs.push({
+          latlngs,
+          color: lineRisk ? FLOW_RISK : FLOW_SAFE,
+          casing: lineRisk ? FLOW_RISK_CASE : FLOW_SAFE_CASE
+        });
       });
 
-      // 前进箭头 + 流光带也要按段着色，否则单色特效会盖住红绿分段
+      // 前进箭头 + 主线：改成司机端同款的“静态多箭头”高德风（深描边 + 粗主线 +
+      // 白色 V 形箭头，箭头视口内等距铺放、不逐帧推进）。旧的动态流光模式靠
+      // rAF 每帧写几十个 marker.setLatLng，缩放动画期间与 Leaflet 的 zoomanim 重定位
+      // 叠加，是大屏缩放报错（_latLngToNewLayerPoint 读空）与掉帧的主要来源；
+      // 静态模式零逐帧开销，zoomend/moveend 自动重排，密度与缩放无关。
       if (!this._routeFlow) {
-        // lite（轻界面）：箭头不逐帧重算 drop-shadow、不起脉冲/流光关键帧，并把 JS 帧循环压到 24fps。
-        // 大屏默认满特效 60fps；弱机或手动开了轻界面时走这一档，箭头与红绿分段仍在。
-        this._routeFlow = isLite()
-          ? createRouteFlow(this.map, { color: '#16a34a', lite: true, fps: 24, maxArrows: 8, spacingPx: 140 })
-          : createRouteFlow(this.map, { color: '#16a34a' });
+        this._routeFlow = createRouteFlow(this.map, {
+          color: FLOW_SAFE, casing: FLOW_SAFE_CASE,
+          arrowShape: 'chevron', arrowColor: '#ffffff',
+          coreWidth: 10, lite: true,
+          // 大屏整屏看全景，箭头要密：44px 一个（约一屏 20~40 个），弱机减半
+          spacingPx: 44,
+          maxArrows: isLite() ? 32 : 80, staticArrows: true
+        });
       }
       this._routeFlow.setSegments(flowSegs);
       this._frontRouteLayers();
@@ -714,7 +743,8 @@ export default {
           iconAnchor: [13, 13]
         })
       }).addTo(this.map);
-      this[key].bindPopup(`<b>${kind === 'origin' ? '起点' : '终点'}</b>：${node.name}<br/>${node.latitude.toFixed(4)}, ${node.longitude.toFixed(4)}`);
+      // 路网节点绝大多数无名（8.6 万个里只有 32 个带名），直接拼 node.name 会弹出一个空名字
+      this[key].bindPopup(`<b>${kind === 'origin' ? '起点' : '终点'}</b>：${node.name || '无名路网节点'}<br/>${node.latitude.toFixed(4)}, ${node.longitude.toFixed(4)}`);
     }
   }
 };
@@ -725,6 +755,14 @@ export default {
 .map-canvas { position:absolute; inset:0; }
 .pick-hint { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:500; background:rgba(11,83,148,0.92); color:#fff; padding:8px 16px; border-radius:20px; font-size:13px; box-shadow:0 2px 10px rgba(0,0,0,0.25); pointer-events:none; }
 .pick-marker { width:26px; height:26px; border-radius:50%; color:#fff; font-weight:700; font-size:14px; display:flex; align-items:center; justify-content:center; border:2px solid #fff; box-shadow:0 1px 6px rgba(0,0,0,0.4); }
+/* 选点模式（picking 挂在地图容器上）：
+   1) 光标变十字，让“现在点地图是有效的”看得见；
+   2) 地名注记与风险/口岸/候选线都是 Leaflet 交互层，它们的 click 会优于地图 click
+      被消费（点在上面不会派发 map-click），不穿透就得“点了没反应”——这里统一置
+      pointer-events:none，让点击落到地图上由 nearestNode 吸附最近路网节点。 */
+:deep(.picking) { cursor: crosshair; }
+:deep(.picking .leaflet-interactive),
+:deep(.picking .place-label-text) { pointer-events: none; }
 /* 地名注记：纯文字 + 黑色描边（去掉蓝色方块），任何底图上都清晰 */
 :deep(.place-label-text) { position:absolute; transform:translate(-50%,-100%); margin-top:-5px; color:#fff; font-size:11px; font-weight:600; white-space:nowrap; pointer-events:auto; text-shadow:0 0 3px rgba(0,0,0,0.95),0 0 3px rgba(0,0,0,0.95),1px 1px 2px rgba(0,0,0,0.85),-1px -1px 2px rgba(0,0,0,0.85),1px -1px 2px rgba(0,0,0,0.85),-1px 1px 2px rgba(0,0,0,0.85); }
 :deep(.place-label-text.port) { color:#ffd54f; font-size:12px; font-weight:800; }

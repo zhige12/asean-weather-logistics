@@ -31,6 +31,7 @@ public class WeatherController {
     private final com.example.aseanweatherlogistics.repository.RouteRepository routeRepository;
     private final com.example.aseanweatherlogistics.service.RealWeatherService realWeatherService;
     private final com.example.aseanweatherlogistics.service.WeatherSourceService weatherSourceService;
+    private final com.example.aseanweatherlogistics.service.DecisionSandboxService sandbox;
     private final AtomicLong lastRefreshAt = new AtomicLong(0L);
     @Value("${weather.real.refresh-min-interval-seconds:15}")
     private long refreshMinIntervalSeconds;
@@ -39,13 +40,15 @@ public class WeatherController {
                              RouteService routeService,
                              com.example.aseanweatherlogistics.repository.RouteRepository routeRepository,
                              com.example.aseanweatherlogistics.service.RealWeatherService realWeatherService,
-                             com.example.aseanweatherlogistics.service.WeatherSourceService weatherSourceService) {
+                             com.example.aseanweatherlogistics.service.WeatherSourceService weatherSourceService,
+                             com.example.aseanweatherlogistics.service.DecisionSandboxService sandbox) {
         this.weatherSimulator = weatherSimulator;
         this.deepseekService = deepseekService;
         this.routeService = routeService;
         this.routeRepository = routeRepository;
         this.realWeatherService = realWeatherService;
         this.weatherSourceService = weatherSourceService;
+        this.sandbox = sandbox;
     }
 
     /** 气象数据源：当前选中 + 可选清单（比赛官方 / 真实气象 / 离线模拟） */
@@ -138,17 +141,28 @@ public class WeatherController {
         return weatherSimulator.listScenarios();
     }
 
-    /** 一键注入预置灾害场景 */
+    /**
+     * 一键注入预置灾害场景：除写风险边外，同步把沙盘气象滑杆拉到该灾害的判定/熔断值，
+     * 让卡片文案里说的"等效于把参数拉过阈值"真实成立（泥石流是地质指标，无滑杆键，不改动）。
+     */
     @PostMapping("/scenario/{scenarioId}")
     public Map<String, Object> applyScenario(@PathVariable String scenarioId) {
         RiskSegment risk = weatherSimulator.applyScenario(scenarioId);
+        Map<String, Double> params = weatherSimulator.scenarioSimParams(scenarioId);
+        if (!params.isEmpty()) {
+            sandbox.setSimParams(new LinkedHashMap<>(params));
+        }
         return Map.of("status", "applied", "scenarioId", scenarioId, "risk", risk);
     }
 
-    /** 清除预置灾害场景注入的风险 */
+    /** 清除预置灾害场景注入的风险；本场景拉过的滑杆键同步回落到安全中性值 */
     @DeleteMapping("/scenario/{scenarioId}")
     public Map<String, String> clearScenario(@PathVariable String scenarioId) {
         weatherSimulator.clearScenario(scenarioId);
+        Map<String, Double> neutral = weatherSimulator.neutralizedScenarioSimParams(scenarioId);
+        if (!neutral.isEmpty()) {
+            sandbox.setSimParams(new LinkedHashMap<>(neutral));
+        }
         return Map.of("status", "cleared", "scenarioId", scenarioId);
     }
 
@@ -166,6 +180,11 @@ public class WeatherController {
     @DeleteMapping("/risk")
     public Map<String, String> clearAllRisks() {
         weatherSimulator.clearAll();
+        // 风险清空后，各灾害场景拉过的滑杆键也全部回落中性值，避免"风险没了、滑杆还停在熔断值"
+        Map<String, Double> neutral = weatherSimulator.neutralAllScenarioSimParams();
+        if (!neutral.isEmpty()) {
+            sandbox.setSimParams(new LinkedHashMap<>(neutral));
+        }
         return Map.of("message", "all risks removed");
     }
 

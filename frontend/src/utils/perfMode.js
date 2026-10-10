@@ -116,6 +116,7 @@ html[data-perf-lite="on"] .app-header::after { display: none !important; }
 html[data-perf-lite="on"] .app-root > *,
 html[data-perf-lite="on"] .panel,
 html[data-perf-lite="on"] .btn.pick-on,
+html[data-perf-lite="on"] .btn.driver-entry,
 html[data-perf-lite="on"] .start-btn,
 html[data-perf-lite="on"] .eta-sheen,
 html[data-perf-lite="on"] .preview-start::after,

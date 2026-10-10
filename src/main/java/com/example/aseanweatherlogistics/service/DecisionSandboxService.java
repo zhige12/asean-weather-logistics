@@ -803,9 +803,11 @@ public class DecisionSandboxService {
      * 任一公路口岸段是否已熔断（含台风致熔断）。
      * <p>
      * 与 {@link #roadBlocked()} 的区别：那个只认主通道友谊关，用于"要不要切水运"；
-     * 这个覆盖两个口岸，用于"要不要触发绕路决策"。台风打在芒街时主通道没断，
-     * 但若只看 roadBlocked，方案智能体会判定为常态、不触发任何绕行分析——
-     * 而实际上芒街口岸已经不能走了，路线必须绕开。
+     * 这个覆盖两个口岸，用于"要不要如实说明某个口岸已断"。
+     * <p>
+     * 注意：它**不能**用来决定是否触发绕路决策。台风打在芒街而司机本来就走友谊关时
+     * 它为 true，但本程路线一根线没动——绕路与否只能看路线有没有被改
+     * （{@code RouteResponse.isRerouted()}，见 SolutionAgent#buildPlans）。
      */
     public boolean anyPortFused() {
         return roadBlocked() || mc.fused || injectedBlocking(mc);

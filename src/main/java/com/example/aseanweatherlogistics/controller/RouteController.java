@@ -11,6 +11,7 @@ import com.example.aseanweatherlogistics.service.IntermodalService;
 import com.example.aseanweatherlogistics.service.OsmDataLoader;
 import com.example.aseanweatherlogistics.service.WeatherSimulator;
 import com.example.aseanweatherlogistics.service.AIService;
+import com.example.aseanweatherlogistics.service.CorridorAdvisoryService;
 import com.example.aseanweatherlogistics.service.RouteAgentService;
 import com.example.aseanweatherlogistics.repository.RouteRepository;
 import java.util.HashMap;
@@ -38,8 +39,9 @@ public class RouteController {
     private final RouteAgentService routeAgentService;
     private final GeocodeService geocodeService;
     private final IntermodalService intermodalService;
+    private final CorridorAdvisoryService corridorAdvisoryService;
 
-    public RouteController(RouteService routeService, OsmDataLoader osmDataLoader, GraphHopperRouteService graphHopperRouteService, WeatherSimulator weatherSimulator, AIService aiService, RouteRepository routeRepository, RouteAgentService routeAgentService, GeocodeService geocodeService, IntermodalService intermodalService) {
+    public RouteController(RouteService routeService, OsmDataLoader osmDataLoader, GraphHopperRouteService graphHopperRouteService, WeatherSimulator weatherSimulator, AIService aiService, RouteRepository routeRepository, RouteAgentService routeAgentService, GeocodeService geocodeService, IntermodalService intermodalService, CorridorAdvisoryService corridorAdvisoryService) {
         this.routeService = routeService;
         this.osmDataLoader = osmDataLoader;
         this.graphHopperRouteService = graphHopperRouteService;
@@ -49,6 +51,7 @@ public class RouteController {
         this.routeAgentService = routeAgentService;
         this.geocodeService = geocodeService;
         this.intermodalService = intermodalService;
+        this.corridorAdvisoryService = corridorAdvisoryService;
     }
 
     /**
@@ -222,6 +225,10 @@ public class RouteController {
      * 多路线候选：司机端"规划 → 展示多条候选 → 自选"。
      * 返回最多 3 条互不重复的路线（recommended 推荐 / alternate 备选 / fastest 最快），
      * 每条含 coords/nodeIds/edgeIds/途经摘要/耗时/里程/沿线风险数。
+     * <p>
+     * 另有 {@code advisory}：区域灾害同时盖住多条走廊、运河也禁航时的「返回/等待」建议。
+     * 此时候选里那些 {@code softened}（把已封闭路段降级放行）的路线会被标 {@code notRecommended}，
+     * 前端不得把它当正常候选自动派单/自动换线。
      */
     @GetMapping("/candidates")
     public Map<String, Object> candidates(
@@ -229,7 +236,9 @@ public class RouteController {
             @RequestParam(required = false) String destinationId,
             @RequestParam(required = false) String period,
             @RequestParam(required = false) String cargoType,
-            @RequestParam(required = false) Boolean forecast) {
+            @RequestParam(required = false) Boolean forecast,
+            /** 车在当前行程上已走比例；不传/负数 = 不在途（大屏规划态），建议按「暂缓发车」给 */
+            @RequestParam(defaultValue = "-1") double progressRatio) {
         String o = originId != null && !originId.isBlank() ? originId : "NN";
         String d = destinationId != null && !destinationId.isBlank() ? destinationId : "HN";
         List<Map<String, Object>> list = routeService.planCandidates(o, d, period, cargoType);
@@ -258,6 +267,28 @@ public class RouteController {
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("candidates", list);
+        // 全域受阻建议：拿推荐线的几何去算出境点位置与折返里程
+        try {
+            Map<String, Object> rec = list.isEmpty() ? null : list.get(0);
+            @SuppressWarnings("unchecked")
+            List<String> recNodes = rec == null ? List.of() : (List<String>) rec.getOrDefault("nodeIds", List.of());
+            @SuppressWarnings("unchecked")
+            List<String> recEdges = rec == null ? List.of() : (List<String>) rec.getOrDefault("edgeIds", List.of());
+            Map<String, Object> advisory = corridorAdvisoryService.forRoute(
+                    o, d, recNodes, recEdges, progressRatio,
+                    rec != null && Boolean.TRUE.equals(rec.get("softened")));
+            if (advisory != null) {
+                out.put("advisory", advisory);
+                // 这些候选都是靠降级才“能走”的，一律标记为不建议通行
+                for (Map<String, Object> c : list) {
+                    if (Boolean.TRUE.equals(c.get("softened"))) {
+                        c.put("notRecommended", true);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // 建议算失败不影响选路：宁可没有建议，也不能没有路线
+        }
         // 平陆运河走廊（南宁→河内）：在公路候选之外并列给出「可坐船」推荐位。
         // 独立于 candidates 数组，避免污染以公路路线为前提的老消费方（导航/选路逻辑）。
         if (intermodalService.serves(o, d)) {
@@ -279,7 +310,9 @@ public class RouteController {
             @RequestParam(required = false) Double fromLat,
             @RequestParam(required = false) Double fromLon,
             @RequestParam(required = false) Double toLat,
-            @RequestParam(required = false) Double toLon) {
+            @RequestParam(required = false) Double toLon,
+            /** 司机端导航中的已走比例（GPS 定位得到）；不传 = 不在途，全域受阻建议按「暂缓发车」给 */
+            @RequestParam(defaultValue = "-1") double progressRatio) {
         // Mode 1: sample graph nodes
         if (originId != null && destinationId != null) {
             // 注册为 agent 活跃任务：突发灾害后 agent 自动对这条 O/D 重算并推送
@@ -298,7 +331,23 @@ public class RouteController {
                     aiWarning = "AI warning generation failed: " + e.getMessage();
                 }
             }
-            return Map.of("route", resp, "aiWarning", aiWarning, "risks", weatherSimulator.currentRisks());
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("route", resp);
+            out.put("aiWarning", aiWarning);
+            out.put("risks", weatherSimulator.currentRisks());
+            // 全域受阻时随主线一并下发「返回/等待」建议：导航轮询也带得上，
+            // 不会只在大屏拉候选时才算一次（灾害往往在车已上路之后才成形）
+            try {
+                Map<String, Object> advisory = corridorAdvisoryService.forRoute(originId, destinationId,
+                        resp.getPathNodeIds(), resp.getPathEdgeIds(), progressRatio,
+                        resp.isCorridorAllFused());
+                if (advisory != null) {
+                    out.put("advisory", advisory);
+                }
+            } catch (Exception e) {
+                // 建议算失败不阻断规划
+            }
+            return out;
         }
 
         // Mode 2: lat/lon GraphHopper route

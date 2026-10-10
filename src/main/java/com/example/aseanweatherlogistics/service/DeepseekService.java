@@ -85,6 +85,8 @@ public class DeepseekService {
     public static final String CHANNEL_LOCAL = "local";
     /** 公网 DeepSeek，提示词离开本机。 */
     public static final String CHANNEL_ONLINE = "online";
+    /** 两条模型通道都不可用（断网）时，取自历史 AI 生成、本机留存的缓存池。 */
+    public static final String CHANNEL_CACHED = "cached";
 
     /**
      * OpenAI 兼容 chat completions 调用（本地优先，在线降级），并回报<b>真实命中通道</b>。

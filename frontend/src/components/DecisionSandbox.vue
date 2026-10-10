@@ -317,6 +317,11 @@
       <div v-if="directionText" class="direction-line">{{ directionText }}</div>
     </div>
 
+    <!-- 通关时效、支流风险并入决策沙盘：未点「模拟」只读展示真实数据，点「模拟」后才可编辑。
+         通关时效的数据/逻辑仍在父组件，用作用域插槽把 simMode/pushed 传下去渲染；支流面板自带取数，直接内联。 -->
+    <slot name="extra" :sim-mode="isSimMode" :pushed="pushed" />
+    <TributaryPanel :sim-mode="isSimMode" :pushed="pushed" />
+
     <div v-if="pushed" class="threshold-line">
       当前熔断阈值：友谊关 <b>{{ state.fuseThresholdMm }}mm</b>（{{ thresholdName }}）· 芒街 70mm · 滞后恢复 5mm
     </div>
@@ -330,9 +335,18 @@
   </section>
 </template>
 
+<script>
+// 「模拟」解锁态放模块作用域：切标签/布局(移动⇄PC)/lite 等会让本组件重新挂载，
+// 而沙盘数据来自后端单例（onMounted refresh 会恢复 pushed），若解锁态只是组件内 ref
+// 就会被重置，表现为“数据还在、模拟按钮却消失”。模块作用域随整页刷新(JS 上下文重载)归零，
+// 仍满足“刷新后必须先点绿色『拉取 GOWFS』才解锁调参”的演示约束。
+const sandboxUnlock = { sim: false };
+</script>
+
 <script setup>
 import { computed, onMounted, ref } from "vue";
 import axios from "axios";
+import TributaryPanel from "./TributaryPanel.vue";
 
 const emit = defineEmits(["sandbox-change", "quick-inject"]);
 
@@ -364,7 +378,12 @@ const isSimMode = computed(() => state.value.mode === "sim");
  * 不用后端 liveLoaded 直接判：那是单例服务的字段，上一次拉到后会跨页面刷新残留，
  * 导致一进来就能看到「模拟」。本标记随页面重载归零，必须重新点绿色按钮才解锁。
  */
-const simUnlocked = ref(false);
+const simUnlocked = ref(sandboxUnlock.sim);
+/** 同时写模块作用域 + 组件响应式：重挂载后仍保留、整页刷新后归零 */
+function setSimUnlocked(v) {
+  sandboxUnlock.sim = v;
+  simUnlocked.value = v;
+}
 
 /** 断面id → 参数前缀（ygg/mc） */
 function prefixOf(sectionId) {
@@ -596,7 +615,7 @@ async function exitSim() {
     const { data } = await axios.post("/api/sandbox/sim/exit");
     applyState(data);
     // 退出模拟会回到真实数据（后端重拉 GOWFS），拉到则继续保持「模拟」可用
-    if (data?.liveLoaded === true) simUnlocked.value = true;
+    if (data?.liveLoaded === true) setSimUnlocked(true);
   } catch (e) {
     console.error("sandbox sim exit failed", e);
   } finally {
@@ -649,7 +668,7 @@ async function pushLive() {
     const { data } = await axios.post("/api/sandbox/push-live");
     applyState(data);
     // 只有真拉到真实预报（后端 liveLoaded=true）才解锁「模拟」入口
-    if (data?.liveLoaded === true) simUnlocked.value = true;
+    if (data?.liveLoaded === true) setSimUnlocked(true);
     forecastMessage.value = data?.forecastMessage || "";
   } catch (e) {
     forecastMessage.value = "接口调用失败：" + (e?.message || "未知错误");
@@ -664,7 +683,7 @@ async function reset() {
     const { data } = await axios.post("/api/sandbox/reset");
     applyState(data);
     // 重置后沙盘回到“未拉取”空态：重新锁上「模拟」，必须再点一次绿色按钮才解锁
-    simUnlocked.value = false;
+    setSimUnlocked(false);
     forecastMessage.value = "";
   } catch (e) {
     console.error("sandbox reset failed", e);
@@ -723,11 +742,11 @@ async function loadScenarios() {
     scenarios.value = data || [];
   } catch (e) {
     scenarios.value = [
-      { id: "RAIN_YGG", name: "暴雨·友谊关", description: "12h 降雨量 >80mm，友谊关口岸路段，等效道路中断" },
-      { id: "FOG_MC", name: "大雾·芒街", description: "能见度 <50m，芒街口岸通关受阻" },
-      { id: "LANDSLIDE", name: "泥石流·越北山区", description: "谅山—北江段山地次生灾害，泥石流风险>0.7，直接切断" },
-      { id: "HEAT", name: "高温·冷链", description: "北江—河内段 >35°C，冷链货损风险上升" },
-      { id: "TYPHOON", name: "台风·广宁沿海", description: "下龙—海阳沿海段台风，阵风12级，谨慎通行" },
+      { id: "RAIN_YGG", name: "暴雨·友谊关", description: "12h 降雨量 ≥80mm 即熔断（本次注入 85mm），等效道路中断" },
+      { id: "FOG_MC", name: "大雾·芒街", description: "能见度 <500m 判定浓雾（本次注入 400m），芒街口岸通关受阻" },
+      { id: "LANDSLIDE", name: "泥石流·越北山区", description: "谅山—北江段泥石流风险>0.7，直接切断（地质指标，不由滑杆驱动）" },
+      { id: "HEAT", name: "高温·冷链", description: "北江—河内段 ≥38°C 记高温（冷链货损自 ≥30°C 起累积）" },
+      { id: "TYPHOON", name: "台风·广宁沿海", description: "台风熔断：气压≤990hPa 且 风速≥60km/h（本次注入 985hPa/65km/h）" },
     ];
   }
 }

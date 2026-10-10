@@ -187,9 +187,14 @@ public class DecisionOrchestrator {
         // 常态（刚开始导航/派单前）不能沿用熔断、改任务口吻的文案，
         // 否则车刚出发就看到"降雨需降至75mm才恢复通行/5个改任务指令就绪"这种误导信息
         boolean normalMode = !"reroute".equals(solution.mode());
+        // 常态不等于"没灾害"：台风打芒街而本程走友谊关时也走常态口径，此时说
+        // "沿线口岸无生效熔断"是假话，必须点名断的是哪个、本程为何不受影响
+        String fusedElsewhere = sandbox.blockedPortNames();
         List<Map<String, Object>> agentStatus = new ArrayList<>();
         agentStatus.add(statusRow(RiskAgent.NAME, normalMode
-                ? "沿线口岸无生效熔断，气象与通关状态正常，持续监控中"
+                ? (fusedElsewhere == null
+                        ? "沿线口岸无生效熔断，气象与通关状态正常，持续监控中"
+                        : fusedElsewhere + "已熔断，但不在本程路线上，当前走廊通行正常")
                 : summarize(risk.explanation().get("boundary"))));
         agentStatus.add(statusRow(SolutionAgent.NAME, normalMode
                 ? solution.recommendation()
@@ -227,6 +232,7 @@ public class DecisionOrchestrator {
         return switch (ch) {
             case DeepseekService.CHANNEL_LOCAL -> "本地大模型（Ollama" + (model == null ? "" : " " + model) + "）";
             case DeepseekService.CHANNEL_ONLINE -> "在线 API（" + (model == null ? "远程大模型" : model) + "）· 非本地";
+            case DeepseekService.CHANNEL_CACHED -> "离线缓存文案（本地与在线均不可用，取自历史 AI 生成、本机留存的文案池）";
             default -> tag;
         };
     }

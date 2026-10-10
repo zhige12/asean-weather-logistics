@@ -91,7 +91,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import axios from "axios";
 
 const props = defineProps({
-  // 由 App.vue 经 SSE（task-assigned）实时传入；null 表示尚未取到
+  // 由 App.vue 经 SSE（task-assigned）实时推送 + 挂载时补拉一次；null = 服务端态还没取到
   taskStatus: { type: Object, default: null },
 });
 const emit = defineEmits(["refresh", "analyze"]);
@@ -118,8 +118,12 @@ const localTask = ref(null);
 // 是否已触发出车前 AI 分析（触发后提示路线比选与派单入口）
 const analyzed = ref(false);
 
-// 本地兜底 + 父组件 SSE 推送，两者取先到者
-const task = computed(() => props.taskStatus?.task || localTask.value);
+// 服务端态一到就是唯一权威。旧写法 `props.taskStatus?.task || localTask.value` 在
+// 司机退出接单 / 撤销派单后（服务端推的是 task:null）会回落到本组件 mount 时抓的
+// 过期快照 localTask，大屏永远停在「已接单」不动，只有刷新页面才恢复——
+// 这就是「司机端状态变了大屏半天不跟着变」的根因。
+// localTask 只在父组件还没拿到任何服务端态之前（taskStatus 仍为 null）当兜底。
+const task = computed(() => (props.taskStatus ? props.taskStatus.task : localTask.value));
 const stateText = computed(() => {
   if (!task.value) return "未派单 · 司机端为普通导航模式";
   if (task.value.status === "ACCEPTED") return "已接单";
@@ -159,6 +163,9 @@ async function refresh() {
   try {
     const { data } = await axios.get("/api/task/current");
     localTask.value = data?.task || null;
+    // REST 回包同时上报父组件：SSE 静默掉线（EventSource 断流不会报错到业务层）时，
+    // 这条通道是两端唯一的对账手段，不能只写本地快照
+    if (data && (data.task !== undefined || data.status !== undefined)) emit("refresh", data);
   } catch (e) {
     /* 静默 */
   }

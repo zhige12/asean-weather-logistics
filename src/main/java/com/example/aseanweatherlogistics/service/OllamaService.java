@@ -21,9 +21,9 @@ import org.springframework.stereotype.Service;
  * 本地大模型通道（演示第七幕 · 拔网线）：
  * Ollama 本地推理（OpenAI 兼容接口），默认 http://localhost:11434，模型 qwen2.5:7b。
  * <p>
- * 在 AI 调用链中优先级最高：Ollama → 在线 DeepSeek → 规则模板。
- * 断网/未启动 Ollama 时短超时（4s）快速失败并降级，不阻塞演示。
- * 熔断：连续失败 2 次冷却 2 分钟，避免每次请求都白等超时。
+ * 在 AI 调用链中优先级最高：Ollama → 在线 DeepSeek → 缓存池。
+ * 连接超时压到 800ms：本地没启动时要在 1 秒内判定「接不上」并切在线（见字段注释）；
+ * 连续失败后进入冷却，冷却期内直接返回 null，切换零等待。
  */
 @Service
 public class OllamaService {
@@ -39,9 +39,11 @@ public class OllamaService {
     @Value("${ollama.model:qwen2.5:7b}")
     private String model;
 
-    // 读超时 60s：14b 模型首次生成需加载权重（10-30s），不能按"接不上"误判；
-    // 连接超时 2s 不变——Ollama 没启动时才是真正要快速失败的场景
+    // 读超时 60s：14b 模型首次生成需加载权重（10-30s），不能按"接不上"误判。
+    // 连接超时 800ms（原 2s）：本地↔在线的降级切换要求 ≤1s，连接阶段必须比 1s 更早判死，
+    // 给 DNS/握手抖动留出余量仍在 1s 内落到在线通道；进程未启动时连接被拒本就瞬时失败。
     private static final int TIMEOUT_SECONDS = 60;
+    private static final int CONNECT_TIMEOUT_MILLIS = 800;
     private static final int FAIL_THRESHOLD = 2;
     private static final long COOLDOWN_MILLIS = 2 * 60_000L;
 
@@ -49,7 +51,7 @@ public class OllamaService {
     private volatile long cooldownUntil = 0L;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(2)).build();
+            .connectTimeout(Duration.ofMillis(CONNECT_TIMEOUT_MILLIS)).build();
     private final ObjectMapper mapper = new ObjectMapper();
 
     public boolean enabled() {
