@@ -3516,8 +3516,21 @@ export default {
         this.risks = r.data.risks || this.risks
         this.$nextTick(() => { this.drawRoute(); this.fitRoute(false) })
       } catch (e) {
-        // 上船段拉取失败不阻断选定：至少走廊照常画出，主线维持原样
+        // 上船段拉取失败不阻断选定，但必须把旧公路主线抹掉：
+        // 旧线上可能经过芒街，卡片已选坐船、地图却画着公路候选，两者自相矛盾。
+        // 抹掉后只留虚线走廊与全程 ETA/里程（来自 canalOption），图面与所选方案一致。
         console.warn('canal preview road leg failed', e)
+        this.route = {
+          ...this.route,
+          pathCoords: [], pathEdgeIds: [], pathEdgeSpans: [], pathNodeIds: [], riskEdgeIds: [],
+          estimatedHours: this.canalOption.hours,
+          totalDistanceKm: this.canalOption.distanceKm,
+          baselineHours: this.canalOption.hours,
+          currentHours: this.canalOption.hours,
+          extraHours: 0, rerouted: false, riskSegments: [],
+          baselinePathCoords: [], cargoLossYuan: 0
+        }
+        this.viaText = this.canalOption.via || this.viaText
         this.$nextTick(() => { this.drawRoute() })
       }
     },

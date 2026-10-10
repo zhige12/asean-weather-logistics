@@ -114,6 +114,8 @@ public class RouteService {
             adjacencyBuilder.computeIfAbsent(edge.getToNodeId(), ignored -> new ArrayList<>()).add(reverse(edge));
         }
         this.adjacency = adjacencyBuilder;
+        // 陆水联运上船锚点自愈：路网文件重新生成后曾丢失 "LJ" 节点，导致坐船方案算路 400（见方法注释）
+        ensureCanalAnchor();
         // A* 启发式基准：全图最大限速（启发式用它折算剩余时间下界，必然可采纳）
         double ms = DEFAULT_SPEED_KMH;
         for (RoadEdge e : edges) {
@@ -125,6 +127,56 @@ public class RouteService {
         patchVirtualChinaEdges();
         // 注册路径解析器：供 WeatherSimulator 做"整段路径"灾害注入（如谅山—北江）
         weatherSimulator.setPathResolver(this::edgesOnPath);
+    }
+
+    /** 南宁港六景作业区（上船点）坐标：与地名库/place-names.json 的「南宁港六景作业区」同点 */
+    private static final String CANAL_EMBARK_NODE_ID = "LJ";
+    private static final double[] CANAL_EMBARK_POS = {22.86899, 108.88669};
+
+    /**
+     * 陆水联运上船锚点自愈：并入广西密集路网重新生成 vietnam-road-network.json 后，
+     * 手工建模的「LJ」（南宁港六景作业区）节点被冲掉，司机端/调度大屏选定坐船方案后
+     * 请求 originId→LJ 的上船公路段全部 400 —— 前端拿不到新线就维持旧公路候选
+     * （可能经芒街），地图与「陆水联运」卡片自相矛盾；调度方案 B 导航同样被击穿。
+     * 启动时若缺 LJ，则合成该节点并用一条短连接线挂到最近的路网节点（柳南高速六景互通一带），
+     * 此后无论路网文件再怎么重新生成，只要六景附近还有路，坐船方案就不会坏。
+     */
+    private void ensureCanalAnchor() {
+        if (nodeById.containsKey(CANAL_EMBARK_NODE_ID)) {
+            return;
+        }
+        RoadNode nearest = null;
+        double bestKm = Double.MAX_VALUE;
+        for (RoadNode n : nodeById.values()) {
+            double km = approxKm(CANAL_EMBARK_POS[0], CANAL_EMBARK_POS[1], n.getLatitude(), n.getLongitude());
+            if (km < bestKm) {
+                bestKm = km;
+                nearest = n;
+            }
+        }
+        // 5km 内没有可挂节点说明路网文件本身出了问题，不硬造孤立节点
+        if (nearest == null || bestKm > 5.0) {
+            return;
+        }
+        RoadNode lj = new RoadNode(CANAL_EMBARK_NODE_ID, "南宁港六景作业区",
+                CANAL_EMBARK_POS[0], CANAL_EMBARK_POS[1], null, null);
+        RoadEdge link = new RoadEdge("ELJ-CONNECT", nearest.getId(), CANAL_EMBARK_NODE_ID,
+                Math.max(0.1, Math.round(bestKm * 10) / 10.0), 40.0, false, null,
+                "六景港区连接线", "trunk",
+                List.of(List.of(nearest.getLatitude(), nearest.getLongitude()),
+                        List.of(CANAL_EMBARK_POS[0], CANAL_EMBARK_POS[1])));
+        nodeById.put(CANAL_EMBARK_NODE_ID, lj);
+        edges.add(link);
+        edgeById.put(link.getId(), link);
+        adjacency.computeIfAbsent(nearest.getId(), ignored -> new ArrayList<>()).add(link);
+        adjacency.computeIfAbsent(CANAL_EMBARK_NODE_ID, ignored -> new ArrayList<>()).add(reverse(link));
+    }
+
+    /** 经纬度近似平面距离（km）：启动期一次性扫描用，不需要严格测地线 */
+    private static double approxKm(double lat1, double lng1, double lat2, double lng2) {
+        double dx = (lng2 - lng1) * 111.32 * Math.cos(Math.toRadians((lat1 + lat2) / 2));
+        double dy = (lat2 - lat1) * 110.57;
+        return Math.hypot(dx, dy);
     }
 
     /** 给缺少几何的中国侧虚拟边补 c（OSM 真实道路几何见 CNRoadGeom，仅内存补全、不改路网文件） */
