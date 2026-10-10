@@ -30,10 +30,13 @@ public class TouchAgent {
 
     private final DemoConfigService config;
     private final DeepseekService deepseekService;
+    private final DecisionSandboxService sandbox;
 
-    public TouchAgent(DemoConfigService config, DeepseekService deepseekService) {
+    public TouchAgent(DemoConfigService config, DeepseekService deepseekService,
+                      DecisionSandboxService sandbox) {
         this.config = config;
         this.deepseekService = deepseekService;
+        this.sandbox = sandbox;
     }
 
     /**
@@ -102,9 +105,29 @@ public class TouchAgent {
                         "气象预警推送（公众模式），确认回执闭环";
                 default -> "";
             });
+            // 司机端按车型/货型附带个性化风险提示（冷链/高栏/普货各说各的）
+            if (DemoConfigService.TARGET_DRIVER.equals(t) || DemoConfigService.TARGET_DRIVER_VN.equals(t)) {
+                item.put("riskTips", driverTips());
+            }
             targets.add(item);
         }
         return targets;
+    }
+
+    /**
+     * 按当前沙盘全要素（取路面风险较高断面）+ 货型冷链标记 + 熔断状态，
+     * 生成司机端个性化风险提示列表。缺要素不产提示，拔网线/无模型也能出。
+     */
+    private List<Map<String, Object>> driverTips() {
+        DecisionSandboxService.SectionSim el = sandbox.worstRoadElements();
+        List<DriverRiskTipRule.Tip> tips = DriverRiskTipRule.evaluate(
+                el.rainMm(), el.tempC(), el.windKph(), el.visibilityM(), el.humidityPct(),
+                config.cargo().coldChain(), sandbox.roadBlocked());
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (DriverRiskTipRule.Tip tip : tips) {
+            out.add(tip.toMap());
+        }
+        return out;
     }
 
     /** 升级方案 §3.3 Prompt：为四个角色生成专属指令。 */
@@ -118,6 +141,16 @@ public class TouchAgent {
         for (Map<String, Object> t : targets) {
             p.append(i++).append(". ").append(t.get("name")).append("：")
                     .append(t.get("instruction")).append('\n');
+            Object tips = t.get("riskTips");
+            if (tips instanceof List<?> list && !list.isEmpty()) {
+                p.append("   该司机需重点执行的个性化风险提示（按车型/货型，请在指令中保留这些要点）：\n");
+                for (Object o : list) {
+                    if (o instanceof Map<?, ?> tip) {
+                        p.append("   - 【").append(tip.get("vehicle")).append("】")
+                                .append(tip.get("text")).append('\n');
+                    }
+                }
+            }
         }
         p.append("\n输出JSON格式，每个角色一段文本（每段不超过60字，执行指令口吻，不要解释）：\n")
                 .append("{\n")

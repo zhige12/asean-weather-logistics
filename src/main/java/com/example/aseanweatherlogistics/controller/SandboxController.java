@@ -67,21 +67,10 @@ public class SandboxController {
         return sandbox.exitSimMode();
     }
 
-    /** 模拟模式下调整气象参数（未传的项保持不变） */
+    /** 模拟模式下调整全要素气象参数（扁平键：ygg/mc + RainMm/PressureHpa/WindKph/TempC/HumidityPct/CloudPct/VisibilityM；未传的项保持不变） */
     @PostMapping("/sim/params")
     public Map<String, Object> simParams(@RequestBody(required = false) Map<String, Object> body) {
-        if (body == null) {
-            body = Map.of();
-        }
-        return sandbox.setSimParams(
-                num(body, "yggRainMm"), num(body, "mcRainMm"),
-                num(body, "yggPressureHpa"), num(body, "yggWindKph"),
-                num(body, "mcPressureHpa"), num(body, "mcWindKph"));
-    }
-
-    private static Double num(Map<String, Object> body, String key) {
-        Object v = body.get(key);
-        return v == null ? null : ((Number) v).doubleValue();
+        return sandbox.setSimParams(body);
     }
 
     /** GOWFS 预报通道自检（配置/节流/熔断状态，不含密钥），供界面说明"为何没拉到" */

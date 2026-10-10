@@ -180,12 +180,15 @@ public class SolutionAgent {
             planA.put("costDeltaYuan", null);
             planA.put("note", "公路走廊全部熔断，无可用公路方案");
         }
-        planA.put("damageRisk", "中");
-        planA.put("damageNote", "绕行增加在途时间，冷链机组持续耗能，货损风险中");
         // 六维指标：绕行增量里程按 额外耗时×均速 折算
         double extraKmA = route != null && route.isRerouted() ? route.getExtraHours() * DETOUR_AVG_SPEED_KMH : 0;
         double extraHoursA = route != null && route.isRerouted() ? route.getExtraHours() : 0;
         double totalHoursA = route != null ? route.getCurrentHours() : baselineHours;
+        // 货损：用全要素货损指数（环境温/湿 + 绕行延误）算，取代原来写死的"中"
+        CargoSafetyIndex.Result cargoA = sandbox.cargoRiskOf(extraHoursA);
+        planA.put("damageRisk", cargoA.level());
+        planA.put("damageScore", cargoA.score());
+        planA.put("damageNote", cargoDamageNote(cargoA));
         double fuelA = costCalculator.fuelLiters(extraKmA);
         double costA = route != null && route.isRerouted()
                 ? route.getExtraHours() * DETOUR_COST_PER_HOUR + extraKmA * DETOUR_COST_PER_KM : 0;
@@ -195,7 +198,7 @@ public class SolutionAgent {
         double absFuelA = costCalculator.fuelLiters(absKmA);
         double absCostA = intermodal.roadCostYuan(absKmA);
         double absCarbonA = costCalculator.carbonKgForRoad(absKmA);
-        planA.put("metrics", costCalculator.build(extraHoursA, totalHoursA, "中", cargo,
+        planA.put("metrics", costCalculator.build(extraHoursA, totalHoursA, cargoA.level(), cargo,
                 extraHoursA, fuelA, costA, carbonA, absFuelA, absCostA, absCarbonA).toMap());
         plans.add(planA);
 
@@ -255,9 +258,13 @@ public class SolutionAgent {
         planC.put("extraHours", WAIT_HOURS);
         planC.put("costDeltaYuan", 0);
         double rate = cargo.damageRate(WAIT_HOURS);
+        CargoSafetyIndex.Result cargoC = sandbox.cargoRiskOf(WAIT_HOURS);
         planC.put("damageRatePct", round1(rate * 100));
         planC.put("damageLossYuan", round0(cargo.damageLossYuan(WAIT_HOURS)));
-        planC.put("damageRisk", rate > 0.03 ? "高" : (rate > 0 ? "中" : "低"));
+        // 货损等级：延误货损率与环境（高/高湿）风险取更不利者
+        planC.put("damageRisk", worseLevel(
+                rate > 0.03 ? "高" : (rate > 0 ? "中" : "低"), cargoC.level()));
+        planC.put("damageScore", cargoC.score());
         planC.put("note", String.format("%s延误 %.0f 小时，货损率预计 %.1f%%（货值 %.0f 万元，损失约 %.0f 元）",
                 cargo.name(), WAIT_HOURS, rate * 100, cargo.cargoValueYuan() / 10_000.0,
                 cargo.damageLossYuan(WAIT_HOURS)));
@@ -375,6 +382,14 @@ public class SolutionAgent {
                 .append("h，货损率").append(planC.get("damageRatePct")).append("%\n");
         p.append("- 货物：").append(cargo.name())
                 .append(cargo.coldChain() ? "，冷链" : "").append('\n');
+        // 全要素货损对比 + 综合研判摘要，让模型在方案对比里引用"环境+延误"货损而非只谈时效
+        p.append("- 各方案货损指数（环境温/湿+延误）：A 绕行 ").append(planA.get("damageRisk"))
+                .append("(").append(planA.get("damageScore")).append("分)，B 联运 低，C 等待 ")
+                .append(planC.get("damageRisk")).append("(").append(planC.get("damageScore")).append("分)\n");
+        Object comp = risk == null || risk.explanation() == null ? null : risk.explanation().get("compositeSummary");
+        if (comp != null) {
+            p.append("- 路面综合研判摘要：").append(comp).append('\n');
+        }
         p.append("\n请输出三个方案对比与推荐，JSON格式：\n")
                 .append("{\n")
                 .append("  \"solutions\": [\n")
@@ -476,5 +491,28 @@ public class SolutionAgent {
 
     private static double round0(double v) {
         return Math.round(v);
+    }
+
+    /** 货损说明：有因子时"建议：因子…"，无不利要素时如实说安全。 */
+    private static String cargoDamageNote(CargoSafetyIndex.Result cargo) {
+        if (cargo.score() <= 0 || cargo.factors().isEmpty()) {
+            return cargo.advice();
+        }
+        return cargo.advice() + "：" + String.join("；", cargo.factors());
+    }
+
+    /** 取两个风险等级中更不利者（低<中<高<极高）。 */
+    private static String worseLevel(String a, String b) {
+        return rank(a) >= rank(b) ? a : b;
+    }
+
+    private static int rank(String level) {
+        return switch (level == null ? "" : level) {
+            case "极高" -> 4;
+            case "高" -> 3;
+            case "中" -> 2;
+            case "低" -> 1;
+            default -> 0;
+        };
     }
 }

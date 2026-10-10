@@ -96,14 +96,29 @@ public class DecisionSandboxService {
     public static final String MODE_SIM = "sim";
     private volatile String mode = MODE_LIVE;
 
-    /** 可调气象参数（模拟模式下生效） */
-    public record SimParams(double yggRainMm, double mcRainMm,
-                            double yggPressureHpa, double yggWindKph,
-                            double mcPressureHpa, double mcWindKph) {
+    /**
+     * 单断面全要素气象盒（模拟模式可调）。
+     * <p>
+     * 把「全要素参数」统一成一个 record：模拟（滑杆手设）与真实（GOWFS 返回的官方要素）
+     * 都归一到同一形状（见 {@link #resolvedElements}），下游的
+     * {@link RoadRiskIndex} / {@link CargoSafetyIndex} / {@link WeatherTrendRule} 两模式共用一套判据。
+     * 缺失要素以 {@link Double#NaN} 表示，各引擎对 NaN 一律不评分、绝不误升级。
+     */
+    public record SectionSim(double rainMm, double pressureHpa, double windKph,
+                             double tempC, double humidityPct, double cloudPct, double visibilityM) {
+    }
+
+    /** 可调气象参数（模拟模式下生效）：友谊关 / 芒街两断面各自的全要素 */
+    public record SimParams(SectionSim ygg, SectionSim mc) {
+    }
+
+    /** 一个"什么都不触发"的正常断面：雨0、气压1013、风20、温28、湿60、云30、能见10000 */
+    private static SectionSim neutralSection() {
+        return new SectionSim(0, 1013, 20, 28, 60, 30, 10000);
     }
 
     /** 模拟参数初值：取"什么都不触发"的正常状态，避免一进模拟就满屏熔断 */
-    private volatile SimParams sim = new SimParams(0, 0, 1013, 20, 1013, 20);
+    private volatile SimParams sim = new SimParams(neutralSection(), neutralSection());
     private volatile String rainSource = RAIN_SOURCE_SCRIPT;
     private volatile String rainDetail = null;
     /**
@@ -189,41 +204,83 @@ public class DecisionSandboxService {
     }
 
     /**
-     * 模拟模式下调整气象参数（null 表示该项不变）。
-     * 只改参数，灾害由 {@link #applySection} / 水运红线自动涌现——不在这里硬编码"触发某灾害"。
+     * 模拟模式下调整气象参数（扁平键 Map，未传的项保持不变）。
+     * 键命名：{@code ygg/mc} + {@code RainMm/PressureHpa/WindKph/TempC/HumidityPct/CloudPct/VisibilityM}，
+     * 与前端滑杆一一对应。只改参数，灾害由 {@link #applySection} / 水运红线自动涌现——不在这里硬编码"触发某灾害"。
      */
-    public synchronized Map<String, Object> setSimParams(Double yggRainMm, Double mcRainMm,
-                                                         Double yggPressureHpa, Double yggWindKph,
-                                                         Double mcPressureHpa, Double mcWindKph) {
+    public synchronized Map<String, Object> setSimParams(Map<String, Object> body) {
         this.mode = MODE_SIM;
+        Map<String, Object> b = body == null ? Map.of() : body;
         this.sim = new SimParams(
-                yggRainMm == null ? sim.yggRainMm() : yggRainMm,
-                mcRainMm == null ? sim.mcRainMm() : mcRainMm,
-                yggPressureHpa == null ? sim.yggPressureHpa() : yggPressureHpa,
-                yggWindKph == null ? sim.yggWindKph() : yggWindKph,
-                mcPressureHpa == null ? sim.mcPressureHpa() : mcPressureHpa,
-                mcWindKph == null ? sim.mcWindKph() : mcWindKph);
+                mergeSection(sim.ygg(), "ygg", b),
+                mergeSection(sim.mc(), "mc", b));
         applySimParams();
         return evaluate("调整模拟气象参数");
+    }
+
+    /** 把扁平键合并进某断面的全要素盒：传了的覆盖、未传的沿用当前值。 */
+    private static SectionSim mergeSection(SectionSim cur, String prefix, Map<String, Object> body) {
+        return new SectionSim(
+                pick(body, prefix + "RainMm", cur.rainMm()),
+                pick(body, prefix + "PressureHpa", cur.pressureHpa()),
+                pick(body, prefix + "WindKph", cur.windKph()),
+                pick(body, prefix + "TempC", cur.tempC()),
+                pick(body, prefix + "HumidityPct", cur.humidityPct()),
+                pick(body, prefix + "CloudPct", cur.cloudPct()),
+                pick(body, prefix + "VisibilityM", cur.visibilityM()));
+    }
+
+    private static double pick(Map<String, Object> body, String key, double fallback) {
+        Object v = body.get(key);
+        return v instanceof Number n ? n.doubleValue() : fallback;
+    }
+
+    /**
+     * 解析某断面当前全要素：模拟模式取滑杆参数，真实模式从 {@link #liveElements}（GOWFS 官方要素）填充，
+     * 使公路综合评分 / 货损 / 趋势预警在两种口径下都能算、走同一判据。
+     * 真实模式无对应要素时以 {@link Double#NaN} 传入，各引擎不计分。
+     */
+    public SectionSim resolvedElements(Section s) {
+        if (MODE_SIM.equals(mode)) {
+            return s == ygg ? sim.ygg() : sim.mc();
+        }
+        Map<String, Double> e = liveElements.get(s.id);
+        // 降雨真实模式以断面 forecastMm 为准（已由 GOWFS 6h 累计写入），气压/风取官方要素
+        double pressure = s.typhoonActive ? s.typhoonPressureHpa : dbl(e, "PRS", 1013);
+        double wind = s.typhoonActive ? s.typhoonWindKph : dbl(e, "windKph", Double.NaN);
+        return new SectionSim(
+                s.forecastMm,
+                pressure,
+                wind,
+                dbl(e, "TMP", Double.NaN),
+                dbl(e, "RH", Double.NaN),
+                dbl(e, "TCC", Double.NaN),
+                dbl(e, "visibilityM", Double.NaN));
+    }
+
+    /** 从要素 Map 取值，缺失/为 null 时返回默认（常传 NaN 表示"该要素未知"）。 */
+    private static double dbl(Map<String, Double> elements, String key, double fallback) {
+        Double v = elements == null ? null : elements.get(key);
+        return v == null ? fallback : v;
     }
 
     /** 把模拟参数落到断面：降雨直接赋值，气压/风速统一走 TyphoonRiskRule 判定 */
     private void applySimParams() {
         this.pushed = true;
-        ygg.forecastMm = sim.yggRainMm();
-        mc.forecastMm = sim.mcRainMm();
+        ygg.forecastMm = sim.ygg().rainMm();
+        mc.forecastMm = sim.mc().rainMm();
         // 台风状态由参数驱动：气压与风速同时达标才算台风，与真实气象同一判据
         ygg.typhoonActive = true;
-        ygg.typhoonPressureHpa = sim.yggPressureHpa();
-        ygg.typhoonWindKph = sim.yggWindKph();
+        ygg.typhoonPressureHpa = sim.ygg().pressureHpa();
+        ygg.typhoonWindKph = sim.ygg().windKph();
         mc.typhoonActive = true;
-        mc.typhoonPressureHpa = sim.mcPressureHpa();
-        mc.typhoonWindKph = sim.mcWindKph();
+        mc.typhoonPressureHpa = sim.mc().pressureHpa();
+        mc.typhoonWindKph = sim.mc().windKph();
         this.rainSource = RAIN_SOURCE_SIM;
         this.rainDetail = String.format("模拟 雨%.0f/%.0fmm 气压%.0f/%.0fhPa 风%.0f/%.0fkm/h",
-                sim.yggRainMm(), sim.mcRainMm(),
-                sim.yggPressureHpa(), sim.mcPressureHpa(),
-                sim.yggWindKph(), sim.mcWindKph());
+                sim.ygg().rainMm(), sim.mc().rainMm(),
+                sim.ygg().pressureHpa(), sim.mc().pressureHpa(),
+                sim.ygg().windKph(), sim.mc().windKph());
         // 模拟参数是手工设定的，官方实况要素不再适用
         this.liveElements = Map.of();
         this.liveWindText = Map.of();
@@ -509,8 +566,43 @@ public class DecisionSandboxService {
     public synchronized Map<String, Object> evaluate(String trigger) {
         applySection(ygg, config.fuseThresholdMm(), trigger);
         applySection(mc, MC_THRESHOLD_MM, trigger);
+        syncWaterFromSections();
         applyWaterSection(trigger);
         return state();
+    }
+
+    /**
+     * 把公路侧最不利断面的风/雨透传给水运引擎，实现"风大→推算浪高→禁航"与"雨大+风高→风险叠加"：
+     * 风速 km/h 换算 m/s 后作为水运风输入（现有 UI 无独立水运风滑杆，由断面风联动最自然），
+     * 降雨取两断面最大值作为叠加量。缺要素（NaN）不写入，绝不因缺数据误判。
+     */
+    private void syncWaterFromSections() {
+        SectionSim ye = resolvedElements(ygg);
+        SectionSim me = resolvedElements(mc);
+        double maxWindKph = Math.max(nz(ye.windKph()), nz(me.windKph()));
+        double maxRain = Math.max(nz(ye.rainMm()), nz(me.rainMm()));
+        waterRiskEngine.setRainOverlay(maxRain);
+        if (Double.isFinite(maxWindKph) && maxWindKph > 0) {
+            waterRiskEngine.setConditions(null, null, null, maxWindKph / 3.6);
+        }
+    }
+
+    private static double nz(double v) {
+        return Double.isFinite(v) ? v : 0.0;
+    }
+
+    /** 取两值中较大者；两者都缺失（NaN）才返回 NaN（避免缺要素误抬货损）。 */
+    private static double maxFinite(double a, double b) {
+        if (!Double.isFinite(a) && !Double.isFinite(b)) {
+            return Double.NaN;
+        }
+        if (!Double.isFinite(a)) {
+            return b;
+        }
+        if (!Double.isFinite(b)) {
+            return a;
+        }
+        return Math.max(a, b);
     }
 
     /** 水运断面：禁航红线触发 → 抬高联运方案成本（软熔断），解除红线 → 恢复。 */
@@ -612,7 +704,7 @@ public class DecisionSandboxService {
         this.scriptedScenario = SCENARIO_RAIN;
         // 重置后回到真实模式与"什么都不触发"的模拟初值
         this.mode = MODE_LIVE;
-        this.sim = new SimParams(0, 0, 1013, 20, 1013, 20);
+        this.sim = new SimParams(neutralSection(), neutralSection());
         this.liveElements = Map.of();
         this.liveWindText = Map.of();
         waterFused = false;
@@ -643,6 +735,49 @@ public class DecisionSandboxService {
 
     public boolean pushed() {
         return pushed;
+    }
+
+    // ==================== 衍生信号访问器（供智能体与前端复用，均基于 resolvedElements 同一口径） ====================
+
+    /** 某断面当前全要素（模拟取滑杆、真实取 GOWFS 要素）。 */
+    public SectionSim elementsOf(Section s) {
+        return resolvedElements(s);
+    }
+
+    /** 某断面路面综合风险评分（降雨+温度+能见度+风速+湿度融合）。 */
+    public RoadRiskIndex.Result roadRiskOf(Section s) {
+        SectionSim el = resolvedElements(s);
+        return RoadRiskIndex.evaluate(el.rainMm(), el.tempC(), el.visibilityM(), el.windKph(), el.humidityPct());
+    }
+
+    /** 某断面天气趋势预警（气压/湿度/云量前兆）。 */
+    public WeatherTrendRule.Result trendOf(Section s) {
+        SectionSim el = resolvedElements(s);
+        return WeatherTrendRule.evaluate(el.pressureHpa(), el.humidityPct(), el.cloudPct());
+    }
+
+    /** 全局货损指数：取两断面最不利温/湿；delayHours 为预计延误（沙盘静态态传 0）。 */
+    public CargoSafetyIndex.Result cargoRiskOf(double delayHours) {
+        SectionSim ye = resolvedElements(ygg);
+        SectionSim me = resolvedElements(mc);
+        return CargoSafetyIndex.evaluate(
+                maxFinite(ye.tempC(), me.tempC()),
+                maxFinite(ye.humidityPct(), me.humidityPct()),
+                delayHours, config.cargo());
+    }
+
+    /**
+     * 路面综合风险较高的那个断面的全要素：司机端个性化提示据此生成，
+     * 与 {@link RiskAgent} 综合研判取"最不利断面"同一口径（并列取友谊关）。
+     */
+    public SectionSim worstRoadElements() {
+        SectionSim ye = resolvedElements(ygg);
+        SectionSim me = resolvedElements(mc);
+        double ys = RoadRiskIndex.evaluate(ye.rainMm(), ye.tempC(), ye.visibilityM(),
+                ye.windKph(), ye.humidityPct()).score();
+        double ms = RoadRiskIndex.evaluate(me.rainMm(), me.tempC(), me.visibilityM(),
+                me.windKph(), me.humidityPct()).score();
+        return ms > ys ? me : ye;
     }
 
     /** 水运是否禁航（供方案生成判定方向） */
@@ -729,10 +864,7 @@ public class DecisionSandboxService {
         m.put("mode", mode);
         // 是否拉到过 GOWFS 真实预报（前端「模拟」按钮的显隐开关）
         m.put("liveLoaded", liveLoaded);
-        m.put("simParams", Map.of(
-                "yggRainMm", sim.yggRainMm(), "mcRainMm", sim.mcRainMm(),
-                "yggPressureHpa", sim.yggPressureHpa(), "yggWindKph", sim.yggWindKph(),
-                "mcPressureHpa", sim.mcPressureHpa(), "mcWindKph", sim.mcWindKph()));
+        m.put("simParams", flatSimParams());
         // 如实标注降雨来源：剧本值就说剧本值，只有真的从 GOWFS 拉到才标官方预报
         m.put("dataSource", rainSource);
         m.put("dataSourceDetail", rainDetail);
@@ -745,6 +877,12 @@ public class DecisionSandboxService {
         sections.add(sectionMap(ygg, config.fuseThresholdMm()));
         sections.add(sectionMap(mc, MC_THRESHOLD_MM));
         m.put("sections", sections);
+        // 全局货损指数：取两断面中最不利的温/湿（冷链高温、高湿霉变），延误暂 0（改线阶段由方案智能体补）
+        SectionSim ye = resolvedElements(ygg);
+        SectionSim me = resolvedElements(mc);
+        double worstTemp = maxFinite(ye.tempC(), me.tempC());
+        double worstHumid = maxFinite(ye.humidityPct(), me.humidityPct());
+        m.put("cargoRisk", CargoSafetyIndex.evaluate(worstTemp, worstHumid, 0, config.cargo()).toMap());
         // 水运断面（场景B：陆水联运的另一半）
         Map<String, Object> water = new LinkedHashMap<>(waterRiskEngine.state());
         water.put("id", "CANAL");
@@ -756,6 +894,27 @@ public class DecisionSandboxService {
         m.put("waterBlocked", waterBlocked());
         m.put("direction", direction());
         return m;
+    }
+
+    /**
+     * 把两断面全要素拍平成扁平键下发前端（供滑杆回显）：键名与 {@link #setSimParams} 入参一致，
+     * 前端 {@code simParam(id,'tempC')} 之类直接取 {@code state.simParams.yggTempC}。
+     */
+    private Map<String, Object> flatSimParams() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        putSection(m, "ygg", sim.ygg());
+        putSection(m, "mc", sim.mc());
+        return m;
+    }
+
+    private static void putSection(Map<String, Object> m, String prefix, SectionSim s) {
+        m.put(prefix + "RainMm", s.rainMm());
+        m.put(prefix + "PressureHpa", s.pressureHpa());
+        m.put(prefix + "WindKph", s.windKph());
+        m.put(prefix + "TempC", s.tempC());
+        m.put(prefix + "HumidityPct", s.humidityPct());
+        m.put(prefix + "CloudPct", s.cloudPct());
+        m.put(prefix + "VisibilityM", s.visibilityM());
     }
 
     /** 双向切换方向：road_to_water（公路断了）/ water_to_road（水运禁航）/ dual_risk / normal。 */
@@ -806,6 +965,22 @@ public class DecisionSandboxService {
         m.put("history", s.history);
         m.put("moisturePct", s.moisturePct);
         m.put("riskLevel", s.fused ? "高" : (s.forecastMm >= CAUTION_MM ? "中" : "低"));
+        // 本断面解析后的全要素（模拟/真实统一形状），供前端滑杆回显与衍生引擎取值
+        SectionSim el = resolvedElements(s);
+        Map<String, Object> res = new LinkedHashMap<>();
+        res.put("rainMm", el.rainMm());
+        res.put("pressureHpa", el.pressureHpa());
+        res.put("windKph", el.windKph());
+        res.put("tempC", el.tempC());
+        res.put("humidityPct", el.humidityPct());
+        res.put("cloudPct", el.cloudPct());
+        res.put("visibilityM", el.visibilityM());
+        m.put("resolved", res);
+        // 路面综合风险评分（降雨+温度+能见度+风速+湿度融合），与只看降雨的熔断互补
+        m.put("roadRisk", RoadRiskIndex.evaluate(el.rainMm(), el.tempC(), el.visibilityM(),
+                el.windKph(), el.humidityPct()).toMap());
+        // 天气趋势预警（气压/湿度/云量前兆→提前 1-2h 预判转雨）
+        m.put("trend", WeatherTrendRule.evaluate(el.pressureHpa(), el.humidityPct(), el.cloudPct()).toMap());
         return m;
     }
 }

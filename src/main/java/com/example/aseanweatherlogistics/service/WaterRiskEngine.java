@@ -44,6 +44,12 @@ public class WaterRiskEngine {
     /** 支流风险耦合出的干流设计流速（m/s），0 = 未联动；参与判定时与人工基准取更不利值 */
     private volatile double tributaryCurrentMs = 0.0;
 
+    /**
+     * 降雨叠加量（mm，未来6h累计）：由沙盘把最不利公路断面的雨强透传进来，
+     * 用于"降水大 + 风速高 → 航行风险叠加"的水运侧研判（见 {@link #scoreWaterRisk}）。
+     */
+    private volatile double rainOverlayMm = 0.0;
+
     public void setConditions(Double vis, Double current, Double wave) {
         setConditions(vis, current, wave, null);
     }
@@ -61,6 +67,29 @@ public class WaterRiskEngine {
         this.tributaryCurrentMs = Math.max(0.0, inducedCurrentMs);
     }
 
+    /** 降雨叠加：把公路侧雨强透传给水运研判（<0 视为清除）。 */
+    public void setRainOverlay(double rainMm) {
+        this.rainOverlayMm = Math.max(0.0, rainMm);
+    }
+
+    /**
+     * 风速（m/s）推算浪高（m）——内陆运河风区短、浪高低于开阔海面，这里按经验公式折算：
+     * 经验上 6 级风（10.8m/s）约 1.5m、 7 级风（13.9m/s）约 2.4m（越接近/超2.0m 越易触发浪高禁航红线）。
+     * 风速越高推算浪高越大，封顶 6m（运河尺度上限）。
+     */
+    public static double windToWaveM(double windMs) {
+        if (!Double.isFinite(windMs) || windMs <= 0) {
+            return 0.0;
+        }
+        double est = 0.06 * Math.pow(windMs, 1.4);
+        return Math.min(6.0, Math.max(0.0, est));
+    }
+
+    /** 判定用浪高：人工基准与风速推算取更不利者。 */
+    public double effectiveWaveM() {
+        return Math.max(waveHeightM, windToWaveM(windSpeedMs));
+    }
+
     /** 判定用设计流速：人工基准与支流涨水耦合取更不利者。 */
     public double effectiveCurrentMs() {
         return Math.max(currentSpeedMs, tributaryCurrentMs);
@@ -69,7 +98,7 @@ public class WaterRiskEngine {
     public boolean isWaterBlocked() {
         return visibilityM < VIS_MIN_M
                 || effectiveCurrentMs() > CURRENT_MAX_MS
-                || waveHeightM > WAVE_MAX_M
+                || effectiveWaveM() > WAVE_MAX_M
                 || windSpeedMs >= WIND_MAX_MS;
     }
 
@@ -92,8 +121,10 @@ public class WaterRiskEngine {
             String src = tributaryCurrentMs > currentSpeedMs ? "（含支流涨水联动贡献）" : "";
             return String.format("流速 %.1fm/s > %.1fm/s，触发禁航红线%s", cur, CURRENT_MAX_MS, src);
         }
-        if (waveHeightM > WAVE_MAX_M) {
-            return String.format("浪高 %.1fm > %.1fm，触发禁航红线", waveHeightM, WAVE_MAX_M);
+        if (effectiveWaveM() > WAVE_MAX_M) {
+            boolean fromWind = windToWaveM(windSpeedMs) > waveHeightM;
+            return String.format("浪高 %.1fm > %.1fm，触发禁航红线%s",
+                    effectiveWaveM(), WAVE_MAX_M, fromWind ? "（由风速推算）" : "");
         }
         if (windSpeedMs >= WIND_MAX_MS) {
             return String.format("风速 %.1fm/s（%d级风）≥ 7级禁航红线", windSpeedMs, beaufortForce(windSpeedMs));
@@ -106,8 +137,14 @@ public class WaterRiskEngine {
         double score = 0;
         if (visibilityM < 1500) score += 30;
         if (effectiveCurrentMs() > 1.5) score += 20;
-        if (waveHeightM > 1.2) score += 15;
+        if (effectiveWaveM() > 1.2) score += 15;
         if (windSpeedMs > 10.8) score += 10;   // 逼近 7 级（10.8m/s 起为 6 级大风）
+        // 降雨 + 大风叠加：降水大且风高时航行风险额外抬升（雨急风高、操纵困难）
+        if (rainOverlayMm >= 40 && windSpeedMs >= 10.8) {
+            score += 20;
+        } else if (rainOverlayMm >= 80) {
+            score += 12;   // 特强降水，即使风不大也明显抬高风险
+        }
         if (isWaterBlocked()) score = Math.max(score, 80);
         return Math.min(100, score);
     }
@@ -126,6 +163,10 @@ public class WaterRiskEngine {
         m.put("manualCurrentSpeedMs", currentSpeedMs);
         m.put("tributaryCurrentMs", tributaryCurrentMs);
         m.put("waveHeightM", waveHeightM);
+        // 风速推算浪高与判定用有效浪高（取更不利者），便于界面/智能体说明"浪高是风推上去的"
+        m.put("windInducedWaveM", windToWaveM(windSpeedMs));
+        m.put("effectiveWaveM", effectiveWaveM());
+        m.put("rainOverlayMm", rainOverlayMm);
         m.put("windSpeedMs", windSpeedMs);
         m.put("windForce", beaufortForce(windSpeedMs));
         m.put("blocked", isWaterBlocked());

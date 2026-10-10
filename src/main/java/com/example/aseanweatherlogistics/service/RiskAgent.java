@@ -368,7 +368,57 @@ public class RiskAgent {
                 String.format("阈值说明：%s的恢复线为%.0fmm（含滞后），%s的熔断触发线为%.0fmm。",
                         ygg.name, threshold - DecisionSandboxService.HYSTERESIS_MM,
                         mc.name, DecisionSandboxService.MC_THRESHOLD_MM)));
+
+        // ---------- 综合衍生信号（路面多要素评分 / 天气趋势 / 货损指数） ----------
+        // 只看降雨会低估"雨不大但浓雾+侧风+低温结冰"这类复合风险；把全要素压成综合指数，
+        // 连同事前趋势预警与货损指数一并交出，供前端展示与大模型研判引用。
+        RoadRiskIndex.Result yrr = sandbox.roadRiskOf(ygg);
+        RoadRiskIndex.Result mrr = sandbox.roadRiskOf(mc);
+        WeatherTrendRule.Result ytr = sandbox.trendOf(ygg);
+        WeatherTrendRule.Result mtr = sandbox.trendOf(mc);
+        CargoSafetyIndex.Result cargo = sandbox.cargoRiskOf(0);
+        yggExp.put("roadRisk", yrr.toMap());
+        yggExp.put("trend", ytr.toMap());
+        mcExp.put("roadRisk", mrr.toMap());
+        mcExp.put("trend", mtr.toMap());
+        Map<String, Object> composite = new LinkedHashMap<>();
+        composite.put("yggRoadRisk", yrr.toMap());
+        composite.put("mcRoadRisk", mrr.toMap());
+        composite.put("yggTrend", ytr.toMap());
+        composite.put("mcTrend", mtr.toMap());
+        composite.put("cargoRisk", cargo.toMap());
+        m.put("composite", composite);
+        m.put("compositeSummary", compositeNarrative(ygg, mc, yrr, mrr, ytr, mtr, cargo));
         return m;
+    }
+
+    /**
+     * 把多要素综合信号写成一段确定性中文解释（不依赖大模型，拔网也能说清）：
+     * 取两断面中路面风险较高者为主语，点出评分/等级/主因，再补货损与趋势。
+     */
+    private String compositeNarrative(DecisionSandboxService.Section ygg, DecisionSandboxService.Section mc,
+                                       RoadRiskIndex.Result yrr, RoadRiskIndex.Result mrr,
+                                       WeatherTrendRule.Result ytr, WeatherTrendRule.Result mtr,
+                                       CargoSafetyIndex.Result cargo) {
+        StringBuilder sb = new StringBuilder();
+        boolean yggWorse = yrr.score() >= mrr.score();
+        RoadRiskIndex.Result worst = yggWorse ? yrr : mrr;
+        DecisionSandboxService.Section worstSec = yggWorse ? ygg : mc;
+        String mainFactor = worst.factors().isEmpty() ? "无明显不利要素" : worst.factors().get(0);
+        sb.append(String.format("%s段路面综合风险 %d分（%s），主因：%s。",
+                worstSec.name, worst.score(), worst.level(), mainFactor));
+        if (cargo.score() > 0) {
+            sb.append(String.format("%s货损指数 %d分（%s），%s",
+                    cargo.cargoName(), cargo.score(), cargo.level(), cargo.advice()));
+            if (cargo.estimatedLossYuan() > 0) {
+                sb.append(String.format("，预估损失约%.0f元。", cargo.estimatedLossYuan()));
+            }
+        }
+        WeatherTrendRule.Result trend = ytr.triggered() || !mtr.triggered() ? ytr : mtr;
+        if (trend.triggered()) {
+            sb.append(String.format("趋势预警：%s", trend.text()));
+        }
+        return sb.toString();
     }
 
     /** 升级方案 §3.1 Prompt：真实数据 + RAG 历史案例，要求结构化 JSON 输出。 */
@@ -414,6 +464,25 @@ public class RiskAgent {
         p.append("- 备选口岸：").append(mc.name).append("（预计降雨量")
                 .append(String.format("%.0f", mc.forecastMm)).append("mm，")
                 .append(mc.slopeSoil).append("）\n");
+        // 综合衍生信号（路面多要素评分/货损/趋势）进 prompt，让大模型基于全要素而非只看降雨研判
+        RoadRiskIndex.Result yrr = sandbox.roadRiskOf(ygg);
+        RoadRiskIndex.Result mrr = sandbox.roadRiskOf(mc);
+        CargoSafetyIndex.Result cargo = sandbox.cargoRiskOf(0);
+        p.append("- 路面综合风险指数（全要素融合）：友谊关").append(yrr.score()).append("分（").append(yrr.level())
+                .append("），芒街").append(mrr.score()).append("分（").append(mrr.level()).append("）\n");
+        if (!yrr.factors().isEmpty()) {
+            p.append("  友谊关风险因子：").append(String.join("；", yrr.factors())).append("\n");
+        }
+        if (!mrr.factors().isEmpty()) {
+            p.append("  芒街风险因子：").append(String.join("；", mrr.factors())).append("\n");
+        }
+        p.append("- 货物：").append(cargo.cargoName()).append(cargo.coldChain() ? "（冷链）" : "")
+                .append("，货损指数").append(cargo.score()).append("分（").append(cargo.level())
+                .append("），处置建议：").append(cargo.advice()).append("\n");
+        WeatherTrendRule.Result ytr = sandbox.trendOf(ygg);
+        if (ytr.triggered()) {
+            p.append("- 趋势预警（事前）：").append(ytr.text()).append("\n");
+        }
         if (!ragText.isBlank()) {
             p.append("- 行业知识库参考：\n").append(ragText);
         }

@@ -55,7 +55,17 @@
       <div v-for="s in sections" :key="s.id" class="section-item" :class="'st-' + s.status">
         <div class="section-head">
           <span class="section-name">{{ s.name }}</span>
-          <span class="section-badge" :class="badgeClass(s)">{{ badgeText(s) }}</span>
+          <span class="head-badges">
+            <span
+              v-if="s.roadRisk"
+              class="risk-badge"
+              :style="riskBadgeStyle(s.roadRisk.colorKey)"
+              :title="s.roadRisk.advice"
+            >
+              路面风险 {{ s.roadRisk.score }} · {{ s.roadRisk.level }}
+            </span>
+            <span class="section-badge" :class="badgeClass(s)">{{ badgeText(s) }}</span>
+          </span>
         </div>
 
         <!-- 降雨滑杆：真实模式下只读（禁用），模拟模式下可拖 -->
@@ -102,6 +112,60 @@
           />
           <span class="rain-value">{{ Math.round(simParam(s.id, "windKph")) }}km/h</span>
         </div>
+        <!-- 温度滑杆：≤ 5℃ 配合雨雪→结冰；≥ 38℃ 高温→普货风险、≥ 30℃ 冷链货损 -->
+        <div v-if="isSimMode" class="slider-row">
+          <span class="slider-label">温度</span>
+          <input
+            type="range" min="-5" max="45" step="0.5"
+            class="rain-slider"
+            :value="simParam(s.id, 'tempC')"
+            :style="tempStyle(s)"
+            @input="onParamSlide(s.id, 'tempC', $event)"
+            @change="commitParams"
+          />
+          <span class="rain-value">{{ simParam(s.id, "tempC").toFixed(1) }}℃</span>
+        </div>
+        <!-- 湿度滑杆：≥ 85% 霉变/受潮，冷链货损与结冰判定用 -->
+        <div v-if="isSimMode" class="slider-row">
+          <span class="slider-label">湿度</span>
+          <input
+            type="range" min="0" max="100" step="1"
+            class="rain-slider"
+            :value="simParam(s.id, 'humidityPct')"
+            :style="humidStyle(s)"
+            @input="onParamSlide(s.id, 'humidityPct', $event)"
+            @change="commitParams"
+          />
+          <span class="rain-value">{{ Math.round(simParam(s.id, "humidityPct")) }}%</span>
+        </div>
+        <!-- 云量滑杆：≥ 70% 与气压/湿度共同构成转雨前兆 -->
+        <div v-if="isSimMode" class="slider-row">
+          <span class="slider-label">云量</span>
+          <input
+            type="range" min="0" max="100" step="1"
+            class="rain-slider"
+            :value="simParam(s.id, 'cloudPct')"
+            :style="cloudStyle(s)"
+            @input="onParamSlide(s.id, 'cloudPct', $event)"
+            @change="commitParams"
+          />
+          <span class="rain-value">{{ Math.round(simParam(s.id, "cloudPct")) }}%</span>
+        </div>
+        <!-- 能见度滑杆（公路侧）：越低越危险，越大越好；与风速联动会推高浪高→水运禁航 -->
+        <div v-if="isSimMode" class="slider-row">
+          <span class="slider-label">能见度</span>
+          <input
+            type="range" min="0" max="10000" step="100"
+            class="rain-slider"
+            :value="simParam(s.id, 'visibilityM')"
+            :style="visStyle(s)"
+            @input="onParamSlide(s.id, 'visibilityM', $event)"
+            @change="commitParams"
+          />
+          <span class="rain-value" :class="{ danger: simParam(s.id, 'visibilityM') < 1000 }">
+            {{ Math.round(simParam(s.id, "visibilityM")) }}m
+          </span>
+        </div>
         <!-- 台风双条件引导：只满足一个时提示还差多少，避免"拖了没反应" -->
         <div v-if="isSimMode && typhoonHint(s)" class="typhoon-hint" :class="{ armed: typhoonArmed(s) }">
           {{ typhoonHint(s) }}
@@ -112,6 +176,15 @@
             {{ s.fused ? s.name + "已熔断" : s.statusText }}
           </div>
           <div class="info-sub">{{ s.boundaryText }}</div>
+          <!-- 天气趋势预警：气压降/湿度升/云量增 命中两项以上→提前 1-2h 转雨预警 -->
+          <div v-if="s.trend && s.trend.triggered" class="trend-banner">{{ s.trend.text }}</div>
+          <!-- 路面综合风险：评分建议 + 命中因子（说清"到底危在哪"） -->
+          <div v-if="s.roadRisk && s.roadRisk.factors && s.roadRisk.factors.length" class="risk-detail">
+            <span class="risk-advice" :style="{ color: riskColor(s.roadRisk.colorKey) }">{{ s.roadRisk.advice }}</span>
+            <ul class="risk-factors">
+              <li v-for="(f, i) in s.roadRisk.factors" :key="i">{{ f }}</li>
+            </ul>
+          </div>
           <div class="info-sub muted">
             边坡：{{ s.slopeSoil }} · 含水量 {{ s.moisturePct }}% · 风险{{ s.riskLevel }}
           </div>
@@ -133,6 +206,23 @@
     <div v-else class="muted empty-hint">
       点击上方「拉取 GOWFS 数据」获取真实气象，或收到推送后拖动滑块观察决策边界。<br />
       不是黑箱，是可交互的决策边界。
+    </div>
+
+    <!-- 货物安全指数（冷链货损）：温度+湿度+延误→货损风险与金额估计 -->
+    <div v-if="pushed && cargoRisk" class="cargo-card" :class="'cargo-' + cargoRisk.colorKey">
+      <div class="section-head">
+        <span class="section-name">货物安全指数·{{ cargoRisk.cargoName }}{{ cargoRisk.coldChain ? "（冷链）" : "" }}</span>
+        <span class="risk-badge" :style="riskBadgeStyle(cargoRisk.colorKey)">
+          货损风险 {{ cargoRisk.score }} · {{ cargoRisk.level }}
+        </span>
+      </div>
+      <div class="cargo-advice" :style="{ color: riskColor(cargoRisk.colorKey) }">{{ cargoRisk.advice }}</div>
+      <ul v-if="cargoRisk.factors && cargoRisk.factors.length" class="risk-factors">
+        <li v-for="(f, i) in cargoRisk.factors" :key="i">{{ f }}</li>
+      </ul>
+      <div v-if="cargoRisk.estimatedLossYuan > 0" class="cargo-loss">
+        预估货损约 <b>￥{{ cargoRisk.estimatedLossYuan.toLocaleString() }}</b>
+      </div>
     </div>
 
     <!-- 水运断面（场景B：双向切换的另一半） -->
@@ -226,6 +316,8 @@ const anyFused = computed(() => sections.value.some((s) => s.fused));
 const water = computed(() => state.value.water);
 const dataSource = computed(() => state.value.dataSource || "演示剧本值（调度员手填）");
 const dataSourceDetail = computed(() => state.value.dataSourceDetail || "");
+/** 全局货损指数（冷链高温/高湿，后端 state.cargoRisk 下发） */
+const cargoRisk = computed(() => state.value.cargoRisk || null);
 const forecastStatus = computed(() => state.value.forecastStatus || null);
 /** 当前降雨是否来自 GOWFS 真实预报（用于配色：真实=绿色，剧本=灰色） */
 const liveRain = computed(() => (state.value.dataSource || "").includes("GOWFS"));
@@ -240,13 +332,37 @@ const isSimMode = computed(() => state.value.mode === "sim");
  */
 const simUnlocked = ref(false);
 
-/** 取某断面的模拟参数值（气压/风速），服务端未下发时用安全初值 */
+/** 断面id → 参数前缀（ygg/mc） */
+function prefixOf(sectionId) {
+  return String(sectionId || "").toUpperCase().startsWith("YGG") ? "ygg" : "mc";
+}
+/** 要素键 → 后端扁平键后缀（与 setSimParams / flatSimParams 一一对应） */
+const SIM_SUFFIX = {
+  rainMm: "RainMm",
+  pressureHpa: "PressureHpa",
+  windKph: "WindKph",
+  tempC: "TempC",
+  humidityPct: "HumidityPct",
+  cloudPct: "CloudPct",
+  visibilityM: "VisibilityM",
+};
+/** 各要素的"什么都不触发"安全初值（服务端未下发时兜底） */
+const SIM_DEFAULT = {
+  rainMm: 0,
+  pressureHpa: 1013,
+  windKph: 20,
+  tempC: 28,
+  humidityPct: 60,
+  cloudPct: 30,
+  visibilityM: 10000,
+};
+
+/** 取某断面的模拟参数值（任意要素），服务端未下发时用安全初值 */
 function simParam(sectionId, key) {
   const p = state.value.simParams;
-  const prefix = String(sectionId || "").toUpperCase().startsWith("YGG") ? "ygg" : "mc";
-  const fullKey = prefix + (key === "pressureHpa" ? "PressureHpa" : "WindKph");
+  const fullKey = prefixOf(sectionId) + (SIM_SUFFIX[key] || key);
   const v = p ? p[fullKey] : undefined;
-  return Number.isFinite(v) ? v : key === "pressureHpa" ? 1013 : 20;
+  return Number.isFinite(v) ? v : SIM_DEFAULT[key] ?? 0;
 }
 
 /** 台风双条件引导：只满足一个时提示还差多少（避免"拖了没反应"） */
@@ -287,6 +403,45 @@ function waterSliderStyle(v, min, max, redline, lowerIsWorse) {
   const near = lowerIsWorse ? v < redline * 1.2 : v > redline * 0.8;
   const color = breach ? "#e11d48" : near ? "#d97706" : "#22a35a";
   return { background: `linear-gradient(to right, ${color} 0%, ${color} ${pct}%, rgba(30,50,90,0.14) ${pct}%, rgba(30,50,90,0.14) 100%)` };
+}
+
+/** 通用渐变条：按百分比 + 颜色渲染滑杆已填充部分 */
+function gradFill(pct, color) {
+  const p = Math.max(0, Math.min(100, pct));
+  return { background: `linear-gradient(to right, ${color} 0%, ${color} ${p}%, rgba(30,50,90,0.14) ${p}%, rgba(30,50,90,0.14) 100%)` };
+}
+/** 温度配色：≤5℃ 结冰蓝 / ≥38℃ 高温红 / ≥30℃ 橙 / 否则绿 */
+function tempStyle(s) {
+  const v = simParam(s.id, "tempC");
+  const color = v <= 5 ? "#2563eb" : v >= 38 ? "#e11d48" : v >= 30 ? "#d97706" : "#22a35a";
+  return gradFill(((v - (-5)) / (45 - (-5))) * 100, color);
+}
+/** 湿度配色：≥85% 霉变橙红 / 否则绿 */
+function humidStyle(s) {
+  const v = simParam(s.id, "humidityPct");
+  const color = v >= 95 ? "#e11d48" : v >= 85 ? "#d97706" : "#22a35a";
+  return gradFill(v, color);
+}
+/** 云量配色：≥70% 转阴倾向橙 / 否则绿 */
+function cloudStyle(s) {
+  const v = simParam(s.id, "cloudPct");
+  const color = v >= 90 ? "#d97706" : v >= 70 ? "#65a30d" : "#22a35a";
+  return gradFill(v, color);
+}
+/** 能见度配色：越低越危险（<500 红 / <1000 橙 / <2000 黄 / 否则绿） */
+function visStyle(s) {
+  const v = simParam(s.id, "visibilityM");
+  const color = v < 500 ? "#e11d48" : v < 1000 ? "#d97706" : v < 2000 ? "#ca8a04" : "#22a35a";
+  return gradFill((v / 10000) * 100, color);
+}
+/** 路面综合评分配色：按 colorKey 取色 */
+const RISK_COLOR = { green: "#16a34a", yellow: "#ca8a04", orange: "#ea580c", red: "#e11d48" };
+function riskColor(colorKey) {
+  return RISK_COLOR[colorKey] || "#16a34a";
+}
+function riskBadgeStyle(colorKey) {
+  const c = riskColor(colorKey);
+  return { color: c, borderColor: c, background: c + "1f" };
 }
 
 /** 官方要素中文名 + 单位（接口变量说明见开发指南 4.1） */
@@ -415,11 +570,10 @@ async function exitSim() {
   }
 }
 
-/** 拖动气压/风速滑杆时本地暂存，松手后提交（与降雨滑杆同样的防抖策略） */
+/** 拖动参数滑杆时本地暂存，松手后提交（与降雨滑杆同样的防抖策略） */
 const pendingParams = ref({});
 function onParamSlide(sectionId, key, ev) {
-  const prefix = String(sectionId || "").toUpperCase().startsWith("YGG") ? "ygg" : "mc";
-  pendingParams.value[prefix + (key === "pressureHpa" ? "PressureHpa" : "WindKph")] = Number(ev.target.value);
+  pendingParams.value[prefixOf(sectionId) + (SIM_SUFFIX[key] || key)] = Number(ev.target.value);
   // 立即回显：不回显的话拖动时数字不动，看起来像卡住
   if (!state.value.simParams) state.value.simParams = {};
   state.value.simParams = { ...state.value.simParams, ...pendingParams.value };
@@ -834,5 +988,76 @@ defineExpose({ refresh });
 }
 .mapping-line b {
   color: #0e9bb0;
+}
+/* 头部多徽章排布 */
+.head-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.risk-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+/* 天气趋势预警条（事前预防） */
+.trend-banner {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  color: #1d4ed8;
+}
+/* 路面综合风险明细 */
+.risk-detail {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(120, 120, 120, 0.25);
+}
+.risk-advice {
+  font-size: 11px;
+  font-weight: 700;
+}
+.risk-factors {
+  margin: 3px 0 0;
+  padding-left: 16px;
+  font-size: 11px;
+  color: #5b6b85;
+  line-height: 1.6;
+}
+/* 货物安全指数卡 */
+.cargo-card {
+  margin-top: 10px;
+  border: 1px solid rgba(30, 50, 90, 0.14);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.6);
+}
+.cargo-card.cargo-red {
+  border-color: rgba(225, 29, 72, 0.5);
+  background: rgba(225, 29, 72, 0.06);
+}
+.cargo-card.cargo-orange {
+  border-color: rgba(234, 88, 12, 0.5);
+  background: rgba(234, 88, 12, 0.06);
+}
+.cargo-advice {
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 4px;
+}
+.cargo-loss {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #b91c1c;
+}
+.cargo-loss b {
+  font-family: var(--mono, monospace);
 }
 </style>

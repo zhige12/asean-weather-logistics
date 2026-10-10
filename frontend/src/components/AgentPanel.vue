@@ -274,8 +274,20 @@
         <div class="block-title">触达智能体 · 角色专属指令（{{ result.outreachPreview?.count || 0 }} 个角色）</div>
         <div class="touch-list">
           <div v-for="t in result.outreachPreview?.targets || []" :key="t.role" class="touch-item">
-            <span class="touch-role">{{ t.name }}</span>
-            <span class="touch-instruction">{{ t.instruction }}</span>
+            <div class="touch-line">
+              <span class="touch-role">{{ t.name }}</span>
+              <span class="touch-instruction">{{ t.instruction }}</span>
+            </div>
+            <div v-if="t.riskTips && t.riskTips.length" class="risk-tips">
+              <span class="risk-tips-label">个性化提示</span>
+              <span
+                v-for="(tip, i) in t.riskTips"
+                :key="i"
+                class="risk-tip"
+                :class="'tip-' + tipLevelKey(tip.level)"
+                :title="tip.vehicle + '：' + tip.text"
+              >{{ tip.vehicle }} · {{ tip.text }}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -463,6 +475,10 @@ function costClass(v) {
 }
 function riskLevelKey(r) {
   return r === "高" ? "high" : r === "中" ? "mid" : "low";
+}
+/** 司机个性化提示等级 -> ASCII 样式键（避免 CJK class 选择器转义问题） */
+function tipLevelKey(level) {
+  return level === "极高" ? "xh" : level === "高" ? "h" : level === "中" ? "m" : "l";
 }
 function fmtNum(v) {
   return v == null ? "-" : Number(v).toLocaleString();
@@ -1005,9 +1021,14 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
 }
 .touch-item {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 4px;
   font-size: 12px;
   line-height: 1.5;
+}
+.touch-line {
+  display: flex;
+  gap: 8px;
 }
 .touch-role {
   flex-shrink: 0;
@@ -1017,6 +1038,40 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
 }
 .touch-instruction {
   color: #5b6b85;
+}
+.risk-tips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-left: 72px;
+}
+.risk-tips-label {
+  font-size: 10px;
+  color: #93a2ba;
+  flex-shrink: 0;
+}
+.risk-tip {
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+.risk-tip.tip-xh {
+  background: rgba(225, 29, 72, 0.12);
+  border-color: rgba(225, 29, 72, 0.35);
+  color: #be123c;
+}
+.risk-tip.tip-h {
+  background: rgba(217, 119, 6, 0.12);
+  border-color: rgba(217, 119, 6, 0.35);
+  color: #b45309;
+}
+.risk-tip.tip-m {
+  background: rgba(234, 179, 8, 0.14);
+  border-color: rgba(202, 138, 4, 0.3);
+  color: #a16207;
 }
 .direction-banner {
   border-radius: 10px;
