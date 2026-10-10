@@ -3842,6 +3842,15 @@ export default {
           // 未接单的普通用户：气象/调度控制不得自动改变其导航路线。
           // 灾害到达时只弹出可绕行路线面板，由司机自行点选是否换线——绝不自动换线。
           if (!this.isTaskAccepted) {
+            const hasRiskNow = !!(data.hazardEdgeIds && data.hazardEdgeIds.length)
+              || !!(data.risks && data.risks.length)
+            if (!hasRiskNow) {
+              // 风险清除：收起可能开着的绕行面板，只提示解除；
+              // 不换线不播报灾害，换线控制权仍在用户手里
+              this.rerouteOptions = []
+              this.showPush('ok', '风险解除', data.advice || '沿线风险已解除，通行条件恢复正常。')
+              return
+            }
             const reason = (data.risks && data.risks.length)
               ? data.risks[data.risks.length - 1].reason
               : '前方路段风险'

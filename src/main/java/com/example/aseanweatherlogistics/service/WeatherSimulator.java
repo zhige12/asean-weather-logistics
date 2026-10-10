@@ -201,6 +201,9 @@ public class WeatherSimulator {
                     manualEdges.remove(eid);
                 }
             }
+            // 清除同样必须立刻通知 agent 重算广播：这里曾直接 return 跳过 fireChange，
+            // 导致快速注入卡片撤销/场景清除后，司机端要等 15s 轮询才恢复路线
+            fireChange();
             return;
         }
         RiskSegment current = riskByEdge.get(scenario.edgeId());
