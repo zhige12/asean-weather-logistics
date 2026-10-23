@@ -48,9 +48,16 @@ public class WebConfig implements WebMvcConfigurer {
                         // 公网演示：裸 IP（含/不含端口、http/https 都放行，兼容 :8080 直连与 :8443 反代）
                         "https://8.138.229.14:*",
                         "http://8.138.229.14:*",
-                        // 域名（ICP 备案生效后走 443 标准端口时无端口 Origin，一并放行）
+                        // 域名：端口必须写通配符。nginx 只对外开了 8443，浏览器 Origin 是
+                        // https://zhi-ning.cn:8443，若只列 https://zhi-ning.cn（无端口）会匹配失败，
+                        // 表现为「用域名打开时拉取 GOWFS / 拖滑块 / 接单算路全部 403 Invalid CORS request，
+                        // 换成裸 IP 又正常」——IP 那条带 :* 所以没事。无端口的写法保留，兼容将来备案生效后走 443。
                         "https://zhi-ning.cn",
-                        "https://www.zhi-ning.cn")
+                        "https://zhi-ning.cn:*",
+                        "https://www.zhi-ning.cn",
+                        "https://www.zhi-ning.cn:*",
+                        "http://zhi-ning.cn:*",
+                        "http://www.zhi-ning.cn:*")
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                 .allowedHeaders("*");
     }
