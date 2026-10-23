@@ -887,9 +887,12 @@ function loadNativeTts() {
   return _nativeTtsPromise
 }
 
-/** 模拟行驶节拍（毫秒）与速度（米/秒，≈90km/h）。按里程平滑推进，避免按折线点跳。 */
+/** 模拟行驶节拍（毫秒）与速度（米/秒）。按里程平滑推进，避免按折线点跳。
+ *  速度 50m/s（180km/h，真实卡车 25m/s 的 2 倍演示速）：比真实速度略快让车标动起来
+ *  有导航感，剩余里程/耗时每分钟仍减 ~3km/3分，分钟位大数字持续可见下降；
+ *  再往上调会显得穿楼悬浮、不像货车在跑。trim 阈值随本速度自动缩放。 */
 const SIM_TICK_MS = 100
-const SIM_SPEED_MPS = 25
+const SIM_SPEED_MPS = 50
 
 // 名称 → ID 反向映射（司机输入中文/越南语名称时自动解析）
 const NAME_TO_ID = {}
@@ -920,6 +923,10 @@ export default {
   name: 'DriverApp',
   data() {
     return {
+      // 换线跳变审计（黑匣子）：watchdog 每 400ms 采样车标/线首，跳变当场 console.warn
+      _auditLastCar: null,
+      _auditLastC0: null,
+      _auditTimer: null,
       route: {},
       weatherPoints: [],
       risks: [],
@@ -958,6 +965,9 @@ export default {
       // 当前运输任务（派单下发的原始对象）
       task: null,
       taskAccepting: false,
+      // 派单到达时后台预取的候选路线快照：{ key: '起点>终点', at, data }。
+      // 司机还在看订单详情页时就把 25 轮算路跑完，点「接单」直接复用，不再等 7~18s
+      _taskCandPrefetch: null,
       // 拒单请求进行中
       taskRejecting: false,
       // 订单详情预览弹层（收到派单后查看货物/起终点/AI 分析，并在此接单或拒单）
@@ -1009,6 +1019,14 @@ export default {
       _simTotalM: 0,
       // 导航中的居中偏移（冻结值，进入导航时重置为 null 以重新量测一次）
       _navCenterOffset: null,
+      // 车标/相机的 60fps 视觉插值状态：数据层仍按 SIM_TICK_MS 推进，rAF 里按时间线性插值绘制。
+      // _visSeg = { a: 本段起点, b: 本段终点, t0: 起始时刻, dur: 时长 }，见 _paintVehicle
+      _visSeg: null,
+      _visRaf: null,
+      _visPos: null,
+      _visEl: null,
+      // 车标旋转层 DOM 缓存（60fps 每帧改 transform，不再 querySelector）
+      _carRotEl: null,
       // 多路线候选（司机自选）
       candidates: [],
       selectedKey: 'recommended',
@@ -1101,6 +1119,9 @@ export default {
       // 灾害即时提示的去重键（当前灾害边集合），避免同一批灾害重复弹窗/播报
       _hazardNotifyKey: '',
       _hazardVoiceAt: 0,
+      // 绕行期间记住「风险真正落在哪条走廊 + 什么灾害」，供风险解除切回原路线时播报
+      // （切回时 this.risks 已清空，reason 拿不到，只能提前快照）
+      _lastHazardBrief: null,
       // 全屏导航菜单
       showNavMenu: false,
       // 首页（高德风格）悬浮搜索框是否展开
@@ -1161,15 +1182,29 @@ export default {
       if (!Number.isNaN(backendEta)) return new Date(backendEta)
       return new Date(Date.now() + this.route.estimatedHours * 3600 * 1000)
     },
-    // 导航中大数字改为「实时速度推算的剩余小时」：起步≈全程计划耗时，之后随实际速度提前/顺延
+    // 导航中大数字改为「实时速度推算的剩余耗时」：起步≈全程计划耗时，之后随实际速度提前/顺延。
+    // 粒度到分钟：0.1h 粒度要 3 分多钟才跳一格，观感就是「不会减少」；分钟位每分钟都在减，
+    // 不足 1 小时时大数字直接切换成分钟数。
     navHoursDisplay() {
       if (this.navigating && this.navRemainHours != null) {
-        return Math.max(0, this.navRemainHours).toFixed(1)
+        const totalMin = Math.max(0, Math.round(this.navRemainHours * 60))
+        return totalMin >= 60 ? String(Math.floor(totalMin / 60)) : String(totalMin)
       }
       return this.route.estimatedHours ? this.route.estimatedHours.toFixed(1) : '--'
     },
+    /** navHoursDisplay 的数值版（供播报与屏幕同源）：无可用数字时返回 null */
+    navHoursDisplayNum() {
+      const h = this.route && this.route.estimatedHours
+      if (!h) return null
+      if (this.navigating && this.navRemainHours != null) return Math.max(0, this.navRemainHours)
+      return Number(h)
+    },
     navEtaUnit() {
-      return this.navigating && this.navRemainHours != null ? '小时后到达' : '小时'
+      if (this.navigating && this.navRemainHours != null) {
+        const totalMin = Math.max(0, Math.round(this.navRemainHours * 60))
+        return totalMin >= 60 ? `小时 ${totalMin % 60}分后到达` : '分钟后到达'
+      }
+      return '小时'
     },
     etaArrival() {
       if (!this.etaDate) return '--'
@@ -1487,6 +1522,29 @@ export default {
     }, 10000)
     // 轮询兜底：15s 一次（SSE 为主通道）
     this.timer = setInterval(this.refreshAll, 15000)
+    // 换线跳变审计 watchdog：用户环境（5173 dev）仍能复现起点跳，但无头端到端复现零跳——
+    // 说明存在未知覆盖入口。这里不靠推理，车标与线首每 400ms 采样一次，
+    // 单步位移 >0.01°（≈1.1km）就 console.warn 现场（含状态标志），配合 _auditSwap 的来源日志定位真凶。
+    this._auditTimer = setInterval(() => {
+      try {
+        const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+        const st = { nav: this.navigating, prev: this.previewing, dp: this._dispatchPreviewPlanId, simKm: Math.round((this._simDistM || 0) / 100) / 10 }
+        if (this._meMarker && this.map) {
+          const p = this._meMarker.getLatLng()
+          const lc = this._auditLastCar
+          if (lc && Math.hypot(p.lat - lc[0], p.lng - lc[1]) > 0.01) {
+            console.warn(`[AUDIT ${ts}] CAR-JUMP Δ≈${(Math.hypot(p.lat - lc[0], p.lng - lc[1]) * 111).toFixed(1)}km`, { from: lc.map(v => Math.round(v * 1e4) / 1e4), to: [Math.round(p.lat * 1e4) / 1e4, Math.round(p.lng * 1e4) / 1e4], ...st })
+          }
+          this._auditLastCar = [p.lat, p.lng]
+        }
+        const c0 = (this.route && this.route.pathCoords && this.route.pathCoords[0]) || null
+        const l0 = this._auditLastC0
+        if (c0 && c0.length >= 2 && l0 && Math.hypot(c0[0] - l0[0], c0[1] - l0[1]) > 0.01) {
+          console.warn(`[AUDIT ${ts}] C0-JUMP Δ≈${(Math.hypot(c0[0] - l0[0], c0[1] - l0[1]) * 111).toFixed(1)}km`, { from: l0.map(v => Math.round(v * 1e4) / 1e4), to: [Math.round(c0[0] * 1e4) / 1e4, Math.round(c0[1] * 1e4) / 1e4], km: this.route.totalDistanceKm, ...st })
+        }
+        this._auditLastC0 = (c0 && c0.length >= 2) ? [c0[0], c0[1]] : null
+      } catch (e) { /* 审计绝不能反伤主流程 */ }
+    }, 400)
     // AI 预警不再自动定时刷新（由用户点击触发，避免文案消失和重复播报）
     // 首页加载即请求定位权限：Android 原生弹窗在 Capacitor 桥下触发，
     // 司机一进 App 就授权，不必等到点「开始导航」。已授权/已永久拒绝时系统不再弹。
@@ -1504,6 +1562,7 @@ export default {
   },
   beforeUnmount() {
     clearInterval(this.timer)
+    if (this._auditTimer) clearInterval(this._auditTimer)
     if (this._rippleHandler) document.removeEventListener('pointerdown', this._rippleHandler)
     if (this._swipeStartHandler) document.removeEventListener('pointerdown', this._swipeStartHandler)
     if (this._swipeMoveHandler) document.removeEventListener('pointermove', this._swipeMoveHandler)
@@ -1814,8 +1873,11 @@ export default {
         this._zoomRedrawRaf = requestAnimationFrame(() => {
           this._zoomRedrawRaf = null
           if (!this.map || !this.route || !this.route.pathCoords) return
-          // zoom 与上次绘制时一致（含抽稀阈值实际生效的整数级）则无需重塑重绘
-          if (this.map.getZoom() === this._routeDrawnZoom) return
+          // reshapeForZoom 只按整数档位（z|0）决定抽稀/加密强度，本图 zoomSnap:0 下
+          // getZoom() 是分数级，与上次绘制值几乎永不相等——旧的全等判断让每次
+          // fitBounds/捏合松手都白白重跑一遍完整 drawRoute（换选候选「卡一阵子」主因）。
+          // 注释原意即「按抽稀实际生效的整数级」比较，代码对齐意图：跨整数档才重塑。
+          if ((this.map.getZoom() | 0) === (this._routeDrawnZoom | 0)) return
           this.drawRoute()
         })
       }
@@ -1885,6 +1947,8 @@ export default {
       this._clearMapHealthChecks()
       if (this._mapRO) { this._mapRO.disconnect(); this._mapRO = null }
       if (this._zoomRedrawRaf) { cancelAnimationFrame(this._zoomRedrawRaf); this._zoomRedrawRaf = null }
+      // 地图要没了：先停 60fps 绘制循环，别让它每帧去碰已销毁的 marker/pane
+      this._stopVisLoop()
       if (this._routeFlow) { this._routeFlow.destroy(); this._routeFlow = null }
       this._riskMarkers = []
       this._meMarker = null
@@ -1985,7 +2049,8 @@ export default {
         this.$nextTick(() => {
           try {
             this._buildMap()
-            this.fitRoute(true)
+            // 硬重建后恢复视角：导航中用 zoomToNav（静默全览已被拦下），预览态仍用 fitRoute
+            if (this.navigating) this.zoomToNav(); else this.fitRoute(true)
           } catch (e) {
             console.error('地图硬重建失败，继续自动恢复', e)
             this._scheduleMapHealthChecks()
@@ -2487,23 +2552,27 @@ export default {
       if (this.map.options.minZoom !== floor) this.map.setMinZoom(floor)
     },
     // 用后端下发的 pathCoords 绘制（司机端不加载 35MB 路网）
-    drawRoute() {
+    drawRoute(opts) {
       if (!this.map || !this.route.pathCoords) return
+      // trimOnly：导航中「剪掉已走过线头」（_trimPassedRoute，每 ~1.6s 一次）触发的重绘。
+      // 此时终点旗帜/后续走廊/风险打点这些「只随整条路线或缩放变化、与线头无关」的图层
+      // 没有任何变化，跳过它们的拆除重建，只更新主线/风险线/特效层几何——配合下面 cur() 的
+      // 双份 reshape 合并，把每次修剪的重绘成本砍到最低，消除「走几秒卡一下」的周期性掉帧。
+      const trimOnly = !!(opts && opts.trimOnly)
       const z = (this.map.getZoom && this.map.getZoom()) || 8
       // 记住本次绘制用的 zoom：moveend 兜底重绘（见 _buildMap 里 redrawOnZoom）据此
       // 判断几何是否已过时，zoom 未变就跳过，避免每次平移都重建整条路线。
       this._routeDrawnZoom = z
-      // 按当前 zoom 把路径几何重新塑形：远景加密（避免直线穿山）、近景抽稀（性能）
-      const cur = reshapeForZoom(this.route.pathCoords || [], z, this.map)
+      // 按当前 zoom 把路径几何重新塑形：远景加密（避免直线穿山）、近景抽稀（性能）。
+      // cur 改惰性求值：只有「整条染红」或「桌面 routeFlow 特效层」才真正用到它，
+      // 手机端安全路线下这两个分支都不走，若无条件计算等于对几千个点白跑一遍
+      // DP 抽稀 + 测地加密 —— 换选/缩放卡顿的主要前端成本，故用到才算且只算一次。
+      let _curCache = null
+      const cur = () => (_curCache || (_curCache = reshapeForZoom(this.route.pathCoords || [], z, this.map)))
       // 未绕行时基准线与当前线重合，baseLine 会被清空 —— 那就没必要塑形。
-      // 原来无条件算一遍再丢弃，而 reshapeForZoom（Douglas-Peucker）在几千个点上并不便宜，
-      // 每次重绘白跑一遍是缩放卡顿的一部分。
       const base = this.route.rerouted
         ? reshapeForZoom(this.route.baselinePathCoords || [], z, this.map)
         : []
-      // 把塑形后的坐标回写，便于缩放/拖动事件复用
-      this._displayCur = cur
-      this._displayBase = base
       this.baseLine.setLatLngs(this.route.rerouted ? base : [])
 
       // 预览阶段候选只有聚合风险（hazardProbability / riskEdgeIds），
@@ -2525,17 +2594,24 @@ export default {
        */
       const lineRisk = previewWhole || riskGroups.length > 0
       // 红色光晕只压在实际受灾那一截上，指出「灾害在这个位置」
-      const riskDraw = previewWhole ? [cur] : riskGroups
+      const riskDraw = previewWhole ? [cur()] : riskGroups
+      // 安全线（无风险边）时 splitRouteByRisk 只产出一段=整条，其塑形结果与 cur() 逐字相同；
+      // 预先把这段塞进 cur 缓存，让下面 routeFlow 不再对整条 pathCoords 白跑第二遍
+      // DP 抽稀 + 折返/回溯尖刺清理——导航每 ~1.6s 修剪一次，这第二遍全量 reshape 正是掉帧主因。
+      if (!lineRisk && groups.length === 1 && groups[0] && !groups[0].risk) _curCache = groups[0].pts
 
       // 底层静态线：作为 Flow 特效之外的兜底，配色与 Flow 保持一致
       const baseWidth = this.navigating ? 7 : 5
       this.routeLine.setStyle({
         color: lineRisk ? '#e53935' : '#1ec95f', weight: baseWidth, opacity: 1, dashArray: null
       })
-      this.routeLine.setLatLngs(lineRisk ? [cur] : groups.filter(g => !g.risk).map(g => g.pts))
+      const linePts = lineRisk ? [cur()] : groups.filter(g => !g.risk).map(g => g.pts)
+      this._routeLinePts = linePts   // 零帧同步钩子：_tetherRouteHead 每 tick 改首点 setLatLngs
+      this.routeLine.setLatLngs(linePts)
       // 风险段：Flow 特效层（markerPane）更高，会把这里细红线整条盖住，
       // 因此用更宽的半透明红色脉冲光晕，让风险段在地图上一眼可辨
       this.riskLine.setStyle({ color: '#e53935', weight: baseWidth + 9, opacity: 0.45, dashArray: null })
+      this._riskLinePts = riskDraw
       this.riskLine.setLatLngs(riskDraw)
       // 风险闪烁：preferCanvas 后折线无 SVG 元素可挂 risk-blink 类名，改 JS opacity 脉冲。
       // 整条受灾时连主线一起闪，比只晃一下光晕更难被当成误触。
@@ -2543,12 +2619,15 @@ export default {
 
       // 前进箭头 + 流动主线（高德风：深描边 + 粗主线 + 白色 V 形前进箭头）
       // 特效层在 markerPane（600）之上，整条同色即可，不必再按段拆（拆了也只会被同色覆盖）
-      if (cur.length > 1) {
+      // 手机端同样保留该样式：用下面 lite + staticArrows 配置——箭头等距静态铺放不起 rAF、
+      // 关 drop-shadow 与流光 CSS，逐帧成本≈0；换线重建的开销也已随 redrawOnZoom
+      // 只按整数档触发而减半，故手机与桌面观感一致（白色 V 形前进箭头）。
+      if (cur().length > 1) {
         // 安全=亮绿+深绿描边；风险=红+暗红描边，与风险卡片/红线语义一致
         const SAFE = '#1ec95f'; const SAFE_CASE = '#0a7a3c'
         const RISK = '#ef4444'; const RISK_CASE = '#8f1d1d'
         const segs = [{
-          latlngs: cur,
+          latlngs: cur(),
           color: lineRisk ? RISK : SAFE,
           casing: lineRisk ? RISK_CASE : SAFE_CASE
         }]
@@ -2569,15 +2648,18 @@ export default {
       }
 
       // 风险段额外加发光标记（采样打点，避免密集几何生成上千个 marker）
-      this._updateRiskMarkers(riskDraw)
+      // 导航修剪重绘跳过：风险打点落在车前方的风险段上，剪线头不会移动它们
+      if (!trimOnly) this._updateRiskMarkers(riskDraw)
 
       // 陆水联运（方案B）：司机公路段到南宁港为止，但后续「运河→海运→越南公路」要提前规划画出来，
       // 让司机在图上看到货物之后的完整去向。仅方案B显示，不参与导航播报与进度计算。
-      this._drawCorridor()
+      // 走廊是固定几何，剪线头不改它——导航修剪重绘跳过
+      if (!trimOnly) this._drawCorridor()
 
       // 起终点装饰（高德风）：终点🚩旗帜标记 + 红色虚线位移直线连接起终点，
       // 预览/导航都随路线重绘（绕行后终点不变，起点随新路线首点更新）
-      this._drawOdDecoration()
+      // 终点旗帜/位移虚线只随整条路线变化，剪线头时跳过（导航中「起」气泡本就不画）
+      if (!trimOnly) this._drawOdDecoration()
     },
     /**
      * 起终点装饰层：路线首点画绿色「起」气泡，末点画红色「🚩终」旗帜 + 目的地名称；
@@ -2606,13 +2688,17 @@ export default {
         pane: 'odPane', color: '#e53935', weight: 2.5, opacity: 0.9,
         dashArray: '10 8', interactive: false
       }).addTo(layer)
-      L.marker(start, {
-        icon: L.divIcon({
-          className: 'od-wrap', html: '<span class="od-bubble od-bubble-start">起</span>',
-          iconSize: [0, 0], iconAnchor: [0, 0]
-        }),
-        interactive: false, keyboard: false
-      }).addTo(layer)
+      // 导航中不画「起」气泡：已走路线被 _trimPassedRoute 实时剪掉，
+      // 线首永远就是车标（融合式导航车标自带起点语义）；预览态照旧
+      if (!this.navigating) {
+        L.marker(start, {
+          icon: L.divIcon({
+            className: 'od-wrap', html: '<span class="od-bubble od-bubble-start">起</span>',
+            iconSize: [0, 0], iconAnchor: [0, 0]
+          }),
+          interactive: false, keyboard: false
+        }).addTo(layer)
+      }
       L.marker(end, {
         icon: L.divIcon({
           className: 'od-wrap',
@@ -2774,6 +2860,13 @@ export default {
     },
     /** 定位到司机当前位置，使用导航三角标（计划书 4.4「显示当前位置」） */
     locateMe() {
+      // 导航/预览/停驶期：车辆位置以路线模拟为准（与 GPS 回调同一守门），按钮退化为
+      // 「回到车辆视角」。否则浏览器定位把车标摆到真实位置（市区湖泊/办公楼），
+      // 下一次轮询/换线拼接就从车位斜着拉几公里弦线穿楼接回路线。
+      if (this.navigating || this.previewing || this.waitHold) {
+        this.zoomToNav()
+        return
+      }
       if (!navigator.geolocation) {
         this.showPush('info', '定位', '当前设备不支持定位功能')
         return
@@ -2783,12 +2876,7 @@ export default {
           const lat = pos.coords.latitude
           const lng = pos.coords.longitude
           if (!this.map) return
-          // 定位即回到导航视角（放大 + 恢复跟随）
-          if (this.navigating) {
-            this.navFollowing = true
-            this.navOffView = false
-          }
-          this.map.setView([lat, lng], this.navigating ? this._navMaxZoom() : 12, { animate: true })
+          this.map.setView([lat, lng], 12, { animate: true })
           this._placeTriMarker(lat, lng)
           this.showPush('success', '定位成功', `当前位置 ${lat.toFixed(3)}, ${lng.toFixed(3)}`)
         },
@@ -2799,32 +2887,212 @@ export default {
     /** 在指定坐标放置导航三角标（类似高德/百度导航的蓝色方向箭头） */
     _placeTriMarker(lat, lng) {
       if (!this.map) return
+      if (!this.map.getPane('carPane')) {
+        const cp = this.map.createPane('carPane')
+        cp.style.zIndex = 640
+      }
       if (this._meMarker) {
         try { this.map.removeLayer(this._meMarker) } catch (e) {}
         this._meMarker = null
       }
       const icon = L.divIcon({
-        className: 'nav-tri-marker',
-        // 「当前位置」标签直接画进图标 HTML，**不用 permanent Tooltip**。
-        // Leaflet 的 Tooltip._updatePosition（DivOverlay 基类）没有 `!this._map` 守卫，
-        // 标记被移除/重建的瞬间它若仍在监听 zoom，setView 派发事件时就会抛
-        // "Cannot read properties of null (reading 'latLngToLayerPoint')"，
-        // 进而中断 Leaflet 的 _resetView → moveend 不触发 → 渲染器 _zoom 变陈旧
-        // → 路线线宽被放大成巨大色块（严重时白屏）。
-        // 图标样式：淡蓝圆形头像（白色人形）+ 下方蓝色针尾，整体带白描边（参照高德定位 pin）。
-        html: '<div class="nav-tri-label">当前位置</div>' +
-          '<div class="gps-pin"><div class="gps-pin-head">' +
-          '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">' +
-          '<path fill="#fff" d="M12 12.2a4.1 4.1 0 1 0 0-8.2 4.1 4.1 0 0 0 0 8.2Zm0 1.9c-3.7 0-6.9 1.9-6.9 4.2V20h13.8v-1.7c0-2.3-3.2-4.2-6.9-4.2Z"/>' +
-          '</svg></div><div class="gps-pin-tail"></div></div>',
-        iconSize: [30, 40],
-        iconAnchor: [15, 34]
+        className: 'nav-tri-marker car-smooth',
+        // 融合式导航车标（参照高德）：罗盘双圈 + 行进方向蓝色扇形光带 + 白底蓝箭头。
+        // 导航中不再另画「起」气泡（_drawOdDecoration 按 navigating 跳过），
+        // 已走路线由 _trimPassedRoute 实时剪短——车标就是移动的起点。
+        // 朝向由 .nav-car-rot 的 transform 实时更新（见 _updateCarBearing，直接改 DOM 不重建图标）。
+        html: '<div class="nav-car">' +
+          '<div class="nav-car-ring"></div><div class="nav-car-ring2"></div>' +
+          // 罗盘方位字：固定在圈上随圈不动（不放进 rot 层），参照高德指南针样式
+          '<div class="nav-car-dir nav-car-dir-n">北</div>' +
+          '<div class="nav-car-dir nav-car-dir-e">东</div>' +
+          '<div class="nav-car-dir nav-car-dir-s">南</div>' +
+          '<div class="nav-car-dir nav-car-dir-w">西</div>' +
+          // 层级自下而上：扇形→箭头，全部放进 rot 层一起转向（无白圆底，箭头自带白描边）
+          '<div class="nav-car-rot"><div class="nav-car-fan"></div>' +
+          '<svg class="nav-car-arrow" viewBox="0 0 24 24" aria-hidden="true">' +
+          '<path fill="#2b6ef3" stroke="#fff" stroke-width="1.5" stroke-linejoin="round" d="M12 3.2 19.4 20 12 16.1 4.6 20Z"/>' +
+          '</svg></div></div>',
+        iconSize: [130, 130],
+        iconAnchor: [65, 65]
       })
       this._meMarker = L.marker([lat, lng], {
         icon,
+        // 独立 carPane（z640）：routeFlow 高亮绿线也画在 markerPane，线头修剪到车标位置后
+        // 会把同 pane 里的箭头/圆圈盖住（实测放大截图：绿线压在箭头/圈上）；
+        // 提层后车标永远全图最顶（高于 markerPane 600、低于 tooltip 650 不挡弹层）
+        pane: 'carPane',
         zIndexOffset: 1000,
         interactive: false
       }).addTo(this.map)
+      // 新 DOM：旋转层缓存与「已关过渡」标记都很随旧元素一起作废
+      this._carRotEl = null
+      this._visEl = null
+      // 落图时车就在这个位置：把插值起点同步为它，避免第一帧从旧位置滑过来
+      this._visPos = [lat, lng]
+      // 落图后立即补一次朝向（新 DOM 默认指北，不补会先竖着再转正）
+      this._updateCarBearing()
+    },
+    /** 当前行驶方位角（度，正北=0 顺时针）：取模拟里程所在线段的方向 */
+    _simBearing() {
+      const coords = this.route && this.route.pathCoords
+      const cum = this._simCum
+      if (!coords || !cum || coords.length < 2 || cum.length !== coords.length) return 0
+      const d = this._simDistM || 0
+      let lo = 0, hi = cum.length - 1
+      while (lo < hi - 1) {
+        const mid = (lo + hi) >> 1
+        if (cum[mid] <= d) lo = mid; else hi = mid
+      }
+      const a = coords[lo], b = coords[hi]
+      if (!a || !b || a.length < 2 || b.length < 2) return 0
+      const y = (b[1] - a[1]) * Math.cos(a[0] * Math.PI / 180)
+      const x = b[0] - a[0]
+      if (!y && !x) return 0
+      return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360
+    },
+    /** 把车标扇形/箭头转到当前行驶方向：直接改 DOM transform，避开逐 tick setIcon 重建 */
+    _updateCarBearing() {
+      try {
+        if (!this._meMarker) return
+        // 60fps 每帧调用：旋转层缓存一次，别每帧穿透查询（元素被重建时 isConnected 自然失效）
+        let rot = this._carRotEl
+        if (!rot || rot.isConnected === false) {
+          const el = this._meMarker.getElement && this._meMarker.getElement()
+          rot = el && el.querySelector && el.querySelector('.nav-car-rot')
+          this._carRotEl = rot || null
+        }
+        if (rot) rot.style.transform = 'rotate(' + this._simBearing().toFixed(1) + 'deg)'
+      } catch (e) { /* 视觉增强，失败不影响导航 */ }
+    },
+    /**
+     * 实时剪短已走过的路线：导航中每前进 ~40m 就把「起点→车当前位置」段从
+     * route 里真实剪掉（coords/edgeIds/spans/nodeIds 同步位移，里程/耗时同步扣减，
+     * 与 _stitchRouteFromCar 截断分支同一套口径），并把模拟里程表归零重建筑——
+     * 视觉上路线头部跟着车标实时消失，车标永远钉在剩余路线的首点（=移动的起点）。
+     * 注意：就地修改 this.route 不换引用，route watcher（deep:false）不会触发，
+     * 必须手动 drawRoute 重绘（内部会连带刷新起终点装饰与风险着色）。
+     */
+    _trimPassedRoute() {
+      if (!this.navigating) return
+      const r = this.route
+      const coords = r && r.pathCoords
+      const cum = this._simCum
+      if (!coords || coords.length < 2 || !cum || cum.length !== coords.length) return
+      const d = this._simDistM || 0
+      // 修剪阈值随模拟速度缩放（保持 ~1.6s 一次全量重绘的节奏，避免提速后重绘风暴）；
+      // 两次修剪之间的视觉尾巴由 tick 里的 _tetherRouteHead 零帧钉在车标上兜底，
+      // 阈值放大不影响「线头贴车标」的观感
+      if (d < SIM_SPEED_MPS * 1.6) return
+      let lo = 0, hi = cum.length - 1
+      while (lo < hi - 1) {
+        const mid = (lo + hi) >> 1
+        if (cum[mid] <= d) lo = mid; else hi = mid
+      }
+      // 接近终点：剩余不足两个点就不剪，避免把线剪空
+      if (hi >= coords.length - 1) return
+      const a = coords[lo], b = coords[hi]
+      const seg = cum[hi] - cum[lo]
+      const f = seg > 0 ? Math.min(1, (d - cum[lo]) / seg) : 0
+      const p = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]
+      const spans = r.pathEdgeSpans || []
+      // 车在 coords[lo]→coords[hi] 段内（二分收敛后 hi=lo+1）：cum[lo]≤d<cum[hi]，
+      // 即 coords[lo] 已驶过、coords[hi] 还在车前方。剩余路线应是 [p, coords[hi], coords[hi+1], ...]
+      // ——只把已过的 coords[lo] 换成车位 p 作新线首点，前方顶点 coords[hi] 必须保留。
+      // 旧写法 coords.slice(hi) 又 newCoords[0]=p 把 coords[hi] 覆盖掉，等于连前方那个转角顶点
+      // 一起丢了，线从 p 直连 coords[hi+1]：coords[hi] 若正好是绕开某街区的拐弯，这条 p→coords[hi+1]
+      // 就是切角的斜弦。车每前进一次修剪就吞掉前方一个转角，表现为「车一直朝折角走、折角却一直
+      // 往前跑，线把角切掉穿进建筑物」。改为前插 p 并保留 coords[hi]（与 _stitchRouteFromCar 截断分支同口径）。
+      let eIdx = spans.findIndex(sp => sp && sp[1] >= hi)
+      if (eIdx < 0) eIdx = 0
+      const newCoords = [p].concat(coords.slice(hi).map(c => [c[0], c[1]]))
+      r.pathCoords = newCoords
+      r.pathEdgeIds = (r.pathEdgeIds || []).slice(eIdx)
+      // 下标位移 shift=hi-1：new[k]=coords[hi+k-1]（k≥1），new[0]=p 落在车当前所在边内；
+      // eIdx 取首个末端到达 coords[hi] 的边（车当前所在边），其 [lo,hi] 段裁后映射为 [0,1]
+      r.pathEdgeSpans = spans.slice(eIdx).map(sp => [Math.max(0, sp[0] - (hi - 1)), sp[1] - (hi - 1)])
+      r.pathNodeIds = (r.pathNodeIds || []).slice(eIdx)
+      this._adjustRouteMetrics(r, -d / 1000)
+      // 里程表归零重建：车就在新线首点，继续从这里往前推进/截断
+      const cum2 = [0]
+      for (let i = 1; i < newCoords.length; i++) cum2.push(cum2[i - 1] + this._distM(newCoords[i - 1], newCoords[i]))
+      this._simCum = cum2
+      this._simTotalM = cum2[cum2.length - 1]
+      this._simDistM = 0
+      this._triIdx = 0
+      // 修剪重绘走轻量路径：主线/风险线/特效层照常更新，跳过终点装饰/走廊/风险打点的拆除重建
+      this.drawRoute({ trimOnly: true })
+    },
+    /**
+     * 零帧同步：每个模拟 tick（100ms）把「已绘制路线图层」的首点直接钉到车当前位置。
+     * 数据层修剪（_trimPassedRoute，40m 一次全量重绘）负责里程/风险/ETA 对齐，
+     * 但两次修剪之间车标连续走、线头不动，高缩放下就是用户看到的「小尾巴」。
+     * 这里只改首点坐标 + setLatLngs 重建 path（不重建图层/不重跑 DP/不重排箭头），
+     * 每 tick 成本微秒级——视觉线头与车标彻底重合，尾巴归零。
+     */
+    _tetherRouteHead(p) {
+      if (!this.navigating) return
+      const head = [p[0], p[1]]
+      /*
+       * 结构不变量（对照未改动过的交付版本：它从不改线首，画出来的每个点都是后端数据点，
+       * 所以永远不会出现「不是路面」的线段）。改线首是唯一会往折线里塞非数据点的动作。
+       * 旧护栏「车到首段线段垂距 ≤25m」有漏洞：轮询换线后首段是「车标→新线第二个顶点」
+       * 的几百米长弦，旧线平行紧贴新线时车到这条弦的垂距天然很小、判据放行，线头被拽到
+       * 路外的车标上，整根首段变成斜穿建筑物的斜弦（用户反馈「车前方一段总是斜着、还会
+       * 穿建筑物」真凶）。新护栏改成「线头只能沿首段滑动」：取车标在首段上的线性插值位置、
+       * 并限制在 [线头, 第二点] 之间——线头永远落在折线上，斜弦在结构上不可能再出现。
+       */
+      const lp = this._routeLinePts
+      const arr = lp && lp[0]
+      let tetherPt = null
+      if (arr && arr.length > 1) {
+        if (this._distM(arr[0], head) <= 200 && this._pointSegDistM(head, arr[0], arr[1]) <= 25) {
+          const cosLat = Math.max(0.2, Math.cos(head[0] * Math.PI / 180))
+          const ax = arr[0][0], ay = arr[0][1] * cosLat
+          const dx = arr[1][0] - ax, dy = arr[1][1] * cosLat - ay
+          const l2 = dx * dx + dy * dy
+          let t = l2 > 0 ? ((head[0] - ax) * dx + (head[1] * cosLat - ay) * dy) / l2 : 0
+          t = t < 0 ? 0 : (t > 1 ? 1 : t)
+          const slid = [ax + dx * t, (ay + dy * t) / cosLat]
+          // 只准沿线前进：滑动点必须比旧线头更靠近第二点（倒退说明车标异常，不拽）
+          if (this._distM(slid, arr[1]) < this._distM(arr[0], arr[1])) tetherPt = slid
+        }
+      } else {
+        const c0 = this.route && this.route.pathCoords && this.route.pathCoords[0]
+        tetherPt = (c0 && this._distM(c0, head) <= 60) ? head : null
+      }
+      if (!tetherPt) return
+      // 高德风主线（routeFlow：描边/光晕/流光/核心 4 层 + 线首脉冲点）
+      try { this._routeFlow && this._routeFlow.tetherHead && this._routeFlow.tetherHead(tetherPt) } catch (e) { /* 特效层异常不影响导航 */ }
+      // 底层兜底线：安全时第一组、风险时整条 cur()，首点都是线首
+      if (arr && arr.length && this.routeLine) {
+        arr[0] = tetherPt
+        this.routeLine.setLatLngs(lp)
+      }
+      // 风险光晕：只有风险段真的从线首起才绑（否则会把中段风险段的起点拽歪）
+      const rp = this._riskLinePts
+      if (rp && rp[0] && rp[0].length && this.riskLine) {
+        const c0 = this.route.pathCoords && this.route.pathCoords[0]
+        if (c0 && this._distM(rp[0][0], c0) < 80) {
+          rp[0][0] = tetherPt
+          this.riskLine.setLatLngs(rp)
+        }
+      }
+    },
+    /** 点 p 到线段 ab 的最短距离（米）：用于判定车标是否真的落在线首那一段路面上 */
+    _pointSegDistM(p, a, b) {
+      // 统一投到局部平面再算：北向=纬度差、东向=经度差×cos(纬度)，
+      // 两个分量都还是「度」，最后整体 ×111320 折成米。
+      // 早期写法在东向分量上先乘了一次 cos、取残差时又除了一次，
+      // 25m 阈值下会偏几米，判据就不可信了。
+      const cosLat = Math.max(0.2, Math.cos(p[0] * Math.PI / 180))
+      const px = p[0], py = p[1] * cosLat
+      const ax = a[0], ay = a[1] * cosLat
+      const dx = b[0] - ax, dy = b[1] * cosLat - ay
+      const len2 = dx * dx + dy * dy
+      let t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0
+      t = t < 0 ? 0 : (t > 1 ? 1 : t)
+      return Math.hypot(px - ax - dx * t, py - ay - dy * t) * 111320
     },
     /** 进首页即弹一次定位授权框（仅请求权限，不启动持续定位；失败/非原生环境静默忽略） */
     async _requestLocationOnLaunch() {
@@ -2877,8 +3145,11 @@ export default {
             const lat = c.latitude
             const lng = c.longitude
             if (typeof lat !== 'number' || typeof lng !== 'number') return
-            // ① 模拟行驶已在跑：车辆位置以路线为准，定位结果不再移动车辆/视野
-            if (this._triTimer) return
+            // ① 车辆位置以路线/模拟为准：模拟在跑、导航中、或调度预览期（_enterDispatchPreview
+            // 先 _stopRealTimeGPS 停了模拟，但 watchPosition 还在推）一律不许定位动车——
+            // 「切换后车标从金湖广场跳到仙葫公园」真凶：预览窗口里真实定位把车标拽到
+            // 电脑实际位置，确认时 _autoStartDispatchNav 又拿这个污染位置当 keepPos 重锚。
+            if (this._triTimer || this.navigating || this.previewing) return
             // ② 停驶等待中：真实定位同样不许动车（车标只能停在等待位置）
             if (this.waitHold) return
             // ③ 模拟没跑时（非导航态）仍做合理性校验，避免代理定位到国外把视野拽走
@@ -2936,8 +3207,9 @@ export default {
           const lat = pos.coords.latitude
           const lng = pos.coords.longitude
           if (typeof lat !== 'number' || typeof lng !== 'number') return
-          // ① 模拟行驶已在跑：车辆位置以路线为准，定位结果不再移动车辆/视野
-          if (this._triTimer) return
+          // ① 同 Capacitor 分支：模拟/导航/预览期定位冻结车标（预览期停模拟后
+          // watchPosition 仍会推送，把车标拽到电脑实际位置——起点大跳真凶）
+          if (this._triTimer || this.navigating || this.previewing) return
           // ② 停驶等待中：真实定位同样不许动车
           if (this.waitHold) return
           // ③ 模拟没跑时（非导航态）仍做合理性校验，避免代理定位到国外把视野拽走
@@ -3028,17 +3300,29 @@ export default {
           p = this._simPointAt(this._simDistM)
         }
         if (p && this.map) {
+          // 车标显示位置吸附到「已绘制的路线线」上：p 是按原始 pathCoords 里程插值得到的，
+          // 而屏幕上那条线是 reshapeForZoom(pathCoords)（抽稀 + 去尖刺后）的结果，二者在
+          // 被简化掉的弯道上会差出几十米——纯模拟行驶没有真实 GPS，车标理应严格压在你看到的
+          // 这条线上，而不是漂在路面外的原始顶点连线上（用户反馈「行驶中途车标偶尔不贴着路线走」）。
+          const dp = this._snapToDrawnLine(p)
           // 车辆标记就地自愈：整图重建（底图降级 / 健康检查硬重建 / 容器失效重建）会走
           // _destroyMap 把 _meMarker 置空、却不停本定时器，导致重建后 if(_meMarker) 恒假、
           // 车标永远画不出来 —— 表现就是「开一会儿 / 缩放拖动一下 GPS 标记就消失了」。
           // 只要发现标记不在当前地图上（null 或已脱离本 map），就用当前里程坐标重新落一枚。
           if (!this._meMarker || this._meMarker._map !== this.map) {
-            this._placeTriMarker(p[0], p[1])
-          } else {
-            this._meMarker.setLatLng(p)
+            this._placeTriMarker(dp[0], dp[1])
           }
-          this._followVehicle(p)
+          // 车标位置 / 朝向 / 相机跟随改由 rAF 里的 _paintVehicle 按时间插值绘制（60fps）：
+          // 旧写法在这里 setLatLng + _centerOn(...,0.6)，而 Leaflet 的 setView 每次都先打断
+          // 上一段缓动再加速重起 → 相机每秒「冲刺-减速」10 次，与车标的线性补间不同步，
+          // 屏幕上车标与底图就是「一帧一帧」。这里只把本段区间交给绘制循环
+          this._setVisSegment(dp)
+          // 零帧同步：线首几何每 tick 钉到车位置，两次数据修剪之间不再有尾巴
+          this._tetherRouteHead(p)
         }
+        // 数据层实时剪短已走过的路线（每 ~40m 一次全量重绘；tick 里的 _tetherRouteHead
+        // 负责两次修剪之间把线首几何零帧钉在车标上，视觉无尾巴）
+        this._trimPassedRoute()
         // 周期把行程进度报给后端：大屏方案生成需要知道车开到哪了，
         // 否则车已开过南宁港还会被推荐"陆水联运=掉头回港口"
         this._reportTripProgress()
@@ -3070,6 +3354,23 @@ export default {
       const a = coords[lo], b = coords[hi]
       return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]
     },
+    /**
+     * 把模拟里程取到的点投影到「已绘制的路线折线」(_routeLinePts) 上。
+     * 绘制线 = reshapeForZoom(pathCoords)，与车所依据的原始 pathCoords 在被抽稀/去尖刺
+     * 的弯道上会有几十米偏差；投影让车标始终压在你实际看到的那条绿线上。投影点超过 60m
+     * 视为绘制线尚未跟上（换线/重绘瞬间），退回原始点，避免吸附到尚未更新的旧线。
+     */
+    _snapToDrawnLine(p) {
+      const lp = this._routeLinePts
+      if (!p || !lp || !lp.length) return p
+      let best = null, bestD = Infinity
+      for (const grp of lp) {
+        if (!grp || grp.length < 2) continue
+        const near = this._nearestOnPolyline(grp, { lat: p[0], lng: p[1] })
+        if (near && near.distM < bestD) { bestD = near.distM; best = near.proj }
+      }
+      return (best && bestD <= 60) ? best : p
+    },
     _stopRealTimeGPS() {
       if (this._gpsCheckTimer) { clearTimeout(this._gpsCheckTimer); this._gpsCheckTimer = null }
       if (this._gpsWatchId != null) {
@@ -3087,6 +3388,7 @@ export default {
     },
     _stopTripSimulation() {
       if (this._triTimer) { clearInterval(this._triTimer); this._triTimer = null }
+      this._stopVisLoop()
     },
     /**
      * 执行调度方案 C「原地等待」：车辆必须真的停下来。
@@ -3173,6 +3475,14 @@ export default {
       // silent=true 用于导航开场自动全览，不算用户接管，保持跟随状态
       if (this.navigating && silent !== true) this._pauseFollow()
       if (!this.map || !this.route.pathCoords || !this.route.pathCoords.length) return
+      // 导航中一律拒绝「静默全览」（开场 fitRoute(true) / 健康检查 _recoverNavMap / resize / 重绘
+      // 兜底触发的 fitRoute(true)）。这些带动画的 fitBounds 会把 zoomToNav 刚拉到的最大跟车级
+      // 又拽回整条路线的概览级（用户反馈「进导航放大到最大 → 往上走一段 → 又自动缩到最小」真凶）。
+      // 关键：不能只在 _navZoomReady 后拦——健康检查 attempt0(250ms) 的 fitRoute(true) 比 zoomToNav
+      // 更早触发，那时 _navZoomReady 仍为 false，只靠 ready 拦不住，且带动画的 fitBounds 会逐帧覆盖
+      // 紧随其后的 setView。导航中跟车视角由 _followVehicle 每 tick 维持、开场由 zoomToNav 定位，
+      // 无需静默全览兜底；用户主动点「全览路线」(silent!==true) 仍照常全览。
+      if (silent === true && this.navigating) return
       // 顶部状态栏仍浮在地图上，按实测高度换算成上留白；预览为上下分栏、面板在地图之外，
       // 底部只需少量余量。路线因此完整落在状态栏以下的可视区里，不会被任何面板压住。
       const topPad = this._topOverlayPadding()
@@ -3297,6 +3607,9 @@ export default {
       if (p) {
         this.navFollowing = true
         this.navOffView = false
+        // 先停掉任何正在进行中的视图动画（开场/健康检查/resize 触发的带动画 fitBounds）：
+        // 否则那帧动画会逐帧覆盖下面这个 setView，把刚拉到的最大跟车级又拽回概览级。
+        try { this.map.stop() } catch (e) { /* 无动画时 stop 可能空转，忽略 */ }
         // 导航视角拉到最大缩放，并以可视区中心对齐车辆 → 路线居中且不被浮层遮挡。
         // 这里**刻意不做动画**：从概览级(z7~8)一步跳到 z19 是 10+ 级，
         // 动画要么被 Leaflet 按阈值跳过、要么会中断进行中的动画，
@@ -3362,11 +3675,84 @@ export default {
       console.info('[prefetch] 导航开场底图 ' + urls.length + ' 张（z' + tileZ + ' ' + def.key + '）已预约进 HTTP 缓存')
       urls.forEach(u => { const im = new Image(); im.decoding = 'async'; im.src = u })
     },
-    /** 车辆位置更新时的跟随（已退出导航或处于自由视角时不打扰地图）*/
+    /** 车辆位置更新时的跟随（真实 GPS 稀疏更新 / 导航点「回到当前位置」）：带缓动的一步平移 */
     _followVehicle(pt) {
       if (!this.map || !this.navigating || !this.navFollowing || !this._navZoomReady) return
       // 保持当前缩放级别（用户可自由放大缩小），只做偏移平移 → 路线稳定居中
       this._centerOn(pt, this.map.getZoom(), 0.6)
+    },
+    /**
+     * 逐帧跟车（60fps 路径）：把相机硬平移到「车标应处的屏幕位置」。
+     *
+     * 为什么不能用 _followVehicle 的 Leaflet 动画：它走 setView({animate:true, duration:0.6})，
+     * 而模拟行驶每 100ms 就换一次目标 —— Leaflet 的 setView 先 _stop() 打断上一段动画，
+     * 再用 ease-out 重起一段 600ms 缓动。于是相机每秒「起步冲刺 + 减速停车」10 次，
+     * 车标（CSS 线性补间）与底图（跟随 pane 位移）的速度曲线完全不同步，
+     * 屏幕上就是「当前位置一帧一帧地蹦」。这里改用 panBy({animate:false})——与用户
+     * 手指拖动地图完全同一条路径（不挂 leaflet-pan-anim、不加任何过渡），
+     * 车标与底图逐帧同位移，恒定 60fps。
+     */
+    _followVehicleFrame(pt) {
+      if (!this.map || !this.navigating || !this.navFollowing || !this._navZoomReady) return
+      const z = this.map.getZoom()
+      const dy = this._visibleCenterOffset()
+      const target = this.map.unproject(this.map.project(L.latLng(pt), z).add([0, dy]), z)
+      const cur = this.map.getCenter()
+      const off = this.map.project(target, z).subtract(this.map.project(cur, z))
+      // 亚像素位移丢弃（panBy 内部也会 round）；差到 1px 以上再平，车标始终贴着中心
+      if (Math.abs(off.x) < 0.5 && Math.abs(off.y) < 0.5) return
+      try { this.map.panBy(off, { animate: false, noMoveStart: true }) } catch (e) { /* 忽略 */ }
+    },
+    /** 记录一个 tick 的插值区间（上一绘制位置 → 本 tick 目标位置），并启动 60fps 绘制循环 */
+    _setVisSegment(pos) {
+      if (!pos) return
+      const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
+      const from = this._visPos || pos
+      this._visSeg = { a: [from[0], from[1]], b: [pos[0], pos[1]], t0: now, dur: SIM_TICK_MS }
+      this._startVisLoop()
+    },
+    _startVisLoop() {
+      if (this._visRaf) return
+      const step = () => {
+        this._visRaf = null
+        if (!this.navigating || !this.map) return
+        this._paintVehicle()
+        this._visRaf = requestAnimationFrame(step)
+      }
+      this._visRaf = requestAnimationFrame(step)
+    },
+    _stopVisLoop() {
+      if (this._visRaf) { cancelAnimationFrame(this._visRaf); this._visRaf = null }
+      this._visSeg = null
+      this._visPos = null
+      // 恢复 CSS 过渡：真实 GPS 那种稀疏更新重新交给 .car-smooth 补间
+      if (this._visEl) {
+        try { this._visEl.style.transition = '' } catch (e) { /* 忽略 */ }
+        this._visEl = null
+      }
+    },
+    /** 60fps 绘制一帧：车标位置 / 朝向 / 相机跟随在同一帧里一起推进（三者绝不错帧） */
+    _paintVehicle() {
+      const seg = this._visSeg
+      const m = this._meMarker
+      if (!seg || !m || m._map !== this.map) return
+      const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
+      let k = seg.dur > 0 ? (now - seg.t0) / seg.dur : 1
+      if (!(k >= 0)) k = 0
+      if (k > 1) k = 1
+      const a = seg.a, b = seg.b
+      const pt = k >= 1 ? [b[0], b[1]] : [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]
+      this._visPos = pt
+      // 60fps 直跟时关掉 .car-smooth 的 120ms 过渡：否则车标恒定滞后相机一个过渡时长，
+      // 相机往前走、车标追不上，相对屏幕就会一直往后掉
+      const el = m.getElement && m.getElement()
+      if (el && this._visEl !== el) {
+        try { el.style.transition = 'none' } catch (e) { /* 忽略 */ }
+        this._visEl = el
+      }
+      m.setLatLng(pt)
+      this._updateCarBearing()
+      this._followVehicleFrame(pt)
     },
     /** 用户手动操作地图（拖动 / 全览 / 查看风险点）后暂停跟随 */
     _pauseFollow() {
@@ -3563,6 +3949,7 @@ export default {
       if (!c) return
       this.selectedMode = 'road'
       this.selectedKey = key
+      this._auditSwap('selectCandidate:' + key)
       this.route = {
         pathCoords: c.coords || [],
         pathEdgeIds: c.edgeIds || [],
@@ -3610,6 +3997,7 @@ export default {
     async _drawCanalPreviewRoute() {
       const cacheKey = `${this.resolvedOriginId}→LJ`
       if (this._canalRoadKey === cacheKey && this._canalRoadRoute) {
+        this._auditSwap('canalPreview-cache')
         this.route = this._canalRoadRoute
         this.$nextTick(() => { this.drawRoute(); this.fitRoute(false) })
         return
@@ -3625,6 +4013,7 @@ export default {
         if (!resp.pathCoords || !resp.pathCoords.length) return
         this._canalRoadKey = cacheKey
         this._canalRoadRoute = resp
+        this._auditSwap('canalPreview-fetch')
         this.route = resp
         this.risks = r.data.risks || this.risks
         this.$nextTick(() => { this.drawRoute(); this.fitRoute(false) })
@@ -3633,6 +4022,7 @@ export default {
         // 旧线上可能经过芒街，卡片已选坐船、地图却画着公路候选，两者自相矛盾。
         // 抹掉后只留虚线走廊与全程 ETA/里程（来自 canalOption），图面与所选方案一致。
         console.warn('canal preview road leg failed', e)
+        this._auditSwap('canalPreview-fail')
         this.route = {
           ...this.route,
           pathCoords: [], pathEdgeIds: [], pathEdgeSpans: [], pathNodeIds: [], riskEdgeIds: [],
@@ -3706,6 +4096,7 @@ export default {
           timeout: 30000
         })
         const resp = plan.data.route || plan.data
+        this._auditSwap('startNavigation')
         this.route = resp
         this.online = true
         // withAi:false 下 aiWarning 为空：保留已有文案不清空，避免预警框闪一下空白；真正的 AI 文案后台补
@@ -3731,6 +4122,9 @@ export default {
         this._applyCoverageZoom()
         // 开启 GPS 实时定位（演示环境 GPS 不可用时自动降级模拟行驶）
         this._startRealTimeGPS()
+        // 与调度确认链路同理：模拟刚按新里程表从头起，先强制刷一次剩余时间再播报，
+        // 避免出发语音拿到 watcher 用旧里程表算出的残留值（与卡牌不一致）
+        this._updateLiveEta(true)
         // 地图已创建后再播导航开始；语音链路任何异常都不能影响地图初始化
         this._announceDepartureSafely()
         // 开场视角：直接落到模拟起点（不再"先全览再放大"，那个开场会让视角显得乱跳）
@@ -3743,15 +4137,17 @@ export default {
           this._navCenterOffset = null
           // 切视角前先“有条件地”拉起遮罩，避免在线瓦片重铺的空窗露成白屏（见 _veilUntilViewPaint）
           this._veilUntilViewPaint()
-          // 保留原来的「先全览 → 再放大到起点跟随」节奏；延迟从 1100ms 缩到 420ms，
-          // 既有放大进入的观感，又不至于让人以为视角在乱跳。
-          this.fitRoute(true)
-          // 大幅视图变化后强制重投影：避免渲染器残留 scale / _bounds 偏差（线被放大成色块）
+          // 开场「直接落到模拟起点」——不再先 fitRoute 全览。
+          // 旧写法在这里先 fitRoute(true)（带动画的整线概览 fitBounds），420ms 后再 zoomToNav 拉最大级，
+          // 但那次带动画的概览会一路覆盖紧随其后的 setView：车刚被放到最大级，就被拽回整条路线的概览级，
+          // 表现即用户反馈的「进导航放大到最大 → 往上走一段 → 又自动缩到最小」（实测 fitRoute/zoomToNav
+          // 在 1.6s 内交错触发 6 次）。跟车视角由 _followVehicle 每 tick 维持、开场由 zoomToNav 定位，
+          // 无需概览兜底；用户主动点「全览路线」仍照常。这里只留一个短延时让 Leaflet 完成 invalidateSize。
           this._resyncMapRenderer()
           this._navZoomTimer = setTimeout(() => {
             this._navZoomTimer = null
             this.zoomToNav()          // 放大到「模拟起点」（路线首点）
-          }, 420)
+          }, 260)
         })
         // 导航开始后自动拉取途径城市天气
         this.loadWeatherForRoute().catch(() => {})
@@ -3774,6 +4170,7 @@ export default {
         try {
           const r = await axios.get('/data/demo-route.json')
           const resp = r.data.route || r.data
+          this._auditSwap('startNavigation-offline-fallback')
           this.route = { ...this.route, ...resp }
           this.navigationStartedAt = Date.now()
           this._mapHardRecovered = false
@@ -3791,7 +4188,9 @@ export default {
           this.showPush('success', '离线导航模式', `已加载演示路线，预计 ${resp.estimatedHours || '--'} 小时`)
           this.$nextTick(() => {
             if (this.map) this.map.invalidateSize()
-            this.fitRoute(true)
+            // 与在线开场一致：直接落到模拟起点（zoomToNav）——导航中静默全览已被 fitRoute 拦下，
+            // 这里不能再靠 fitRoute(true) 定视角。
+            this.zoomToNav()
           })
           return
         } catch (_) {
@@ -3811,11 +4210,31 @@ export default {
       }).catch(() => {})
       // withAi=false：本方法不消费 aiWarning，而 AI 文案要秒级生成，
       // 它同时挂在 15 秒轮询和灾害触发的重取路径上，开着会让路线更新明显滞后。
+      // 快照换线前在跑的路线与车位置：轮询重算的起点是 _navOriginId 吸附到的路网节点，
+      // 稀疏长边下可距车几十公里——不拼接就是一条从节点起画的新线，
+      // 下面 _syncTripProgress 把车吸到最近点=那个节点，表现就是「确认后十几秒起点又大跳」
+      // （调度换线拼好的桥接段会被这次无拼接替换整个抹掉）。
+      const pollPrevCoords = (this.route && this.route.pathCoords) || []
+      const pollPrevEdgeIds = (this.route && this.route.pathEdgeIds) || []
+      const pollPrevSpans = (this.route && this.route.pathEdgeSpans) || []
       const plan = await axios.get('/api/route/plan-with-weather', {
         params: { originId: this._navOriginId(), destinationId: this.resolvedDestinationId, cargoType: 'cold', choice: this.selectedKey, withAi: false },
         timeout: 30000
       })
       const resp = plan.data.route || plan.data
+      // 把轮询新线对齐到车辆当前位置：车在走廊上→就地截断；吸附节点在车前方/后方→沿当前线桥接
+      this._stitchRouteFromCar(resp, this._meMarker ? this._meMarker.getLatLng() : null,
+        pollPrevCoords, pollPrevEdgeIds, pollPrevSpans)
+      // 同线微抖：这次重算的几何就是正在跑的这条线，不替换路线与里程，
+      // 只收风险着色与天气——否则车标每 15s 被重吸附到抖动后的顶点，来回横穿马路
+      if (resp._sameLineKeep) {
+        this.risks = plan.data.risks || this.risks
+        this.online = true
+        // 全域受阻建议与线几何无关，同线保留时照常应用（SSE 断线期间的兜底通道）
+        this._applyCorridorAdvisory(plan.data.advisory)
+        this.loadWeatherForRoute().catch(() => {})
+        return
+      }
       // 接单模式不自动绕路：后端已按注入的风险把这条 O/D 重算成了绕行线（resp.rerouted），
       // 而下面那句 this.route = resp 是无条件采纳的——等于司机没点任何东西、也没收到调度指令，
       // 车就在 15 秒轮询里自己改道了，刚好绕开刚立起来的「等调度」约束。
@@ -3835,6 +4254,7 @@ export default {
         this.loadWeatherForRoute().catch(() => {})
         return
       }
+      this._auditSwap('fetchRoute-poll')
       this.route = resp
       this.online = true
       this.risks = plan.data.risks || this.risks
@@ -3878,6 +4298,7 @@ export default {
       this.canalOption = null
       this.selectedMode = 'road'
       this.viaText = ''
+      this._auditSwap('resetCandidates')
       this.route = {}
       // 起终点变化会让预览容器一起消失，旧地图不能留到下一次复用
       this._destroyMap()
@@ -3949,22 +4370,38 @@ export default {
           if (onBase.length) reason = onBase[onBase.length - 1].reason
         }
         reason = reason || '路段风险'
+        // 快照灾害位置+类型：风险解除切回原路线时（见 _announceRiskCleared）this.risks 已清空，
+        // 只能靠这里存下的简报才能念出「原路线X处Y风险已解除」
+        this._lastHazardBrief = {
+          where: this.inferPortFromNodeIds(r.baselinePathNodeIds || r.pathNodeIds || []),
+          hazard: this.extractHazardKeyword(reason)
+        }
         // 面板可能因「当前已在最优绕行线」被取消（见 loadRerouteOptions），
         // 推送文案不再引导「点选其他方案」，有得选时面板自己会出来
         this.showPush('success', '路线已绕行',
           `${reason}，已切换绕行路线，预计延误 ${r.extraHours}h。请按新路线行驶。`)
-        // 接单导航中不自动弹绕行面板（换线权在调度）；这条绕行线已经生效，
-        // 再挂一个“自己选一条”的面板会与「等调度指令」自相矛盾
-        if (!(this.navigating && this.isTaskAccepted)) this.loadRerouteOptions(reason).catch(() => {})
+        // 接单模式不自动弹绕行面板（换线权在调度，与 SSE route-update 同一 isTaskAccepted 判据）；
+        // 这条绕行线已经生效，再挂一个“自己选一条”的面板会与「等调度指令」自相矛盾
+        if (!this.isTaskAccepted) this.loadRerouteOptions(reason).catch(() => {})
         this.lastRerouted = r.rerouted
+        this.lastRiskCount = segs.length
+        return true
+      }
+      if (!r.rerouted && this.lastRerouted) {
+        // 曾在绕行线上、这次拿到的线不再是绕行线 = 风险已解除并切回原路线：
+        // 播报「原路线X处Y灾害风险已解除」（详见 _announceRiskCleared）
+        this._announceRiskCleared()
+        this.lastRerouted = false
         this.lastRiskCount = segs.length
         return true
       }
       if (segs.length > this.lastRiskCount) {
         // 新增风险（尚未绕行）：两种模式给不同的出口——
         // 普通用户自动弹出绕行方案面板自助点选；接单司机只标红 + 等调度，不弹面板
+        // （判据用 isTaskAccepted 而非 navigating && isTaskAccepted：刚接单、navigating 标志尚未
+        // 置真的窗口里也必须等调度，否则雾/台风会经轮询兜底通道漏出自助换线面板，与 SSE 主通道不一致）
         const reason = segs[segs.length - 1].reason || '前方路段风险'
-        if (this.navigating && this.isTaskAccepted) {
+        if (this.isTaskAccepted) {
           this._markRouteRisky(segs)
           this._armWaitDispatch(reason)
         } else {
@@ -4350,7 +4787,31 @@ export default {
         if (!this.navigating && !this.previewing && task.status !== 'ACCEPTED') {
           this.showOrderDetail = true
         }
+        // 派单到达即后台预取候选：接单时直接复用，把等待从「点接单后」挪到「看订单时」
+        if (!this.navigating && task.status !== 'ACCEPTED') this._prefetchTaskCandidates()
       }
+    },
+    /**
+     * 派单到达时后台预取候选路线（不碰界面状态：只存原始响应）：
+     * 同一起终点 2 分钟内复用；失败静默清空，接单时照常再请求一次。
+     */
+    _prefetchTaskCandidates() {
+      const o = this.resolvedOriginId
+      const d = this.resolvedDestinationId
+      if (!o || !d) return
+      const key = `${o}>${d}`
+      const prev = this._taskCandPrefetch
+      if (prev && prev.key === key && (prev.data || Date.now() - prev.at < 120000)) return
+      // 占位（at=0 且无 data）：重复派单推送不再并发发一次
+      this._taskCandPrefetch = { key, at: 0, data: null }
+      axios.get('/api/route/candidates', {
+        params: { originId: o, destinationId: d, cargoType: 'cold' },
+        timeout: 30000
+      }).then(r => {
+        this._taskCandPrefetch = { key, at: Date.now(), data: (r && r.data) || null }
+      }).catch(() => {
+        this._taskCandPrefetch = null
+      })
     },
     /** 司机确认接单：大屏派单面板实时由"待接单"变为"已接单"，随后按调度选定路线自动进导航 */
     async acceptTask() {
@@ -4399,16 +4860,20 @@ export default {
       if (t.destinationId) this.destinationId = t.destinationId
       this.routeLoading = true
       let canalOpt = null
+      // 派单到达时已在后台预取过（见 _prefetchTaskCandidates）：直接复用，省掉 7~18s 算路
+      const pf = this._taskCandPrefetch
+      const preKey = `${this.resolvedOriginId}>${this.resolvedDestinationId}`
+      const prefetched = (pf && pf.data && pf.key === preKey && Date.now() - pf.at < 120000) ? pf.data : null
       try {
-        const r = await axios.get('/api/route/candidates', {
+        const data = prefetched || (await axios.get('/api/route/candidates', {
           params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, cargoType: 'cold' },
           timeout: 30000
-        })
-        this.candidates = this._mergeCorridorDuplicates((r.data && r.data.candidates) || [])
-        canalOpt = (r.data && r.data.canalOption) || null
+        })).data
+        this.candidates = this._mergeCorridorDuplicates((data && data.candidates) || [])
+        canalOpt = (data && data.canalOption) || null
         // 派单到达时的全域受阻：调度员在大屏已人工确认过一次，这里只把结论告知司机，
         // 不拦住接单（接单与导航链路照旧），司机可随时点卡片上的返回/停靠
-        this._applyCorridorAdvisory(r.data && r.data.advisory)
+        this._applyCorridorAdvisory(data && data.advisory)
       } catch (e) {
         console.error('task route preload failed', e)
       } finally {
@@ -4536,17 +5001,42 @@ export default {
       if (this._dispatchHandling) return
       this._dispatchHandling = true
       const planId = msg && msg.planId
+      // 后端据 sandbox 实际阻断态给出：这次「方案A」是风险解除后切回原路线，而不是新的绕行
+      const cleared = !!(msg && (msg.riskCleared === true || msg.riskCleared === 'true'))
       // 切路线会重算 route/risks，灾害原因必须在切换前先取
       const hazardReason = this.latestHazardReason() || '前方路段出现气象灾害风险'
       const hazardWord = this.extractHazardKeyword(hazardReason)
+      // 越南语播报落到具体灾害词（与 announceHazard 同一张映射表），不能直接念整段中文致灾原因
+      const hazardVN = HAZARD_VN_MAP[hazardWord] || hazardWord
       try {
-        // 1) 震动 + 先播报天气灾害
+        // 1) 震动
         if (navigator.vibrate) navigator.vibrate([200, 100, 200])
-        this.showPush('danger', '⚠ 调度任务变更', '前方气象灾害，调度中心已下发新路线，正在为您切换到预览…')
-        this.pushLog.unshift({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text: '导航中收到调度任务变更，进入路线预览' })
-        if (this.voiceOn) {
-          // force：调度下发的灾害预警同样优先于出发播报（出发信息改由队尾补读）
-          this._interruptAndSpeak([`气象灾害预警。${hazardWord}。调度中心已介入，正在为您重新规划安全路线，请注意屏幕。`], true)
+        if (cleared) {
+          // 风险解除、调度员下发原路线：这是「恢复正常」，绝不能套「气象灾害预警…正在重新规划」那句绕行话术。
+          // 灾害简报优先沿用绕行时的快照；没有就按当前线路走廊 + 现存灾害词补一份（否则切回播报只能兜底成「沿线」）。
+          if (!this._lastHazardBrief) {
+            this._lastHazardBrief = {
+              where: this.inferPortFromNodeIds(this.route && this.route.pathNodeIds),
+              hazard: hazardWord
+            }
+          }
+          // 解除播报统一放到路线切换完成后再念一次（见下方），此处只震动给即时反馈，
+          // 避免「先念解除、随后又被天气播报打断」的重叠吞字
+        } else {
+          // 新风险绕行：快照「哪条走廊、什么灾害」触发了本次改道，供后续解除指令的切回播报点名引用
+          this._lastHazardBrief = {
+            where: this.inferPortFromNodeIds(this.route && this.route.pathNodeIds),
+            hazard: hazardWord
+          }
+          this.showPush('danger', '⚠ 调度任务变更', '前方气象灾害，调度中心已下发新路线，正在为您切换到预览…')
+          this.pushLog.unshift({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), text: '导航中收到调度任务变更，进入路线预览' })
+          if (this.voiceOn) {
+            // force：调度下发的灾害预警同样优先于出发播报（出发信息改由队尾补读）
+            this._interruptAndSpeak([
+              `气象灾害预警。${hazardWord}。调度中心已介入，正在为您重新规划安全路线，请注意屏幕。`,
+              `Cảnh báo thiên tai. ${hazardVN}. Trung tâm điều độ đã can thiệp, đang lên tuyến đường an toàn mới, vui lòng chú ý màn hình。`
+            ], true)
+          }
         }
 
         // C=原地等待：无新路线可预览，保持当前导航，仅弹出确认接收抽屉
@@ -4555,7 +5045,10 @@ export default {
           this.dispatchConfirmCollapsed = false
           this.showDispatchConfirm = true
           if (this.voiceOn) {
-            this.speakQueue([`原路线因${hazardReason}，调度中心建议就近停靠安全区域等待，保持冷链机组运行。请在屏幕上确认接收指令。`])
+            this.speakQueue([
+              `原路线因${hazardWord}，调度中心建议就近停靠安全区域等待，保持冷链机组运行。请在屏幕上确认接收指令。`,
+              `Tuyến đường cũ bị ${hazardVN}. Trung tâm điều độ khuyên dừng xe tại khu vực an toàn gần nhất và chờ, giữ tổ máy lạnh hoạt động. Vui lòng xác nhận lệnh trên màn hình。`
+            ])
           }
           return
         }
@@ -4565,13 +5058,19 @@ export default {
         this._dispatchPreviewPlanId = planId
         this._enterDispatchPreview(planId)
 
-        // 3) 拉取新路线沿线天气后，播报天气情况 + 4) 原路线原因与规划提示
+        // 3) 拉取新路线沿线天气后再播报
         try { await this.loadWeatherForRoute() } catch (e) { /* 忽略：天气缺失不阻断播报 */ }
-        if (this.voiceOn) {
+        if (cleared) {
+          // 切换已完成：一次性播报「原路线X处Y风险已解除，调度中心已为您切换为原路线」
+          this._announceRiskCleared({ viaDispatch: true })
+        } else if (this.voiceOn) {
           const weather = this._buildStatusZh(false)
+          const weatherVi = this._buildStatusVi(false)
           this.speakQueue([
             `已为您切换到调度推荐路线。${weather}`,
-            `原路线因${hazardReason}，正在为您规划最新安全路线，请在屏幕上预览后确认接收。`
+            `原路线因${hazardWord}，正在为您规划最新安全路线，请在屏幕上预览后确认接收。`,
+            `Đã chuyển sang tuyến đường do trung tâm điều độ đề xuất. ${weatherVi}`,
+            `Tuyến đường cũ bị ${hazardVN}, đang lên phương án an toàn mới, vui lòng xem trước và xác nhận trên màn hình。`
           ])
         }
 
@@ -4644,6 +5143,15 @@ export default {
     async _switchNavForPlan(planId) {
       // 落库当前方案：播报/状态卡据此判断是否走平陆运河（水运）
       this.activePlanId = planId
+      // 记录换线前的整条在跑路线与车辆实际位置：后端算路起点只能吸附到路网节点，
+      // 而节点间距可达上百公里——若吸附到车前方的节点，新路线会从车前方起画，
+      // 车标又被 _reanchorCarTo 甩过去，表现就是「切换后起点跳了好多距离」。
+      // 拿到新路线后用 _stitchRouteFromCar 把「车当前位置 → 该起点节点」的当前路线段
+      // 拼到新路线头部，让新线首点严格等于停车位置（起点不再前跳）。
+      const prevRouteCoords = (this.route && this.route.pathCoords) || []
+      const prevRouteEdgeIds = (this.route && this.route.pathEdgeIds) || []
+      const prevRouteSpans = (this.route && this.route.pathEdgeSpans) || []
+      const carPos = this._meMarker ? this._meMarker.getLatLng() : null
       // 首次切方案前记住司机原行程目的地，供 B→A 改派时恢复
       if (!this._planSavedDestination) this._planSavedDestination = this.destinationId
       if (planId === 'C') {
@@ -4676,20 +5184,55 @@ export default {
           }).catch(() => {})
         }
         const plan = await axios.get('/api/route/plan-with-weather', {
-          params: { originId: this.resolvedOriginId, destinationId: this.resolvedDestinationId, cargoType: 'cold', withAi: false },
+          // 调度换线也按「当前位置」重算，与自助换线（fetchRoute/loadRerouteOptions 用 _navOriginId）保持一致：
+          // 此处 navigating 仍为 true（_enterDispatchPreview 尚未把状态切走），_navOriginId 会吸附到车当前所在节点；
+          // 非导航态下它自动回退到行程起点，行为不变。
+          params: { originId: this._navOriginId(), destinationId: this.resolvedDestinationId, cargoType: 'cold', withAi: false },
           timeout: 30000
         })
         // await 返回后 Vue 已刷新 watcher 队列，此时安全解除抑制标志
         this._switchingPlan = false
         const resp = plan.data.route || plan.data
+        // 关键：路线接口 await 期间模拟行驶定时器仍在推进（navigating 要到 _enterDispatchPreview
+        // 才置假），车已沿旧路线向前开了 100~250m（SIM_SPEED 50m/s × 数秒）。若沿用 await 前
+        // 快照的 carPos/prevRoute*，拼出来的新线首点会落在车「后方」——预览期车标就悬在新线之外，
+        // 确认后 _reanchorCarTo 又把车甩回线首、再沿折返桥接段倒回去，表现就是「切到南宁港先离开
+        // 路线乱转一阵、才回到线上」。与 fetchRoute / SSE 拼接同一口径：拼接前重新读取车辆实时
+        // 位置与当前（已被 _trimPassedRoute 修剪过的）旧线几何，让新线首点严格等于此刻车位置。
+        const carPosNow = this._meMarker ? this._meMarker.getLatLng() : carPos
+        const prevCoordsNow = (this.route && this.route.pathCoords) || prevRouteCoords
+        const prevEdgeIdsNow = (this.route && this.route.pathEdgeIds) || prevRouteEdgeIds
+        const prevSpansNow = (this.route && this.route.pathEdgeSpans) || prevRouteSpans
+        // 把新路线起点精确对齐到车辆当前位置（详见 _stitchRouteFromCar）
+        this._stitchRouteFromCar(resp, carPosNow, prevCoordsNow, prevEdgeIdsNow, prevSpansNow)
+        if (resp._sameLineKeep) {
+          // 调度下发的新方案与当前线几何一致（如 A→A 重算）：保留现线几何与剩余里程，
+          // 不让车标重吸附到微抖后的顶点；风险/ETA 等非几何字段照常替换
+          const cur = this.route || {}
+          if (cur.pathCoords && cur.pathCoords.length > 1) {
+            resp.pathCoords = cur.pathCoords
+            resp.pathEdgeIds = cur.pathEdgeIds
+            resp.pathEdgeSpans = cur.pathEdgeSpans
+            resp.pathNodeIds = cur.pathNodeIds
+            resp.totalDistanceKm = cur.totalDistanceKm
+            resp.estimatedHours = cur.estimatedHours
+          }
+        }
+        this._auditSwap('switchNavForPlan-' + planId)
         this.route = resp // watcher 自动重绘地图
         this.risks = plan.data.risks || this.risks
         this.online = true
         this._syncTripProgress()
-        if (resp.pathNodeIds && resp.pathNodeIds.length) {
-          const via = this._viaFromNodes(resp.pathNodeIds)
-          if (via) this.viaText = via
+        // 途经摘要必须跟随新路线重算：换线后上一条走廊文案（如友谊关公路走廊）绝不能残留，
+        // 否则「陆水联运」卡片下面还写着「崇左→凭祥→友谊关」，图文自相矛盾。
+        // B 方案首程是 南宁→六景港 国内段，几乎无中间命名节点，_viaFromNodes 会返回空，
+        // 此时直接用运河走廊文案；A 方案（公路绕行）取绕行线途经节点，取不到则清空而非留旧。
+        let via = (resp.pathNodeIds && resp.pathNodeIds.length) ? this._viaFromNodes(resp.pathNodeIds) : ''
+        if (planId === 'B') {
+          via = (this.canalOption && this.canalOption.via)
+            || '南宁港六景作业区（上船）→ 平陆运河 → 钦州港 → 海防'
         }
+        this.viaText = via
         this.$nextTick(() => { if (this.map && resp.pathCoords) this.fitRoute(false) })
         if (planId === 'B') {
           this.showPush('info', '导航已更新',
@@ -4716,6 +5259,11 @@ export default {
         return
       }
       try {
+        // 换线重绘前先记录车辆当前实际位置：下面 _startRealTimeGPS 会走 _startTripSimulation
+        // 把车标钉到新路线首点 coords[0]、里程归零；调度换线时车若已开到火车东站，
+        // 不能因整图重建就把图标甩回金湖广场（路线走廊 南宁→河内 保持不变是允许的）。
+        // 重建后用这个快照把车标重锚回当前位置（见 _reanchorCarTo）。
+        const keepPos = this._meMarker ? this._meMarker.getLatLng() : null
         this._warmUpSpeech()
         // 选中推荐路线贯穿导航轮询（调度路线即推荐路线）
         this.selectedKey = 'recommended'
@@ -4751,19 +5299,36 @@ export default {
         this.initMap()
         this._applyCoverageZoom()
         this._startRealTimeGPS()
+        // 整图重建 + 从头起模拟会把车标放到新路线首点；这里立刻按换线前的实际位置重锚，
+        // 保证「当前车辆图标」停在火车东站这类已行驶到的点，不跳回金湖广场。
+        if (keepPos) this._reanchorCarTo(keepPos)
+        // 出发播报前强制重算一次剩余时间：navigating 置真时 watcher 的 _updateLiveEta
+        // 用的还是上一程残留的 _simDistM/_simTotalM，而播报紧跟在重锚之后、模拟首个 tick
+        // 的 1s 限流窗口里拿数——念出来的耗时/到达时间是旧值，与卡牌（tick 后刷新）对不上。
+        this._updateLiveEta(true)
         this._announceDepartureSafely()
         this._navZoomReady = false
         this.$nextTick(() => {
           if (this.map) this.map.invalidateSize()
           // 进入导航时重置居中偏移，让本次只重新量测一次（之后导航中冻结，避免漂移）
           this._navCenterOffset = null
-          // 保留原来的「先全览 → 再放大到起点跟随」节奏；延迟 1100ms → 420ms
+          // 保留原来的「先全览 → 再放大跟随」节奏；延迟 1100ms → 420ms
           this.fitRoute(true)
           // 大幅视图变化后强制重投影：避免渲染器残留 scale / _bounds 偏差（线被放大成色块）
           this._resyncMapRenderer()
           this._navZoomTimer = setTimeout(() => {
             this._navZoomTimer = null
-            this.zoomToNav()          // 放大到「模拟起点」（路线首点）
+            if (keepPos && this._meMarker && this.map) {
+              // 开场视角对准车辆当前位置（而非新路线首点 coords[0]）：
+              // 否则相机先飞到金湖广场、再被自动跟随拽回，观感就是图标/视角闪回起点。
+              this._centerOn(this._meMarker.getLatLng(), this._navMaxZoom(), 0, false)
+              this._resyncMapRenderer()
+              this._navZoomReady = true
+              this.navFollowing = true
+              this.navOffView = false
+            } else {
+              this.zoomToNav()          // 无位置快照（首次派单等）时退回放大到「模拟起点」
+            }
           }, 420)
         })
         this.loadWeatherForRoute().catch(() => {})
@@ -4924,6 +5489,15 @@ export default {
     _watchPreviewRisk(data) {
       // 没规划过路线（纯粹停在首页/导航页没选目的地）→ 不打扰
       if (!this.route || !this.route.pathCoords || !this.route.pathCoords.length) return
+      // 调度路线预览期间（方案 B/A 已下发、等司机确认接收）：this.route 是按车位置
+      // 拼接好的调度线，SSE 整线重算一律不得覆盖——风险激活态「确认后起点大跳」的真凶：
+      // 换线注册新 O/D 后后端会广播一条按吸附节点起算的整线，直接覆盖即抹掉桥接段，
+      // 确认时车被钉回节点（风险解除态没有这条广播，所以「解除后换线不跳」）。
+      // 预览期只收风险着色、不改线；确认后由 fetchRoute 轮询按统一口径拼接刷新。
+      if (this.previewing && this._dispatchPreviewPlanId) {
+        if (data.risks) this.risks = data.risks
+        return
+      }
       // 预览已选定坐船：推送的更新路线是公路 O/D 的，不能把上船方案图覆盖回公路线（可能经芒街）；
       // 同时作废上船段缓存，下次点选时按最新风险重拉
       if (this.previewing && this.selectedMode === 'canal') {
@@ -4932,27 +5506,55 @@ export default {
         return
       }
       const hasRisk = !!(data.risks && data.risks.length) || !!(data.hazardEdgeIds && data.hazardEdgeIds.length)
+      // 后端推送的 data.route 是按路网节点起算的整线：调度换线预览期间（navigating 已置 false）
+      // 它会把 _switchNavForPlan 拼好的「车→节点」桥接段整个抹掉，
+      // 确认接收时 _autoStartDispatchNav 把车钉到 coords[0]=起点节点 → 确认后起点大跳。
+      // 应用前先按车辆当前位置拼接/截断对齐（与 fetchRoute 同一口径）。
+      const _stitchIntoRoute = (r) => {
+        const prev = this.route || {}
+        this._stitchRouteFromCar(r, this._meMarker ? this._meMarker.getLatLng() : null,
+          prev.pathCoords || [], prev.pathEdgeIds || [], prev.pathEdgeSpans || [])
+        return r
+      }
       if (hasRisk && data.route && data.route.pathCoords) {
         const reason = (data.risks && data.risks.length ? data.risks[data.risks.length - 1].reason : '') || '沿线出现气象风险'
-        this.route = data.route
+        this._auditSwap('sse-preview-risk-hit')
+        const stitched = _stitchIntoRoute(data.route)
         this.risks = data.risks || []
-        this._syncTripProgress()
+        if (!stitched._sameLineKeep) {
+          this.route = stitched
+          this._syncTripProgress()
+        }
         this.showPush('warning', '⚠ 前方路段风险', `${reason}。您规划的路线已重新计算（绕开风险段），出发前请查看。`)
       } else if (!hasRisk) {
         // 风险清空：静默刷新为常态路线，撤下预警
         if (data.route && data.route.pathCoords) {
-          this.route = data.route
+          this._auditSwap('sse-preview-risk-clear')
+          const stitched = _stitchIntoRoute(data.route)
           this.risks = []
-          this._syncTripProgress()
+          if (!stitched._sameLineKeep) {
+            this.route = stitched
+            this._syncTripProgress()
+          }
         }
       }
     },
     /** 将 Agent 推送的全程重算路线应用到当前导航（回退逻辑） */
     _applyAgentRoute(data) {
-      this.route = data.route
-      this.risks = data.risks || []
-      this.online = true
-      this._syncTripProgress()
+      this._auditSwap('applyAgentRoute')
+      // 与轮询/SSE 同一口径：外部整线一律先对齐到车辆当前位置再采纳。
+      // 不拼接就是一条从路网节点起算的新线，线头可能离车几十公里，
+      // 下一帧 tether 把它拽到车标上就是一条横穿城区的斜弦（穿楼/穿湖）
+      this._alignIncomingRoute(data.route)
+      if (data.route && data.route._sameLineKeep) {
+        this.risks = data.risks || this.risks
+        this.online = true
+      } else {
+        this.route = data.route
+        this.risks = data.risks || []
+        this.online = true
+        this._syncTripProgress()
+      }
       const pushed = this.checkPush(data.route)
       // 刚在 SSE 入口提示过「前方灾害」，此处不要再用较弱的「Agent 实时更新」把它盖掉
       const justNotified = this._hazardNotifiedAt && (Date.now() - this._hazardNotifiedAt) < 8000
@@ -4985,15 +5587,48 @@ export default {
         this._simDistM = Math.min(this._simDistM || 0, this._simTotalM)
         return
       }
-      let minDist = Infinity
-      let minIdx = 0
-      for (let i = 0; i < coords.length; i++) {
-        const c = coords[i]
-        const d = Math.hypot(c[0] - pos.lat, c[1] - pos.lng)
-        if (d < minDist) { minDist = d; minIdx = i }
+      // 吸附到**垂足**而非最近顶点：稀疏长边（顶点间距可达几公里）下按顶点吸附，
+      // 车标会沿线方向一次跳掉半条边；更糟的是线头仍停在原处，从这一帧起
+      // _tetherRouteHead 会把绘线首点硬拽到车标，画出一条横跨几公里的斜弦——
+      // 用户看到的「有时不按路线走、直接穿过建筑物」就是它。
+      const near = this._nearestOnPolyline(coords, pos)
+      this._triIdx = near.idx
+      const segM = this._distM(coords[near.idx], coords[Math.min(near.idx + 1, coords.length - 1)])
+      this._simDistM = (cum[near.idx] || 0) + near.t * segM
+      // 线头与车标只要还错着位就当场剪齐（不等 40m 修剪阈值）：剪完后 coords[0]
+      // 严格等于车位置，任何一帧都不再有可能被拽成斜弦的线首
+      if (this._simDistM > SIM_SPEED_MPS * 1.6) {
+        if (this._meMarker && this._meMarker._map === this.map) this._meMarker.setLatLng(near.proj)
+        this._trimPassedRoute()
       }
-      this._triIdx = minIdx
-      this._simDistM = cum[minIdx] || 0
+    },
+    /**
+     * 换线/整图重建后把车辆图标与模拟里程**重锚到给定位置**（而非新路线首点）。
+     * 用于调度换线：路线走廊可以整体不变（南宁→河内），但代表当前位置的车标不能因为
+     * 整图重建 + _startTripSimulation 从头起，就被甩回路线起点（金湖广场）。
+     * 取新路线上离 pos 最近的点作为当前里程，车标落在那里，模拟从此续跑。
+     */
+    _reanchorCarTo(pos) {
+      const coords = this.route && this.route.pathCoords
+      if (!coords || coords.length < 2 || !pos) return
+      // 里程表须已由 _startTripSimulation 建好；缺失就地重建，保证 _simPointAt 能取点
+      if (!this._simCum || this._simCum.length !== coords.length) {
+        const cum = [0]
+        for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + this._distM(coords[i - 1], coords[i]))
+        this._simCum = cum
+        this._simTotalM = cum[cum.length - 1]
+      }
+      // 同 _syncTripProgress：按垂足而非最近顶点重锚，避免稀疏长边下整段跳点
+      const near = this._nearestOnPolyline(coords, pos)
+      this._triIdx = near.idx
+      const segM = this._distM(coords[near.idx], coords[Math.min(near.idx + 1, coords.length - 1)])
+      this._simDistM = (this._simCum[near.idx] || 0) + near.t * segM
+      const p = this._simPointAt(this._simDistM) || near.proj
+      if (this._meMarker && this._meMarker._map === this.map) this._meMarker.setLatLng(p)
+      else this._placeTriMarker(p[0], p[1])
+      // 车停在路线中段（调度换线、整图重建恢复）时把已走过的线头剪掉：
+      // 留着它，下一帧 tether 就会把线首拽到车标上、拉出一条穿楼斜弦
+      if (this._simDistM > SIM_SPEED_MPS * 1.6) this._trimPassedRoute()
     },
     /** 尝试用当前 GPS 位置做局部绕行，只替换灾害段 */
     async _tryDetour(data) {
@@ -5016,10 +5651,18 @@ export default {
         return
       }
       const detour = r.data.route
-      this.route = detour
-      this.risks = r.data.risks || data.risks || []
-      this.online = true
-      this._syncTripProgress()
+      this._auditSwap('tryDetour')
+      // 局部绕行线同样从灾害段两端节点起算，采纳前先拼回车当前位置
+      this._alignIncomingRoute(detour)
+      if (detour._sameLineKeep) {
+        this.risks = r.data.risks || data.risks || this.risks
+        this.online = true
+      } else {
+        this.route = detour
+        this.risks = r.data.risks || data.risks || []
+        this.online = true
+        this._syncTripProgress()
+      }
       const delayInfo = detour.extraHours > 0 ? '（延误 ' + detour.extraHours.toFixed(1) + 'h）' : ''
       const ts = new Date(data.ts || Date.now()).toLocaleTimeString('zh-CN', { hour12: false })
       // 类型必须是 CSS 里定义过的（info/success/warn/danger）；
@@ -5055,17 +5698,27 @@ export default {
       return Math.max(0, Math.min(1, cum[minIdx] / total))
     },
     /**
-     * 导航中且已有“当前位置”标记时，返回车辆当前所在的路网节点作为算路起点，
-     * 让绕行/重算从当前位置起画，而不是从行程起点重画整条线（A 方案）。
-     * 非导航 / 无定位 / 无路径节点时，回退行程起点 resolvedOriginId。
+     * 已有“当前位置”标记且当前路线有节点时，返回车辆当前所在的路网节点作为算路起点，
+     * 让绕行/重算/换线从当前位置起画，而不是从行程起点重画整条线（A 方案）。
+     * 无定位标记 / 无路径节点时，回退行程起点 resolvedOriginId。
+     * （不再以 navigating 为闸门：调度换线确认时 navigating 已被预览态置 false，
+     * 若仍按 navigating 判据会误回退到出发地，配合 _switchNavForPlan 的起点拼接使用。）
      */
     _navOriginId() {
-      if (!this.navigating) return this.resolvedOriginId
+      // 只要「有车标 + 有路径节点」就按车辆当前位置吸附算路起点，不再要求 navigating===true：
+      // 调度换线的确认链路里 navigating 会被 _enterDispatchPreview 提前置 false，
+      // 若仍按 navigating 判据就会回退到行程出发地（resolvedOriginId），
+      // 导致从任务页确认 / 异常兜底后确认时，换线起点整条跳回最初出发地。
       const pos = this._meMarker ? this._meMarker.getLatLng() : null
       const nodes = this.route && this.route.pathNodeIds
       if (!pos || !nodes || nodes.length < 2) return this.resolvedOriginId
       // 用 pathEdgeSpans 把车标吸附到**当前所在的边**（spans[i] 是第 i 条边在 pathCoords
-      // 中的下标区间），边 i 的起点节点 nodes[i] 就是算路起点。
+      // 中的下标区间）。边 i 连接 nodes[i]→nodes[i+1]：算路起点取这条边的**哪个端点，
+      // 由车离哪个端点更近决定**，不能无条件取前方 nodes[i+1]：
+      // · 车已走到边终点（火车东站）时取终点 —— 不能退回已走过的起点（金湖广场）；
+      // · 车刚从边起点出发（在南宁刚点开始导航）时取起点 —— 否则南宁→崇左这种
+      //   上百公里的长边会把算路起点整个推到下一个节点，15s 轮询重算后
+      //   _syncTripProgress 把车标吸附到新路线起点，表现为「车标突然跳到崇左」。
       // 老实现把进度比例按点数折算到节点列表 —— 节点间距极不均匀
       // （南宁→芒街一条边就几百公里），刚跑一点起点就会被吸附到远处的口岸，
       // 表现为路线「一下子跳到芒街」。
@@ -5082,7 +5735,16 @@ export default {
         }
         for (let i = 0; i < spans.length; i++) {
           const sp = spans[i]
-          if (sp && m >= sp[0] && m <= sp[1]) return nodes[Math.min(i, nodes.length - 2)]
+          // 车落在边 i 内 → 比较车到边两端坐标的距离，就近取 nodes[i] 或 nodes[i+1]；
+          // 上限 nodes.length-2 保证临到终点仍保留至少一条边
+          if (sp && m >= sp[0] && m <= sp[1]) {
+            const a = coords[sp[0]]
+            const b = coords[Math.min(sp[1], coords.length - 1)]
+            const dA = a && a.length >= 2 ? Math.hypot(a[0] - pos.lat, a[1] - pos.lng) : Infinity
+            const dB = b && b.length >= 2 ? Math.hypot(b[0] - pos.lat, b[1] - pos.lng) : Infinity
+            const idx = dB < dA ? i + 1 : i
+            return nodes[Math.min(idx, nodes.length - 2)]
+          }
         }
         // 车在最后一条边终点之后（临到终点）：取倒数第二个节点，留一条边的余量
         return nodes[Math.min(spans.length, nodes.length - 2)]
@@ -5091,8 +5753,257 @@ export default {
       const idx = Math.min(nodes.length - 2, Math.max(0, Math.round(ratio * (nodes.length - 1))))
       return nodes[idx] || this.resolvedOriginId
     },
+    /**
+     * 调度换线时把新路线的起点精确对齐到车辆当前位置。
+     *
+     * 后端 Dijkstra 只能从路网节点起算，而节点间距可达上百公里：_navOriginId 吸附到的
+     * 起点节点可能在车前方几十公里，直接用它会让新路线从车前方起画、车标被 _reanchorCarTo
+     * 一起拽过去（表现为「切换后起点跳了好多距离」）。这里把「车辆当前位置 → 该起点节点」
+     * 这一段**当前正在跑的路线**（起点节点本就取自当前路线，所以这段真实存在）拼到新路线头部，
+     * 让新线首点严格等于车当前位置；新路线各边的 spans 按拼接长度整体位移，保持风险着色对齐。
+     */
+    /**
+     * 点到折线的最近位置：逐段算投影（经纬度按 cos(lat) 折算成近似米平面），
+     * 返回 { idx: 所在线段起点下标, t: 线段参数[0,1], proj: 垂足坐标, distM: 垂距米 }。
+     * 拼接/截断判「车在不在走廊上」必须用垂距：顶点距离受稀疏路网间距支配，会误判。
+     */
+    _nearestOnPolyline(coords, pos) {
+      let best = { idx: 0, t: 0, proj: [coords[0][0], coords[0][1]], distM: Infinity }
+      const cosLat = Math.cos(pos.lat * Math.PI / 180)
+      for (let i = 0; i + 1 < coords.length; i++) {
+        const a = coords[i], b = coords[i + 1]
+        if (!a || !b || a.length < 2 || b.length < 2) continue
+        const dx = b[0] - a[0]
+        const dy = (b[1] - a[1]) * cosLat
+        const len2 = dx * dx + dy * dy
+        let t = len2 > 0 ? ((pos.lat - a[0]) * dx + (pos.lng - a[1]) * cosLat * dy) / len2 : 0
+        t = t < 0 ? 0 : (t > 1 ? 1 : t)
+        const px = a[0] + dx * t
+        const py = a[1] + (b[1] - a[1]) * t
+        const d = Math.hypot(px - pos.lat, (py - pos.lng) * cosLat) * 111320
+        if (d < best.distM) best = { idx: i, t, proj: [px, py], distM: d }
+      }
+      return best
+    },
+    /**
+     * 新线是否只是「同一条线的重算微抖」：当前线均匀采样 ≤25 个点算到新线的垂距，
+     * 平均 <30m 视为同一走廊。真换线（不同走廊/改目的地）垂距是公里级，不会误判；
+     * 新线比现线短（目的地变了）时现线尾部点垂距大，同样不会误判。
+     */
+    _isSameLineRewash(newCoords, prevCoords) {
+      if (!newCoords || !prevCoords || prevCoords.length < 4) return false
+      const step = Math.max(1, Math.floor(prevCoords.length / 25))
+      let sum = 0, cnt = 0
+      for (let i = 0; i < prevCoords.length; i += step) {
+        const c = prevCoords[i]
+        if (!c || c.length < 2) continue
+        sum += this._nearestOnPolyline(newCoords, { lat: c[0], lng: c[1] }).distM
+        cnt++
+      }
+      return cnt > 0 && sum / cnt < 30
+    },
+    /**
+     * 采纳任何外部整线（Agent 重算 / 局部绕行）前的统一对齐入口：
+     * 与 fetchRoute / SSE / 调度换线走同一套拼接口径，把线头钉到车辆当前位置。
+     */
+    _alignIncomingRoute(r) {
+      if (!r || !r.pathCoords) return r
+      const prev = this.route || {}
+      this._stitchRouteFromCar(r, this._meMarker ? this._meMarker.getLatLng() : null,
+        prev.pathCoords || [], prev.pathEdgeIds || [], prev.pathEdgeSpans || [])
+      return r
+    },
+    _stitchRouteFromCar(resp, carPos, prevCoords, prevEdgeIds, prevSpans) {
+      const newCoords = resp && resp.pathCoords
+      if (!carPos || !newCoords || newCoords.length < 2 || !prevCoords || prevCoords.length < 2) return
+      // —— 先判「车已经在新走廊上」：15s 轮询重算最常见的形态 ——
+      // 判据用「车到最近线段的垂距」而非「到最近顶点的距离」：城区路网顶点间距可达
+      // 几百米～几公里，按顶点判会把「车离新线还差半条街」的换线误判成已在走廊上，
+      // 截断后「车→远处顶点」一段直线穿楼（用户反馈「改路线后直接穿房子」根因）；
+      // 垂距 ≤150m 才算在走廊上，截断点取垂足投影——车先短距汇入道路再沿路走；
+      // 垂距更大则落到下面的桥接分支，沿旧路线（本就贴路）接到新线起点节点。
+      const near = this._nearestOnPolyline(newCoords, carPos)
+      const onIdx = near.t < 0.02 ? near.idx : near.idx + 1
+      if (near.distM < 150) {
+        // 同线微抖识别：同一 O/D 重算的新线几何相对当前线只有米级抖动（插值/平行边
+        // 选择差异），照单全收会让车标每 15s 被重吸附到抖动后的顶点——表现就是
+        // 「车标有时横穿马路、不停变化」。命中则打标返回，调用方保留现线只收风险。
+        if (this._isSameLineRewash(newCoords, prevCoords)) {
+          resp._sameLineKeep = true
+          return
+        }
+        // 车已贴到新线尽头（到达附近）：没有可续画的剩余走廊，保持原线不动
+        if (onIdx >= newCoords.length - 1) return
+        const spans = resp.pathEdgeSpans || []
+        const car = [carPos.lat, carPos.lng]
+        // 城市峡谷 GPS 漂移可达百米级：把车原始位置塞进折线首点，「车→垂足」就是一根
+        // 随每次轮询漂移变向的斜弦，正穿车前方那个街区（用户反馈「快到的一段一直在变、
+        // 斜穿建筑物」根因；精度圈大图即 GPS 漂移的直接证据）。漂移 >30m 时线头改从
+        // 垂足起画（垂足在真实路面上），车标自己漂在路外；≤30m 直连肉眼不可见，
+        // 「线头贴车」的观感保留
+        const tetherCar = near.distM <= 30
+        // 新下标 = 原下标 - shift：必须按「实际丢了多少原点、又前插了几个非数据点」算，
+        // 不能直接减 onIdx——垂足在段内时前插了「车标 + 垂足」两个点，而丢掉的只有
+        // idx 之前的点，两种分支的下标位移量不同，写死会让整张边区间表错 1~2 格
+        //（风险着色打偏、线尾少画一截）。
+        const interior = near.t > 0.02 && near.t < 0.98
+        const firstOld = interior ? near.idx + 1 : onIdx
+        const pre = (interior ? 2 : 1) - (tetherCar ? 0 : 1)
+        const shift = firstOld - pre
+        // 截断点所在边：第一个「末点仍在保留区内」的 span；之前的整边全部丢弃
+        let eIdx = spans.findIndex(sp => sp && sp[1] >= firstOld)
+        if (eIdx < 0) eIdx = 0
+        // 垂足在线段内部（t 在 0.02～0.98）才插投影点；靠近两端时直接用顶点，
+        // 避免在共线处塞一个几乎重合的冗余点
+        const head = tetherCar ? [car] : []
+        const trimmed = interior
+          ? head.concat([near.proj], newCoords.slice(near.idx + 1).map(c => [c[0], c[1]]))
+          : head.concat(newCoords.slice(onIdx).map(c => [c[0], c[1]]))
+        let removedM = 0
+        for (let i = 1; i <= near.idx; i++) removedM += this._distM(newCoords[i - 1], newCoords[i])
+        // 精确到垂足：车在线段中间（稀疏长边可达几十公里）时只扣到投影位置，
+        // 按整段顶点扣会把里程/ETA 错杀半条边
+        removedM += near.t * this._distM(newCoords[near.idx], newCoords[near.idx + 1])
+        resp.pathCoords = trimmed
+        resp.pathEdgeIds = (resp.pathEdgeIds || []).slice(eIdx)
+        resp.pathEdgeSpans = spans.slice(eIdx).map(sp => [Math.max(0, sp[0] - shift), sp[1] - shift])
+        // 节点表与边表对齐：nodes[i] 是边 i 的起点，丢弃截断点之前的整段节点
+        resp.pathNodeIds = (resp.pathNodeIds || []).slice(eIdx)
+        this._adjustRouteMetrics(resp, -removedM / 1000)
+        return
+      }
+      // 车在「换线前当前路线」上的最近**垂足**（而非最近顶点）：车标本就由折线插值得到、
+      // 永远在线段中间，稀疏长边（顶点间距可达几公里）下「车→最近顶点」是一段斜穿城区的
+      // 弦线——用户反馈「有时不按路线走直接穿建筑物」的残余来源。从所在线段的下一顶点起
+      // 沿顶点序推进，桥接段首尾都与现线共线，弦线彻底退化。
+      const carNear = this._nearestOnPolyline(prevCoords, carPos)
+      // 兜底：车位置偏离当前路线 >300m（被定位按钮/异常链路拖出线外）时，桥接起点
+      // 改用现线上的垂足——否则「车位→路线」首段就是公里级斜弦穿楼，顺手把车标吸回线
+      if (carNear.distM > 300) {
+        carPos = { lat: carNear.proj[0], lng: carNear.proj[1] }
+        if (this._meMarker) { try { this._meMarker.setLatLng([carPos.lat, carPos.lng]) } catch (e) { /* 标记已脱离地图时忽略 */ } }
+      }
+      // 与截断分支同一口径：GPS 漂移 >30m 时桥接首点从垂足起画，不把车原始位置
+      // 画成斜弦；≤30m 直连与路面共线，肉眼不可见
+      const carOnLine = this._distM([carPos.lat, carPos.lng], carNear.proj) <= 30
+      const bridgeHead = carOnLine ? [carPos.lat, carPos.lng] : carNear.proj
+      const nodeNear = this._nearestOnPolyline(prevCoords, { lat: newCoords[0][0], lng: newCoords[0][1] })
+      const carIdx = carNear.idx
+      const nodeIdx = nodeNear.idx
+      const P = (i) => [prevCoords[i][0], prevCoords[i][1]]
+      // 新路线起点节点也在当前线上（垂距很小）：沿现线接到节点的垂足，全程贴路
+      const onLineNode = nodeNear.distM < 300
+      // 把「车当前位置」沿当前路线接到「新路线起点节点」，让拼接后首点严格等于车位置。
+      // 两种方向都要拼，绝不能只拼前方（这是「确认后起点大跳」反复复发的真正根因）：
+      // · 节点在车前方：正向从所在线段下一顶点起取到节点（车继续往前开到该节点再走新走廊）；
+      // · 节点在车后方：从所在顶点往回退到节点方向（换线目的地在已走过的方向，
+      //   如车已开过南宁往崇左、却要改去六景港，必须先折回南宁）；
+      // · 同段：车→节点垂足本就共线，直连即可。
+      let bridge
+      if (onLineNode) {
+        bridge = [bridgeHead]
+        if (nodeIdx >= carIdx) {
+          for (let i = carIdx + 1; i <= nodeIdx; i++) bridge.push(P(i))
+        } else {
+          for (let i = carIdx; i >= nodeIdx + 1; i--) bridge.push(P(i))
+        }
+        bridge.push(nodeNear.proj)
+      } else {
+        // 节点离开当前走廊（真换线/改目的地）：维持顶点级就近桥接，
+        // 尾段「最近顶点→节点」存在短弦线，这是无真实路面算路时的极限
+        let nodeIdxV = carIdx; let nodeBest = Infinity
+        for (let i = 0; i < prevCoords.length; i++) {
+          const c = prevCoords[i]
+          if (!c || c.length < 2) continue
+          const d = Math.hypot(c[0] - newCoords[0][0], c[1] - newCoords[0][1])
+          if (d < nodeBest) { nodeBest = d; nodeIdxV = i }
+        }
+        if (nodeIdxV > carIdx) {
+          // 前方：从车位（或垂足）沿所在线段共线推进到 P(carIdx+1)，再逐顶点到节点
+          bridge = [bridgeHead].concat(prevCoords.slice(carIdx + 1, nodeIdxV + 1).map(c => [c[0], c[1]]))
+        } else if (nodeIdxV < carIdx) {
+          // 后方：先共线退回本段起点顶点 P(carIdx)（不能拿车位直接替换它，否则
+          // 车位→上一顶点整段长度的斜弦穿楼），再逐顶点退到节点
+          bridge = [bridgeHead, P(carIdx)]
+            .concat(prevCoords.slice(nodeIdxV, carIdx).map(c => [c[0], c[1]]).reverse())
+        } else {
+          // 同段：车与节点本就在同一线段上共线；GPS 漂移过大时保持节点起点不动，
+          // 不把新线起点替换成路外的车原始位置
+          if (carOnLine) newCoords[0] = bridgeHead
+          return
+        }
+      }
+      if (bridge.length < 2) return
+      const offset = bridge.length - 1
+      // 桥接段沿用「车当前所在的边」的 edgeId（未换线前这段本就是这条边，通常安全）
+      let bridgeEdgeId
+      if (prevSpans && prevSpans.length && prevEdgeIds && prevEdgeIds.length) {
+        bridgeEdgeId = prevEdgeIds[this._edgeIdxAtCoord(prevSpans, carIdx)] || prevEdgeIds[0]
+      }
+      if (!bridgeEdgeId) bridgeEdgeId = `stitch-${carIdx}`
+      // 原新坐标索引 i(>=1) → 拼接后 i+offset；索引 0（节点，与桥接段末点重合）被丢弃
+      const shiftSpan = (sp) => {
+        if (!sp || sp.length !== 2) return sp
+        const a = sp[0] === 0 ? offset : sp[0] + offset
+        return [a, sp[1] + offset]
+      }
+      const mergedSpans = (resp.pathEdgeSpans || []).map(shiftSpan)
+      mergedSpans.unshift([0, offset])
+      resp.pathCoords = bridge.concat(newCoords.slice(1))
+      resp.pathEdgeIds = [bridgeEdgeId].concat(resp.pathEdgeIds || [])
+      resp.pathEdgeSpans = mergedSpans
+      // 桥接段是「后端整线之外多出来的真实行驶段」：里程/耗时同步补上，
+      // 否则卡牌显示的 totalDistanceKm 不含车到起点节点这一段，
+      // 与出发播报念的数、以及下一轮轮询截断后的数互相对不上。
+      let addedM = 0
+      for (let i = 1; i < bridge.length; i++) addedM += this._distM(bridge[i - 1], bridge[i])
+      this._adjustRouteMetrics(resp, addedM / 1000)
+    },
+    /**
+     * 拼接/截断新路线后同步修正全程里程与预估耗时（按等比缩放耗时）。
+     * 后端只按路网节点整线给数，前端把线头对齐到车位置后，展示口径必须跟着改，
+     * 不然「卡牌里程」和「语音播报里程」（同一字段不同时刻取值）会随轮询来回跳。
+     */
+    _adjustRouteMetrics(resp, deltaKm) {
+      if (!resp || !deltaKm) return
+      const old = Number(resp.totalDistanceKm)
+      if (!Number.isFinite(old) || old <= 0) return
+      const next = Math.max(0.1, old + deltaKm)
+      const h = Number(resp.estimatedHours)
+      resp.totalDistanceKm = Math.round(next * 100) / 100
+      // 耗时扣减精度到 1e-4h（≈0.36 分钟）：若只保留 0.1h（6 分钟）粒度，每次 trim
+      // 等比扣掉的 0.02h 会被舍入抹平，剩余时间要攒 5 公里才挪一格——分钟显示长时间不动。
+      // 展示粒度由 navHoursDisplay 按分钟 round，播报处各自 toFixed，互不影响。
+      if (Number.isFinite(h) && h > 0) resp.estimatedHours = Math.round(h * next / old * 10000) / 10000
+    },
+    /** 给定坐标下标落在哪条边（spans[i]=[起,止] 且边序与 edgeIds 对齐），返回边序号 */
+    _edgeIdxAtCoord(spans, coordIdx) {
+      if (!spans) return 0
+      for (let i = 0; i < spans.length; i++) {
+        const sp = spans[i]
+        if (sp && sp.length === 2 && coordIdx >= sp[0] && coordIdx <= sp[1]) return i
+      }
+      return 0
+    },
     fmtYuan(v) {
       return Number(v || 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+    },
+    /**
+     * 换线审计探针：每个替换 this.route 的入口在赋值前调用，留下「谁、什么时候、
+     * 换之前车标/线首在哪」的 console 记录。与 watchdog 的 CAR-JUMP/C0-JUMP 同时刻对齐，
+     * 就能指名是哪条链路把拼接好的线覆盖成了后端整线（起点大跳真凶）。
+     */
+    _auditSwap(src) {
+      try {
+        const car = this._meMarker ? this._meMarker.getLatLng() : null
+        const old = this.route && this.route.pathCoords && this.route.pathCoords[0]
+        console.info(`[AUDIT ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] swap-src=${src}`, {
+          car: car ? [Math.round(car.lat * 1e4) / 1e4, Math.round(car.lng * 1e4) / 1e4] : null,
+          oldC0: old && old.length >= 2 ? [Math.round(old[0] * 1e4) / 1e4, Math.round(old[1] * 1e4) / 1e4] : null,
+          oldKm: this.route && this.route.totalDistanceKm,
+          nav: this.navigating, prev: this.previewing, dp: this._dispatchPreviewPlanId
+        })
+      } catch (e) { /* 审计探针不影响主流程 */ }
     },
     showPush(type, title, msg) {
       this.pushType = type
@@ -5474,6 +6385,11 @@ export default {
         fallbackNative()
       }
       synth.speak(u)
+      // Chrome「冷启动首句吞字」防护：页面第一次真正出声的那条 utterance，常在 onstart 前
+      // 丢掉头 ~300ms——出发播报的第一句「导航开始 …」就常被削成只剩「开始」。后续导航引擎
+      // 已热、不再吞头，所以只有「第一次」复现。speak() 后立刻 pause()+resume() 逼引擎先完成
+      // 音频缓冲初始化再放行，是社区验证有效的固定写法；对已在发声的 utterance 无副作用。
+      try { synth.pause(); synth.resume() } catch (e) { /* 忽略 */ }
       this._vdbg('已调用 synth.speak()（voices=' + (synth.getVoices ? synth.getVoices().length : '-') + '）')
     },
     /**
@@ -5598,12 +6514,17 @@ export default {
       return p >= 50 ? '高风险' : '正常'
     },
     extractHazardKeyword(reason) {
-      const txt = String(reason || '')
-      if (/暴雨|强降雨|特大暴雨/.test(txt)) return '暴雨'
-      if (/塌方|滑坡|泥石流/.test(txt)) return '塌方'
-      if (/台风|大风|风暴/.test(txt)) return '大风'
-      if (/大雾|低能见度|能见度/.test(txt)) return '大雾'
+      // 播报/标题只念灾害本身：先剥掉「沙盘熔断:」这类系统触发标签前缀（后端熔断边的
+      // reason 会写成「沙盘熔断:友谊关…」），否则落到兜底分支会把整串技术文案念出来。
+      let txt = String(reason || '').replace(/^\s*(?:沙盘熔断|硬熔断|熔断)\s*[:：]\s*/, '')
+      // 降雨既认「暴雨」也认「累计降雨量/降水」：沙盘熔断文案用的是「降雨量」，不补这条就漏判成整句兜底
+      if (/暴雨|强降雨|特大暴雨|降雨|降水/.test(txt)) return '暴雨'
+      if (/塌方|滑坡|泥石流|山洪/.test(txt)) return '塌方'
+      if (/台风|大风|风暴|强对流|强风/.test(txt)) return '大风'
+      if (/大雾|浓雾|低能见度|能见度/.test(txt)) return '大雾'
       if (/高温|热浪/.test(txt)) return '高温'
+      // 兜底：去掉括号内的技术明细（阈值/触发源），只留可读灾害短语，避免播报念一长串参数
+      txt = txt.replace(/[（(][^）)]*[）)]/g, '').trim()
       return txt || '气象灾害'
     },
     /** 从候选或预报中取概率最高的灾害类型名称 */
@@ -5717,21 +6638,6 @@ export default {
       return parts.join('。')
     },
 
-    /**
-     * 预计耗时口语化（中文）：3.5 → "3小时30分钟"，0.75 → "45分钟"。
-     * 对齐国内导航播报习惯，不说"3.5小时"这种小数。
-     */
-    _fmtDurationZh(hours) {
-      const h = Number(hours)
-      if (!Number.isFinite(h) || h <= 0) return ''
-      let totalMin = Math.round(h * 60)
-      if (totalMin < 1) totalMin = 1
-      const hh = Math.floor(totalMin / 60)
-      const mm = totalMin % 60
-      if (hh <= 0) return `${mm}分钟`
-      if (mm <= 0) return `${hh}小时`
-      return `${hh}小时${mm}分钟`
-    },
     /** 预计耗时口语化（越南语）：3.5 → "3 giờ 30 phút"，0.75 → "45 phút" */
     _fmtDurationVi(hours) {
       const h = Number(hours)
@@ -5763,8 +6669,9 @@ export default {
           // 详情播报失败时至少保证基础播报能出声，且不再影响导航主流程
           try {
             const km = Number(this.route.totalDistanceKm)
-            const dur = this._fmtDurationZh(this.route.estimatedHours)
-            const text = `导航开始，从${this.originName}到${this.destinationName}，全程约${Number.isFinite(km) ? Math.round(km * 10) / 10 : '--'}公里${dur ? '，预计需要' + dur : ''}`
+            const dur = Number.isFinite(this.navHoursDisplayNum) ? `${this.navHoursDisplayNum.toFixed(1)}小时后到达` : ''
+            // 兜底句同样不把「导航开始」单独成句（超短 utterance 会被引擎吞掉开头）
+            const text = `导航开始 从${this.originName}到${this.destinationName}，全程约${Number.isFinite(km) ? km : '--'}公里${dur ? '，预计' + dur : ''}`
             const u = new SpeechSynthesisUtterance(normalizeForTTS(text, 'zh-CN'))
             u.lang = 'zh-CN'
             u.rate = 0.95
@@ -5782,18 +6689,25 @@ export default {
       const originVN = NODE_NAME_VN[this.resolvedOriginId] || this.resolvedOriginId
       const destVN = NODE_NAME_VN[this.resolvedDestinationId] || this.resolvedDestinationId
       const hoursRaw = Number(r.estimatedHours)
+      // 与屏幕 ETA 卡片完全同源：卡片显示的就是 route.totalDistanceKm 原值与
+      // navHoursDisplay（导航中=实时剩余小时，保留 1 位小数），播报再各自四舍五入/
+      // 口语化成「188.4 公里」「5小时7分钟」就会出现「听的和看的对不上」。
       const kmRaw = Number(r.totalDistanceKm)
-      const km = Number.isFinite(kmRaw) && kmRaw > 0 ? Math.round(kmRaw * 10) / 10 : null
-      // 耗时口语化：对齐国内导航播报习惯（"3小时30分钟"而非"3.5小时"）
-      const durZh = this._fmtDurationZh(hoursRaw)
-      const durVi = this._fmtDurationVi(hoursRaw)
+      const km = Number.isFinite(kmRaw) && kmRaw > 0 ? kmRaw : null
+      const hoursDisplay = Number.isFinite(this.navHoursDisplayNum) ? this.navHoursDisplayNum : hoursRaw
+      // 耗时口语化：仅在拿不到与屏幕一致的剩余小时时才退回，保证默认跟卡片同数
+      const durZh = Number.isFinite(hoursDisplay) && hoursDisplay > 0 ? `${hoursDisplay.toFixed(1)}小时后到达` : ''
+      const durVi = this._fmtDurationVi(hoursDisplay)
 
       // 开场白（国内导航风格）：一句话把「起讫点 + 全程里程 + 预计耗时 + 到达时间」讲清楚。
       // 这是最高优先级、必须最先被完整听到的关键信息，放在最前面即使后续被打断也不丢核心内容。
+      // 「导航开始」必须与起讫点连成同一句、不能带逗号单独成句：
+      // _expandToSentences 按逗号切句后，「导航开始」会变成 4 字超短 utterance，
+      // 浏览器/WebSpeech 引擎对这种极短句偶发吞掉开头单词（实测只听得到「开始」）。
       const zhOpening = [
-        `导航开始，从${this.originName}到${this.destinationName}`,
+        `导航开始 从${this.originName}到${this.destinationName}`,
         km != null ? `全程约${km}公里` : '',
-        durZh ? `预计需要${durZh}` : '',
+        durZh ? `预计${durZh}` : '',
         this.etaArrivalZh !== '--' ? `预计北京时间${this.etaArrivalZh}到达` : ''
       ].filter(Boolean).join('，')
       const viOpening = [
@@ -5953,6 +6867,38 @@ export default {
         `Cảnh báo khẩn cấp: ${hazardVN} tại ${where}。Dự kiến chậm ${this.route.extraHours || 0} giờ。${vnAdvice}`
       ], { force: true })
     },
+    /**
+     * 风险解除、路线从绕行线切回原路线时的语音播报：
+     * 念清「原路线哪条走廊 + 什么灾害已解除 + 已切回原路线」，让司机知道局势恢复正常。
+     * 灾害简报取自绕行时快照（this._lastHazardBrief），因为此刻 this.risks 已被清空。
+     * @param opt.viaDispatch 为 true 时是「调度中心下发原路线」，动作主语换成调度中心
+     *                       （而非普通模式系统自动切回），与调度模式的控制归属一致。
+     */
+    _announceRiskCleared(opt) {
+      const viaDispatch = !!(opt && opt.viaDispatch)
+      const b = this._lastHazardBrief
+      this._lastHazardBrief = null
+      const hazard = b && b.hazard
+      const loc = (b && b.where) ? `${b.where}路段` : '沿线'
+      const time = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+      // 切回动作的主语：调度模式归因到调度中心，普通模式归因到系统自动
+      const switched = viaDispatch ? '调度中心已为您切换为原路线' : '已为您切回原路线'
+      const zh = hazard
+        ? `风险解除。原路线${loc}的${hazard}风险已解除，${switched}，可按原计划继续行驶。`
+        : `风险解除。原路线${loc}风险已解除，${switched}，可按原计划继续行驶。`
+      const hazardVN = hazard ? (HAZARD_VN_MAP[hazard] || hazard) : ''
+      const viSwitch = viaDispatch
+        ? 'Trung tâm điều độ đã chuyển về tuyến đường ban đầu'
+        : 'Đã chuyển về tuyến đường ban đầu'
+      const vi = hazardVN
+        ? `Đã gỡ bỏ rủi ro. Rủi ro ${hazardVN} trên ${loc} của tuyến đường ban đầu đã được gỡ bỏ. ${viSwitch}, tiếp tục theo kế hoạch。`
+        : `Đã gỡ bỏ rủi ro. Tuyến đường ban đầu đã thông suốt. ${viSwitch}, tiếp tục theo kế hoạch。`
+      this.showPush('ok', viaDispatch ? '调度已恢复原路线' : '已切回原路线', zh)
+      const tag = hazard ? `（${hazard}）` : ''
+      this.pushLog.unshift({ time, text: `${viaDispatch ? '调度中心下发原路线（风险已解除）' : '风险解除，已切回原路线'}${tag}` })
+      // 非 force：这是「恢复正常」的告知性播报，不该打断仍在进行的灾害/出发等安全播报
+      if (this.voiceOn) this._interruptAndSpeak([zh, vi])
+    },
     /** 当前是否「走平陆运河」通勤态：选定坐船方案 / 联运导航中（目的地=六景港） */
     _isCanalCommuting() {
       return this.isCanalPlan || this.selectedMode === 'canal' || this.resolvedDestinationId === 'LJ'
@@ -6044,6 +6990,10 @@ export default {
       if (this.rerouteLoading) return
       // 绕行面板已经开着：同一事件不再重复拉取与播报，等司机点选或关闭后再响应新事件
       if (this.rerouteOptions.length) return
+      // 单点保险：接单模式下道路灾害一律不弹「点选即切换」自助面板——换线权在调度中心，
+      // 改挂「等待调度」卡（与 SSE route-update / checkPush 的 isTaskAccepted 判据同源）。
+      // 运河禁航传 suppressIfOnBest=false（人在水运方案上换公路属调度已定的执行），不在此列。
+      if (suppressIfOnBest && this.isTaskAccepted) { this._armWaitDispatch(reason); return }
       this.rerouteLoading = true
       try {
         const r = await axios.get('/api/route/candidates', {
@@ -6710,6 +7660,17 @@ export default {
 @media (prefers-reduced-motion: reduce) {
   .pv-item, .pv-item.sel, .safest-flag, .prob-pill.high.glow, .preview-card, .preview-start::after { animation: none !important; }
 }
+/* 触屏设备（手机/平板）：关闭流光/呼吸/扫光这类纯装饰 CSS 动画（每帧都在耗合成线程），
+   风险闪烁的红色脉冲是 JS 驱动的安全语义，不在本块范围内 */
+@media (pointer: coarse) {
+  .eta-sheen { display: none; }
+  .eta-bar-fill { display: none; }
+  .eta-card, .preview-card, .pv-item, .pv-item.sel, .safest-flag,
+  .prob-pill.high.glow, .preview-start::after, .start-btn,
+  .badge-dot, .pulse-dot::after {
+    animation: none !important;
+  }
+}
 .nav-btn { width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,.9); border: none; box-shadow: 0 2px 10px rgba(0,0,0,.08); display: flex; align-items: center; justify-content: center; font-size: 18px; cursor: pointer; transition: all .2s; backdrop-filter: blur(10px); }
 .nav-btn:active { transform: scale(.92); background: #f0f2f5; }
 .nav-btn.exit-btn { width: auto; padding: 0 16px; border-radius: 22px; font-size: 13px; font-weight: 700; color: #c62828; background: rgba(255,255,255,.95); }
@@ -6996,6 +7957,33 @@ export default {
 .risk-blink { animation: risk-blink 0.8s ease-in-out infinite; }
 .port-tip { background: rgba(0,0,0,0.8) !important; border: none !important; color: #fff !important; font-size: 12px !important; font-weight: 700 !important; padding: 4px 8px !important; border-radius: 4px !important; }
 .nav-tri-marker { background: none !important; border: none !important; }
+/* 车标位置平滑：模拟行驶 tick 每 100ms（SIM_TICK_MS）才 setLatLng 一次，z19 下每步≈十几像素，
+   而相机已由 Leaflet 缓动连续平移——箭头相对顺滑的路面就是「一帧一帧」地蹦。
+   给承载 translate3d 的图标元素加一条与 tick 节奏匹配的线性过渡，浏览器把这 10 个离散点
+   补成连续滑动（纯合成层，几乎零成本）；时长略大于 tick（120>100ms）以吸收 setInterval 抖动，
+   新目标在当前插值位上重定向、运动不中断。相机平移走 Leaflet 的 pane transform、不改本元素
+   transform，故不拖影、不跟手抖动；旋转在独立子层 .nav-car-rot 上，也不受影响。 */
+.nav-tri-marker.car-smooth { transition: transform 120ms linear; will-change: transform; }
+/* 融合式导航车标（参照高德）：罗盘双圈+方位字 + 行进方向扇形光带 + 白底蓝箭头；
+   整体 130px 以车标为锚点居中，rot 层由 JS 按方位角实时旋转 */
+.nav-car { position: absolute; left: 0; top: 0; width: 130px; height: 130px; pointer-events: none; }
+.nav-car-ring { position: absolute; inset: 0; border-radius: 50%;
+  background: rgba(150, 195, 255, .10); border: 1px solid rgba(125, 170, 240, .38); }
+.nav-car-ring2 { position: absolute; inset: 24px; border-radius: 50%;
+  border: 1px solid rgba(125, 170, 240, .30); }
+.nav-car-rot { position: absolute; inset: 0; transform-origin: 50% 50%; will-change: transform; }
+/* 罗盘方位字：固定在圆圈四侧，不随行进方向旋转；白描边保证深色底图可读 */
+.nav-car-dir { position: absolute; font-size: 13px; font-weight: 700; color: #3d4a63;
+  text-shadow: 0 0 3px rgba(255,255,255,.9), 0 1px 2px rgba(255,255,255,.8); line-height: 1; }
+.nav-car-dir-n { left: 50%; top: 6px; transform: translateX(-50%); }
+.nav-car-dir-s { left: 50%; bottom: 6px; transform: translateX(-50%); }
+.nav-car-dir-w { left: 8px; top: 50%; transform: translateY(-50%); }
+.nav-car-dir-e { right: 8px; top: 50%; transform: translateY(-50%); }
+/* 扇形光带：conic 0deg 指向上方，从 -24° 到 +24° 蓝色渐隐，随 rot 层一起转向行驶方向 */
+.nav-car-fan { position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(from -24deg, rgba(64, 132, 244, .48) 0deg, rgba(64, 132, 244, .14) 34deg, rgba(64, 132, 244, 0) 48deg, rgba(64, 132, 244, 0) 312deg, rgba(64, 132, 244, .14) 326deg, rgba(64, 132, 244, .48) 360deg); }
+.nav-car-arrow { position: absolute; left: 50%; top: 50%; width: 44px; height: 44px;
+  margin: -23px 0 0 -22px; filter: drop-shadow(0 1px 3px rgba(30, 80, 150, .55)); }
 /* 口岸标记：圆点 + 常驻名称都画在同一个 divIcon 内（替代 permanent Tooltip） */
 .port-label-wrap { background: none !important; border: none !important; }
 .port-dot { position: absolute; left: -6px; top: -6px; width: 12px; height: 12px; border-radius: 50%;

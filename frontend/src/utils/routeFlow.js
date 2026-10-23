@@ -331,11 +331,32 @@ export function createRouteFlow(map, options = {}) {
       const pool = t.arrows;
       const spots = [];
       if (spacingM > 0 && t.total > 0 && t.pts.length >= 2) {
-        for (let d = spacingM * 0.5; d < t.total; d += spacingM) {
-          const p = pointAt(t, d);
-          if (!bounds.contains(p)) continue;
-          const ahead = Math.min(t.total, d + lookM);
-          spots.push([p, bearing(p, pointAt(t, ahead))]);
+        // 只在「视口扫得到的那一截」上铺箭头：按顶点区间推进，端点包围盒与视口相离的
+        // 区间整段跳过（直线段必含于其两端点张成的包围盒，跳过是安全的）。
+        // 旧写法从 0 一路步进到 t.total（整条 ~500km）、每步一次 pointAt 二分查找再判
+        // bounds.contains——放大后 spacingM 缩到十几米，循环次数飙到数万次；又因本图
+        // zoomSnap:0 手机捏合松手只发 moveend 不发 zoomend，每次 moveend 都重跑一整轮，
+        // 手机 CPU 扛不住 → 箭头迟迟画不出（表现为「放大后箭头没了」，桌面够快看不出）。
+        // 改后成本降到 O(顶点数 + 可见段/间距)，箭头落点网格与旧写法逐点一致。
+        const south = bounds.getSouth(), north = bounds.getNorth()
+        const west = bounds.getWest(), east = bounds.getEast()
+        const half = spacingM * 0.5
+        const pts = t.pts, cum = t.cum, nv = pts.length
+        for (let i = 0; i < nv - 1; i++) {
+          const p0 = pts[i], p1 = pts[i + 1]
+          // 区间端点包围盒与视口相离 → 整段跳过，不做逐间距步进
+          if ((p0[0] < p1[0] ? p1[0] : p0[0]) < south || (p0[0] > p1[0] ? p1[0] : p0[0]) > north ||
+              (p0[1] < p1[1] ? p1[1] : p0[1]) < west || (p0[1] > p1[1] ? p1[1] : p0[1]) > east) continue
+          const d0 = cum[i], d1 = cum[i + 1]
+          if (d1 <= d0) continue
+          // 对齐到全局间距网格（half + n*spacingM），保证跨区间的箭头仍等距、且与旧结果同位
+          const k0 = Math.ceil((d0 - half) / spacingM)
+          for (let d = half + k0 * spacingM; d < d1; d += spacingM) {
+            const p = pointAt(t, d);
+            if (!bounds.contains(p)) continue;
+            const ahead = Math.min(t.total, d + lookM);
+            spots.push([p, bearing(p, pointAt(t, ahead))]);
+          }
         }
       }
       // 短于一个间距的段（按风险分段着色时很常见）整段铺不下一个箭头，
@@ -554,9 +575,22 @@ export function createRouteFlow(map, options = {}) {
   map.on('moveend', onGestureEnd);
   map.on('zoomend', onGestureEnd);
 
-  // 静态箭头：导航跟随是程序化 setView（无 originalEvent），不会走 onGestureEnd 的 layout；
+  // 静态箭头：导航跟随是程序化 setView/panBy（无 originalEvent），不会走 onGestureEnd 的 layout；
   // 但视口沿路线平移后新进入视野的路段需要补铺箭头，故 moveend 也重排一次。
-  const onStaticMove = () => { if (opts.staticArrows && tracks.length) layoutStaticArrows(); };
+  //
+  // 节流（必选）：跟随相机现在按 60fps 逐帧硬平移（DriverApp._followVehicleFrame），
+  // moveend 也从「每 tick 一次（1Hz~10Hz）」变成 ~60Hz；而 layoutStaticArrows 要遍历
+  // 每段顶点做二分取样、再逐箭头重写 transform（几十个 DOM 写），按 60Hz 跑会把主线程吃满，
+  // 反而比原来更卡。视口只前进几像素时箭头网格根本不会变（bounds 还外扩了 0.25），
+  // 所以按 120ms（≈8Hz）取前沿节流，既跟得上平移、成本也回到原来的量级。
+  let lastStaticLayoutAt = 0;
+  const onStaticMove = () => {
+    if (!opts.staticArrows || !tracks.length) return;
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    if (now - lastStaticLayoutAt < 120) return;
+    lastStaticLayoutAt = now;
+    layoutStaticArrows();
+  };
   map.on('moveend', onStaticMove);
 
   return {
@@ -566,6 +600,28 @@ export function createRouteFlow(map, options = {}) {
     },
     /** 按段着色：安全段绿 / 风险段红 */
     setSegments,
+    /**
+     * 把每条 track 的首点钉到给定坐标（零帧同步用）：导航模拟每 tick（100ms）调用，
+     * 只改 pts[0] + setLatLngs 重建 path 字符串，不重建图层/不重排箭头，
+     * 成本比整条 drawRoute 重绘低两个量级；数据层修剪（里程/风险对齐）仍由
+     * 周期性 trim 负责，两者配合后视觉线头永远与车标重合（尾巴 → 0）。
+     * 箭头铺放用的累计表不重算：首点位移≤一个修剪周期（几十米），箭头位置无感。
+     */
+    tetherHead(p) {
+      if (!p || p.length < 2 || !tracks.length) return;
+      tracks.forEach(t => {
+        if (!t.pts.length) return;
+        t.pts[0] = [p[0], p[1]];
+        if (t.outer._map) t.outer.setLatLngs(t.pts);
+        if (t.casing && t.casing._map) t.casing.setLatLngs(t.pts);
+        if (t.glow._map) t.glow.setLatLngs(t.pts);
+        if (t.core._map) t.core.setLatLngs(t.pts);
+      });
+      // 线首脉冲点跟着走，否则旧线头留一个绿点
+      if (startMarker && startMarker._map) {
+        try { startMarker.setLatLng([p[0], p[1]]); } catch (e) { /* 已移除 */ }
+      }
+    },
     setColor(c) {
       color = c;
       tracks.forEach(t => {

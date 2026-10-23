@@ -146,6 +146,25 @@ public class RiskAgent {
         exp.put("typhoonVerdict", v.triggered() ? v.reason() : null);
     }
 
+    /** 某断面当前浓雾判据（与沙盘同一 {@link FogRiskRule} 口径，取解析后全要素）。 */
+    private FogRiskRule.Verdict fogVerdict(DecisionSandboxService.Section s) {
+        DecisionSandboxService.SectionSim el = sandbox.elementsOf(s);
+        return FogRiskRule.evaluate(
+                el.visibilityM(), el.humidityPct(), el.cloudPct(), el.windKph());
+    }
+
+    /** 把浓雾判据与该断面能见度/湿度/云量并入解释 Map（供前端展示"这次是否因雾熔断"）。 */
+    private void putFogFields(Map<String, Object> exp,
+                              DecisionSandboxService.Section s,
+                              FogRiskRule.Verdict v) {
+        DecisionSandboxService.SectionSim el = sandbox.elementsOf(s);
+        exp.put("visibilityM", el.visibilityM());
+        exp.put("humidityPct", el.humidityPct());
+        exp.put("cloudPct", el.cloudPct());
+        exp.put("fogVerdict", v.triggered() ? v.reason() : null);
+        exp.put("fogBlocking", v.blocking());
+    }
+
     private Map<String, Object> buildExplanation(DecisionSandboxService.Section ygg,
                                                  DecisionSandboxService.Section mc,
                                                  double threshold) {
@@ -162,12 +181,16 @@ public class RiskAgent {
         TyphoonRiskRule.Verdict yggTyphoon = ygg.typhoonActive
                 ? TyphoonRiskRule.evaluate(ygg.typhoonPressureHpa, ygg.typhoonWindKph)
                 : new TyphoonRiskRule.Verdict(0, null);
+        // 浓雾判据（若有）：熔断可能是浓雾封路造成而非降雨——否则纯浓雾场景（降雨 0mm）
+        // 会沿用暴雨模板，说出"降雨量0mm超过80mm阈值"这种自相矛盾的话
+        FogRiskRule.Verdict yggFog = fogVerdict(ygg);
 
         Map<String, Object> yggExp = new LinkedHashMap<>();
         yggExp.put("section", ygg.name);
         yggExp.put("forecastMm", ygg.forecastMm);
         yggExp.put("fused", sandbox.roadBlocked());
         putTyphoonFields(yggExp, ygg, yggTyphoon);
+        putFogFields(yggExp, ygg, yggFog);
         double yggPenalty = yggInjected == null || yggInjected.getPenaltyMultiplier() == null
                 ? 0 : yggInjected.getPenaltyMultiplier();
         String yggReason = yggInjected == null ? "" : yggInjected.getReason();
@@ -201,6 +224,21 @@ public class RiskAgent {
                             ygg.name, ygg.forecastMm, threshold, yggTyphoon.reason(),
                             ygg.slopeSoil, ygg.history, ygg.moisturePct)));
             yggExp.put("fuseCause", "rain+typhoon");
+        } else if (ygg.fused && yggFog.blocking()) {
+            // 浓雾致熔断：成因是低能见度而非降水，文案必须说雾，不能沿用暴雨归因
+            yggExp.put("verdict", pick(
+                    String.format("%s段熔断原因：%s，达浓雾封路判据（能见度低且高湿/低云、静稳少风），等效道路中断。"
+                                    + "此时降雨仅%.0fmm（未达%.0fmm阈值），成因为低能见度而非降水。该段边坡%s、%s，含水量%.0f%%。",
+                            ygg.name, yggFog.reason(), ygg.forecastMm, threshold,
+                            ygg.slopeSoil, ygg.history, ygg.moisturePct),
+                    String.format("%s段因浓雾判定为中断：%s。能见度骤降使口岸通行与通关严重受阻，"
+                                    + "降雨仅%.0fmm 远低于%.0fmm阈值——致因是雾而非雨。该段%s，%s。",
+                            ygg.name, yggFog.reason(), ygg.forecastMm, threshold,
+                            ygg.slopeSoil, ygg.history),
+                    String.format("%s段已熔断（浓雾成因）：%s，按等效道路中断处理。"
+                                    + "需能见度回升至200m以上、且湿度/云量回落（或风力加大吹散雾）方可评估恢复。该段%s，%s，含水量%.0f%%。",
+                            ygg.name, yggFog.reason(), ygg.slopeSoil, ygg.history, ygg.moisturePct)));
+            yggExp.put("fuseCause", "fog");
         } else if (ygg.fused) {
             yggExp.put("verdict", pick(
                     String.format("%s段熔断原因：未来6小时累计降雨量%.0fmm，超过%.0fmm熔断阈值。"
@@ -271,12 +309,14 @@ public class RiskAgent {
         TyphoonRiskRule.Verdict mcTyphoon = mc.typhoonActive
                 ? TyphoonRiskRule.evaluate(mc.typhoonPressureHpa, mc.typhoonWindKph)
                 : new TyphoonRiskRule.Verdict(0, null);
+        FogRiskRule.Verdict mcFog = fogVerdict(mc);
 
         Map<String, Object> mcExp = new LinkedHashMap<>();
         mcExp.put("section", mc.name);
         mcExp.put("forecastMm", mc.forecastMm);
         mcExp.put("fused", mc.fused);
         putTyphoonFields(mcExp, mc, mcTyphoon);
+        putFogFields(mcExp, mc, mcFog);
         double mcThreshold = DecisionSandboxService.MC_THRESHOLD_MM;
         if (mc.fused && mcTyphoon.blocking()) {
             mcExp.put("verdict", pick(
@@ -301,6 +341,14 @@ public class RiskAgent {
                     String.format("%s段已熔断：降雨%.0fmm 突破 %.0fmm 阈值，并叠加%s。该段%s。",
                             mc.name, mc.forecastMm, mcThreshold, mcTyphoon.reason(), mc.slopeSoil)));
             mcExp.put("fuseCause", "rain+typhoon");
+        } else if (mc.fused && mcFog.blocking()) {
+            mcExp.put("verdict", pick(
+                    String.format("%s段熔断原因：%s，达浓雾封路判据（能见度低且高湿/低云、静稳少风），等效通关中断。"
+                                    + "此时降雨仅%.0fmm，未达%.0fmm阈值，成因为低能见度而非降水。该段%s。",
+                            mc.name, mcFog.reason(), mc.forecastMm, mcThreshold, mc.slopeSoil),
+                    String.format("%s段因浓雾判定为中断：%s。降雨%.0fmm 低于 %.0fmm 阈值，熔断由浓雾而非降雨触发。该段%s。",
+                            mc.name, mcFog.reason(), mc.forecastMm, mcThreshold, mc.slopeSoil)));
+            mcExp.put("fuseCause", "fog");
         } else if (mc.fused) {
             mcExp.put("verdict", pick(
                     String.format("%s段熔断原因：预计降雨量%.0fmm，超过%.0fmm熔断阈值。",
@@ -358,7 +406,15 @@ public class RiskAgent {
 
         m.put("ygg", yggExp);
         m.put("mc", mcExp);
-        m.put("boundary", pick(
+        boolean fogBlocking = yggFog.blocking() || mcFog.blocking();
+        m.put("boundary", fogBlocking ? String.format(
+                "决策边界：浓雾致熔断的口岸需能见度回升至%.0fm以上、且湿度<%.0f%%与云量<%.0f%%（或风速>%.0fkm/h吹散雾）才恢复通行；"
+                        + "降雨侧%s降至%.0fmm以下恢复、%s升至%.0fmm以上熔断。",
+                FogRiskRule.VIS_STRONG_M, FogRiskRule.FOG_HUMIDITY_PCT, FogRiskRule.FOG_CLOUD_PCT,
+                FogRiskRule.FOG_CALM_WIND_KPH,
+                ygg.name, threshold - DecisionSandboxService.HYSTERESIS_MM,
+                mc.name, DecisionSandboxService.MC_THRESHOLD_MM)
+                : pick(
                 String.format("决策边界：%s降雨量需降至%.0fmm以下才恢复通行；%s降雨量升至%.0fmm以上将同步熔断。",
                         ygg.name, threshold - DecisionSandboxService.HYSTERESIS_MM,
                         mc.name, DecisionSandboxService.MC_THRESHOLD_MM),
@@ -457,6 +513,23 @@ public class RiskAgent {
                     .append("hPa、风速").append(String.format("%.0f", mc.typhoonWindKph))
                     .append("km/h，判据：").append(typhoonVerdict(mc)).append("\n");
         }
+        // 浓雾信息必须进 prompt：否则大模型只知道降雨与台风，会把浓雾封路的熔断误判成暴雨
+        FogRiskRule.Verdict yfogP = fogVerdict(ygg);
+        FogRiskRule.Verdict mfogP = fogVerdict(mc);
+        if (yfogP.triggered() || mfogP.triggered()) {
+            p.append("- 浓雾封路判据：能见度<").append(String.format("%.0f", FogRiskRule.VIS_EXTREME_M))
+                    .append("m 无条件封路；或能见度<").append(String.format("%.0f", FogRiskRule.VIS_STRONG_M))
+                    .append("m 且（湿度≥").append(String.format("%.0f", FogRiskRule.FOG_HUMIDITY_PCT))
+                    .append("% 或 云量≥").append(String.format("%.0f", FogRiskRule.FOG_CLOUD_PCT))
+                    .append("%）且 风速≤").append(String.format("%.0f", FogRiskRule.FOG_CALM_WIND_KPH))
+                    .append("km/h\n");
+            if (yfogP.triggered()) {
+                p.append("- 友谊关浓雾：").append(yfogP.reason()).append("\n");
+            }
+            if (mfogP.triggered()) {
+                p.append("- 芒街浓雾：").append(mfogP.reason()).append("\n");
+            }
+        }
         p.append("- 熔断阈值：降雨 ").append(String.format("%.0f", threshold)).append("mm")
                 .append("；台风判据为气压≤").append(String.format("%.0f", TyphoonRiskRule.TYPHOON_PRS_HPA))
                 .append("hPa 且风速≥").append(String.format("%.0f", TyphoonRiskRule.TYPHOON_WIND_KPH))
@@ -490,8 +563,8 @@ public class RiskAgent {
                 .append("{\n")
                 .append("  \"blockedSegment\": \"熔断路段名\",\n")
                 .append("  \"riskLevel\": \"高/中/低\",\n")
-                .append("  \"reason\": \"为什么熔断（结合降雨量、边坡、历史案例）\",\n")
-                .append("  \"decisionBoundary\": \"降雨量降至多少可恢复通行\",\n")
+                .append("  \"reason\": \"为什么熔断（结合降雨量、能见度、边坡、历史案例）\",\n")
+                .append("  \"decisionBoundary\": \"降雨量降至多少、能见度回升至多少可恢复通行\",\n")
                 .append("  \"alternative\": \"备选通道\"\n")
                 .append("}");
         return p.toString();

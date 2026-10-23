@@ -16,6 +16,11 @@ function removeCrossorigin() {
 
 export default defineConfig({
   plugins: [vue(), removeCrossorigin()],
+  // 每次构建烧入时间戳：司机端导航卡右下角显版本水印，
+  // 用户报缺陷时一眼判断浏览器里是新包还是旧缓存（起点跳变排查被旧包坑过多次）
+  define: {
+    __BUILD_TAG__: JSON.stringify(new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))
+  },
   build: {
     rollupOptions: {
       input: {

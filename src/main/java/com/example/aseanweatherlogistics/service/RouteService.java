@@ -12,6 +12,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -84,6 +85,33 @@ public class RouteService {
     private static final long REAL_SYNC_TTL_MS = 5 * 60_000L;
     private volatile long lastRealSyncAt = 0;
 
+    /**
+     * 候选路线结果缓存：键 = 起终点 + 口岸状态签名（时段/货类/人工调整），
+     * 条目内再带一份「风险图签名」，两者都一致时直接复用上次结果。
+     * <p>
+     * 为什么要它：调度端派单时已经为同一 O/D 算过一次候选，司机点「确认接单」会再算一遍；
+     * 单次要跑 25 轮并行搜索，2 核服务器实测 7~18s —— 命中缓存后与派单那次逐字段相同，
+     * 但只需毫秒级返回。风险/口岸任一变化 → 签名不同 → 照旧重算，不影响正确性。
+     */
+    private static final long CANDIDATES_CACHE_TTL_MS = 10 * 60_000L;
+    private static final int CANDIDATES_CACHE_MAX = 8;
+    private final Map<String, CachedCandidates> candidatesCache =
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, CachedCandidates> eldest) {
+                    return size() > CANDIDATES_CACHE_MAX;
+                }
+            };
+    /** 同一键并发请求只算一次：后到的请求等前一个算完直接拿缓存（2 核上比各自算一遍更快） */
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> candidatesLocks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 候选缓存条目：口岸签名已在键里；这里存风险签名 + 可复用的无风险基线 + 结果快照 + 按 key 索引的原始路径 */
+    private record CachedCandidates(String riskSignature, PathResult baseline,
+                                    List<Map<String, Object>> result,
+                                    Map<String, CandidatePath> byKey, long at) {
+    }
+
     /** 多核并行规划线程池：baseline/current 两条 Dijkstra 并行跑（9800X3D 8核16线程） */
     private final ExecutorService planExecutor = Executors.newFixedThreadPool(
             Math.max(2, Runtime.getRuntime().availableProcessors() / 2),
@@ -140,6 +168,8 @@ public class RouteService {
      * （可能经芒街），地图与「陆水联运」卡片自相矛盾；调度方案 B 导航同样被击穿。
      * 启动时若缺 LJ，则合成该节点并用一条短连接线挂到最近的路网节点（柳南高速六景互通一带），
      * 此后无论路网文件再怎么重新生成，只要六景附近还有路，坐船方案就不会坏。
+     * 连接线几何不再用两点直线（直线会斜穿街区，司机端表现为「导航线穿建筑物」），
+     * 而是沿真实路网顶点贪心跳到港区 1km 圈内，最后一段短直线进港（港区内本无 OSM 道路）。
      */
     private void ensureCanalAnchor() {
         if (nodeById.containsKey(CANAL_EMBARK_NODE_ID)) {
@@ -160,16 +190,105 @@ public class RouteService {
         }
         RoadNode lj = new RoadNode(CANAL_EMBARK_NODE_ID, "南宁港六景作业区",
                 CANAL_EMBARK_POS[0], CANAL_EMBARK_POS[1], null, null);
+        List<List<Double>> linkGeom = canalLinkGeometry(nearest, CANAL_EMBARK_POS);
+        double linkKm = polyKm(linkGeom);
         RoadEdge link = new RoadEdge("ELJ-CONNECT", nearest.getId(), CANAL_EMBARK_NODE_ID,
-                Math.max(0.1, Math.round(bestKm * 10) / 10.0), 40.0, false, null,
-                "六景港区连接线", "trunk",
-                List.of(List.of(nearest.getLatitude(), nearest.getLongitude()),
-                        List.of(CANAL_EMBARK_POS[0], CANAL_EMBARK_POS[1])));
+                Math.max(0.1, Math.round(linkKm * 10) / 10.0), 40.0, false, null,
+                "六景港区连接线", "trunk", linkGeom);
         nodeById.put(CANAL_EMBARK_NODE_ID, lj);
         edges.add(link);
         edgeById.put(link.getId(), link);
         adjacency.computeIfAbsent(nearest.getId(), ignored -> new ArrayList<>()).add(link);
         adjacency.computeIfAbsent(CANAL_EMBARK_NODE_ID, ignored -> new ArrayList<>()).add(reverse(link));
+    }
+
+    /**
+     * 港区连接线沿真实路网的贪心跳接：每步在邻接节点里选「严格更靠近码头且横向
+     * 不偏离〈当前点→码头〉直线 1.5km」的最优者，沿该边补齐真实形状点；距码头
+     * ≤ 1km 或无路可跳即停，收尾短直线段进港。里程按拼接后的折线实长回写，
+     * 保证「声称里程 == 画线里程」（与走廊边 distanceKm 校正同一口径）。
+     */
+    private List<List<Double>> canalLinkGeometry(RoadNode from, double[] target) {
+        List<List<Double>> geom = new ArrayList<>();
+        geom.add(List.of(from.getLatitude(), from.getLongitude()));
+        RoadNode cur = from;
+        Set<String> seen = new HashSet<>();
+        seen.add(cur.getId());
+        for (int hop = 0; hop < 8; hop++) {
+            double curKm = approxKm(cur.getLatitude(), cur.getLongitude(), target[0], target[1]);
+            if (curKm <= 1.0) {
+                break;
+            }
+            RoadNode nextNode = null;
+            RoadEdge nextEdge = null;
+            double nextBest = curKm;
+            for (RoadEdge e : adjacency.getOrDefault(cur.getId(), NO_EDGES)) {
+                if (e.isCustoms()) {
+                    continue;
+                }
+                String otherId = cur.getId().equals(e.getFromNodeId()) ? e.getToNodeId() : e.getFromNodeId();
+                RoadNode n = nodeById.get(otherId);
+                if (n == null || seen.contains(n.getId())) {
+                    continue;
+                }
+                if (offsetFromSegKm(n.getLatitude(), n.getLongitude(),
+                        cur.getLatitude(), cur.getLongitude(), target[0], target[1]) > 1.5) {
+                    continue; // 横向偏移过大：往反方向绕的路不要
+                }
+                double nKm = approxKm(n.getLatitude(), n.getLongitude(), target[0], target[1]);
+                if (nKm < nextBest - 0.1) {
+                    nextBest = nKm;
+                    nextNode = n;
+                    nextEdge = e;
+                }
+            }
+            if (nextNode == null) {
+                break;
+            }
+            appendEdgeShape(geom, nextEdge, cur, nextNode);
+            seen.add(nextNode.getId());
+            cur = nextNode;
+        }
+        geom.add(List.of(target[0], target[1]));
+        return geom;
+    }
+
+    /** 按「cur -> next」方向把边接入折线：与 toCoords 同口径取向，补中间形状点后以节点收尾 */
+    private void appendEdgeShape(List<List<Double>> geom, RoadEdge e, RoadNode cur, RoadNode next) {
+        List<List<Double>> c = e.getC();
+        if (c != null && c.size() > 2) {
+            List<Double> head = c.get(0);
+            List<Double> tail = c.get(c.size() - 1);
+            boolean rev = approxKm(cur.getLatitude(), cur.getLongitude(), head.get(0), head.get(1))
+                    > approxKm(cur.getLatitude(), cur.getLongitude(), tail.get(0), tail.get(1));
+            for (int k = 1; k < c.size() - 1; k++) {
+                List<Double> p = rev ? c.get(c.size() - 1 - k) : c.get(k);
+                geom.add(List.of(p.get(0), p.get(1)));
+            }
+        }
+        geom.add(List.of(next.getLatitude(), next.getLongitude()));
+    }
+
+    /** 点到线段的横向距离（km）：贪心跳接时限制候选节点不得绕离〈当前点→目标〉直线 */
+    private static double offsetFromSegKm(double plat, double plon,
+                                          double alat, double alon, double blat, double blon) {
+        double cos = Math.cos(Math.toRadians(plat));
+        double px = plon * cos, py = plat;
+        double ax = alon * cos, ay = alat;
+        double dx = blon * cos - ax, dy = blat - ay;
+        double len2 = dx * dx + dy * dy;
+        double t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        return Math.hypot(px - ax - dx * t, py - ay - dy * t) * 111.32;
+    }
+
+    /** 折线实长（km）：连接线里程按几何实长回写 */
+    private static double polyKm(List<List<Double>> pts) {
+        double km = 0;
+        for (int i = 1; i < pts.size(); i++) {
+            km += approxKm(pts.get(i - 1).get(0), pts.get(i - 1).get(1), pts.get(i).get(0), pts.get(i).get(1));
+        }
+        return km;
     }
 
     /** 经纬度近似平面距离（km）：启动期一次性扫描用，不需要严格测地线 */
@@ -288,13 +407,20 @@ public class RouteService {
         }
         this.lastCargoType = cargoType;
         validate(originId, destinationId);
-        // 先算无风险基准路径，再按"起点→终点沿线城市"拉取实时天气并注入风险，
-        // 最后用带风险的路网算当前路径（气象只关注沿线城市，不再全量拉取）
-        PathResult baseline = joinOrThrow(CompletableFuture.supplyAsync(
-                () -> shortestPath(originId, destinationId, Map.of()), planExecutor));
-        syncRealWeather(false, baseline.pathNodeIds);
-        ResilientPath rec = computeCurrentPath(originId, destinationId, baseline);
-        RouteResponse resp = buildResponse(baseline, rec.path, lastCargoType);
+        // 与候选接口共用同一份快照：推荐路线就是 buildCandidates 的第 0 条（resilientPath），
+        // 命中缓存时不再重跑「基线 + 风险」两趟搜索（2 核服务器单次约 1.5~2s）
+        CachedCandidates snap = ensureCandidates(originId, destinationId);
+        CandidatePath rec = snap.byKey.get("recommended");
+        if (rec == null) {
+            // 理论上不会发生（buildCandidates 必产出 recommended）；兜底走原路径，绝不 500
+            PathResult baseline = joinOrThrow(CompletableFuture.supplyAsync(
+                    () -> shortestPath(originId, destinationId, Map.of()), planExecutor));
+            ResilientPath r = computeCurrentPath(originId, destinationId, baseline);
+            RouteResponse fallback = buildResponse(baseline, r.path, lastCargoType);
+            fallback.setCorridorAllFused(r.softened);
+            return fallback;
+        }
+        RouteResponse resp = buildResponse(snap.baseline, rec.path, lastCargoType);
         resp.setCorridorAllFused(rec.softened);
         return resp;
     }
@@ -334,14 +460,84 @@ public class RouteService {
         }
         this.lastCargoType = cargoType;
         validate(originId, destinationId);
+        return copyCandidates(ensureCandidates(originId, destinationId).result());
+    }
 
-        PathResult baseline = shortestPath(originId, destinationId, Map.of());
-        syncRealWeather(false, baseline.pathNodeIds);
-        Map<String, RiskSegment> riskMap = weatherSimulator.currentRiskMap();
+    /**
+     * 取（或补齐）当前 O/D 的候选快照，planCandidates / planRoute / planRouteByChoice 共用：
+     * 口岸状态（在键里）+ 风险图签名一致且未过期 → 直接返回缓存，零搜索；
+     * 否则跑一遍完整候选生成并写回缓存。
+     * <p>
+     * 这样「大屏派单算一次 → 司机接单取候选 → 按 choice 开始导航再取一次」这条链路上，
+     * 只有第一次真的跑 25 轮 A*，后两次都是毫秒级。
+     */
+    private CachedCandidates ensureCandidates(String originId, String destinationId) {
+        String cacheKey = candidatesKey(originId, destinationId);
+        Object lock = candidatesLocks.computeIfAbsent(cacheKey, k -> new Object());
+        synchronized (lock) {
+            CachedCandidates cached;
+            synchronized (candidatesCache) {
+                cached = candidatesCache.get(cacheKey);
+            }
+            // 基线是无风险图上的最短路，与气象风险无关：口岸状态未变（同键）即可复用，省一次 Dijkstra
+            PathResult baseline = cached != null
+                    ? cached.baseline()
+                    : shortestPath(originId, destinationId, Map.of());
+            syncRealWeather(false, baseline.pathNodeIds());
+            Map<String, RiskSegment> riskMap = weatherSimulator.currentRiskMap();
+            String riskSignature = riskStateSignature(riskMap);
+            if (cached != null && riskSignature.equals(cached.riskSignature())
+                    && System.currentTimeMillis() - cached.at() < CANDIDATES_CACHE_TTL_MS) {
+                return cached;
+            }
+            List<Map<String, Object>> out = new ArrayList<>();
+            Map<String, CandidatePath> byKey = new LinkedHashMap<>();
+            for (CandidatePath c : buildCandidates(originId, destinationId, baseline, riskMap)) {
+                out.add(toCandidate(c.key, c.label, c.path, riskMap, c.note, originId, destinationId, c.softened));
+                byKey.put(c.key, c);
+            }
+            CachedCandidates fresh = new CachedCandidates(riskSignature, baseline, out, byKey,
+                    System.currentTimeMillis());
+            synchronized (candidatesCache) {
+                candidatesCache.put(cacheKey, fresh);
+            }
+            return fresh;
+        }
+    }
 
-        List<Map<String, Object>> out = new ArrayList<>();
-        for (CandidatePath c : buildCandidates(originId, destinationId, baseline, riskMap)) {
-            out.add(toCandidate(c.key, c.label, c.path, riskMap, c.note, originId, destinationId, c.softened));
+    /** 候选缓存键：起点 + 终点 + 口岸状态签名（时段/货类/人工调整） */
+    private String candidatesKey(String originId, String destinationId) {
+        return originId + '>' + destinationId + '|' + customsEfficiencyService.stateSignature();
+    }
+
+    /**
+     * 风险图签名：边 ID 集合或任一惩罚系数/等级变化都会改变签名。
+     * 排序后再拼，保证同一份风险图无论 Map 遍历顺序都得到同一个签名。
+     */
+    private static String riskStateSignature(Map<String, RiskSegment> riskMap) {
+        if (riskMap == null || riskMap.isEmpty()) {
+            return "";
+        }
+        List<String> keys = new ArrayList<>(riskMap.keySet());
+        Collections.sort(keys);
+        StringBuilder sb = new StringBuilder(keys.size() * 32 + 8);
+        for (String k : keys) {
+            RiskSegment r = riskMap.get(k);
+            String penalty = r == null || r.getPenaltyMultiplier() == null ? "-" : r.getPenaltyMultiplier().toString();
+            String sev = r == null || r.getSeverity() == null ? "-" : r.getSeverity();
+            sb.append(k).append(':').append(penalty).append(':').append(sev).append(';');
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 缓存结果对外必须发一份新的 Map（调用方会往每条候选里 put 灾害概率等字段）：
+     * 只复制外层 Map，坐标/边 ID 等 List 只读共享，不产生额外内存开销。
+     */
+    private static List<Map<String, Object>> copyCandidates(List<Map<String, Object>> src) {
+        List<Map<String, Object>> out = new ArrayList<>(src.size());
+        for (Map<String, Object> m : src) {
+            out.add(new HashMap<>(m));
         }
         return out;
     }
@@ -653,9 +849,10 @@ public class RouteService {
         }
         this.lastCargoType = cargoType;
         validate(originId, destinationId);
-        PathResult baseline = shortestPath(originId, destinationId, Map.of());
-        syncRealWeather(false, baseline.pathNodeIds);
-        Map<String, RiskSegment> riskMap = weatherSimulator.currentRiskMap();
+        // 与 planCandidates 同一份快照：命中缓存时不再重跑 25 轮 A*，
+        // 「按所选候选开始导航」直接取回预览里那一条（2 核服务器上原本要 7~18s）
+        CachedCandidates snap = ensureCandidates(originId, destinationId);
+        PathResult baseline = snap.baseline;
         PathResult chosen;
         boolean softened = false;
         boolean allFused;
@@ -663,17 +860,13 @@ public class RouteService {
             chosen = baseline; // 最快 = 无风险纯时间基准（沿线风险段仍会标注，供司机权衡）
             allFused = roadCorridorsAllFused(originId, destinationId);
         } else {
-            // 与 planCandidates 复用同一套候选生成，按 key 精确取回司机所选的同一条路线
-            List<CandidatePath> candidates = buildCandidates(originId, destinationId, baseline, riskMap);
-            CandidatePath picked = null;
-            for (CandidatePath c : candidates) {
-                if (c.key.equals(choice)) {
-                    picked = c;
-                    break;
-                }
+            CandidatePath picked = snap.byKey.get(choice);
+            if (picked == null) {
+                picked = snap.byKey.get("recommended"); // choice 缺失/失效时回落到推荐路线，而不是报错
             }
             if (picked == null) {
-                picked = candidates.get(0); // choice 缺失/失效时回落到推荐路线，而不是报错
+                // 理论上不会发生：buildCandidates 必产出 recommended。兜底用无风险基线，绝不 500
+                picked = new CandidatePath(choice, "", "", baseline, false);
             }
             chosen = picked.path;
             softened = picked.softened;

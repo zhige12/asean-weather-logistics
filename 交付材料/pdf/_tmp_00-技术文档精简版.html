@@ -1,0 +1,79 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>00-技术文档精简版</title><style>
+@page { size: A4; margin: 16mm 14mm; }
+* { box-sizing: border-box; }
+body { font-family: "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;
+  font-size: 10.5pt; line-height: 1.7; color: #1a1a1a; margin: 0; }
+h1 { font-size: 20pt; border-bottom: 3px solid #2c6ecb; padding-bottom: 6px; margin: 4px 0 14px; }
+h2 { font-size: 15pt; border-left: 5px solid #2c6ecb; padding-left: 9px; margin: 20px 0 10px; page-break-after: avoid; }
+h3 { font-size: 12.5pt; margin: 15px 0 7px; color: #23406e; page-break-after: avoid; }
+h4,h5,h6 { font-size: 11pt; margin: 12px 0 6px; page-break-after: avoid; }
+p { margin: 7px 0; }
+ul,ol { margin: 7px 0 7px 4px; padding-left: 22px; }
+li { margin: 3px 0; }
+a { color: #2c6ecb; text-decoration: none; word-break: break-all; }
+code { font-family: "Consolas","Menlo",monospace; background: #eef1f5; padding: 1px 5px; border-radius: 3px; font-size: 9pt; }
+pre { background: #1e2430; color: #e6e6e6; padding: 11px 13px; border-radius: 6px; overflow-x: auto; page-break-inside: avoid; }
+pre code { background: none; color: #e6e6e6; padding: 0; font-size: 8.7pt; line-height: 1.5; }
+blockquote { border-left: 4px solid #c9d4e5; background: #f5f8fc; margin: 9px 0; padding: 6px 14px; color: #445; }
+table { border-collapse: collapse; width: 100%; margin: 11px 0; font-size: 9.3pt; page-break-inside: avoid; }
+th,td { border: 1px solid #c2cbd6; padding: 5px 9px; text-align: left; vertical-align: top; }
+th { background: #2c6ecb; color: #fff; font-weight: 600; }
+tbody tr:nth-child(even) { background: #f2f5fa; }
+hr { border: none; border-top: 1px solid #d3dae3; margin: 16px 0; }
+
+@page { size: A4; margin: 20mm 18mm; }
+body { font-size: 13pt; line-height: 2.05; }
+h1 { font-size: 24pt; }
+h2 { font-size: 17.5pt; margin: 30px 0 16px; }
+h3 { font-size: 14pt; margin: 20px 0 10px; }
+p { margin: 12px 0; }
+li { margin: 6px 0; }
+blockquote { font-size: 12.5pt; }
+table { font-size: 11.3pt; margin: 16px 0; }
+th,td { padding: 8px 12px; }
+</style></head><body><h1>东盟天气敏感物流调度系统 · 技术文档（精简版）</h1>
+<blockquote><p><strong>摘要</strong>　系统面向中国—东盟跨境物流，把台风、暴雨等强对流天气作为一等决策变量，贯通公路口岸通行与水运航道适航的实时联动调度，覆盖算路、在途、叫应与留痕全链路；决策过程可因果验证，并支持完全离线复现。</p></blockquote>
+<h2>一、问题与定位</h2>
+<p>面向中国—东盟（以中越口岸为典型场景）的<strong>天气敏感型跨境物流调度</strong>。台风、暴雨等强对流天气会同时冲击公路口岸通行与水运航道适航。传统调度把天气当静态备注，本系统把天气作为<strong>一等决策变量</strong>，贯穿「算路 → 在途 → 叫应留痕」全链路实时联动。</p>
+<p>典型链路：<strong>南宁(NN) → 河内(HN)</strong>，公路经<strong>友谊关 / 芒街</strong>口岸通关，水运经<strong>平陆运河</strong>出海。天气恶化时系统要连续回答：封不封关、停不停航、要不要换线、司机侧如何标红提醒、调度如何分级叫应并留痕。</p>
+<h2>二、系统架构总览</h2>
+<table><thead><tr><th>层</th><th>组成</th><th>职责</th></tr></thead><tbody><tr><td>前端</td><td>Vue3 调度大屏 + 司机端（Capacitor 瘦客户端 / Web）</td><td>地图可视化、风险标红、语音叫应、任务同步</td></tr><tr><td>后端</td><td>Spring Boot 4.1.0（REST，默认端口 8080）</td><td>算路、风险引擎、气象代理、决策沙盘、留痕</td></tr><tr><td>数据</td><td>路网 / 口岸 / 气象观测 / 瓦片缓存 / 决策缓存</td><td>支撑离线可复现演示</td></tr><tr><td>AI</td><td>本地 Ollama + 在线 DeepSeek + 离线文案池（三级降级）</td><td>态势解读、文案生成</td></tr></tbody></table>
+<p><strong>三智能体协同</strong>：调度 Agent、司机 Agent、越南侧 Agent（<code>DRIVER_VN</code>），经实时事件与 <code>/api/agent</code>、<code>/api/agent/analysis</code> 联动，形成「口岸—车队—对方口岸」三方视角；实际编排在 <code>DecisionOrchestrator</code>（串行调度 + 预生成缓存 + <code>agent-status</code> 广播）。</p>
+<h2>三、业务全流程：五阶段闭环</h2>
+<p>系统把一次天气冲击的处理拆成对用户透明的五阶段服务闭环，每阶段都有明确的前台触点、后台算法与支撑系统：</p>
+<table><thead><tr><th>阶段</th><th>用户动作</th><th>前台界面</th><th>后台支持</th></tr></thead><tbody><tr><td>① 风险感知</td><td>收到风险预警</td><td>大屏熔断弹窗 / App 推送</td><td>气象注入 + <code>RouteService</code> 阶跃熔断</td></tr><tr><td>② 方案生成</td><td>查看六维方案对比</td><td>AI 多维分析面板</td><td><code>RiskAgent→SolutionAgent→TouchAgent</code></td></tr><tr><td>③ 人工决策</td><td>调度员点选最终方案</td><td>决策沙盘滑块 + 选择按钮</td><td><code>DecisionSandboxService</code> 实时重估</td></tr><tr><td>④ 分级触达</td><td>各角色接收专属指令</td><td>司机端任务卡 / 语音播报</td><td>SSE <code>/api/agent/events</code> 广播</td></tr><tr><td>⑤ 闭环确认</td><td>点击"确认/Xác nhận"回执</td><td>确认回执状态灯</td><td><code>TaskController /accept</code> + <code>DecisionLogService</code> 留痕</td></tr></tbody></table>
+<p><strong>分级叫应（三级递进）</strong>：黄色关注→App 推送需点击确认；橙色准备→App＋短信需回复确认；红色立即行动→App＋语音外呼，未确认自动上报调度端并升级渠道。熔断计算对司机不可见、只显结果（可视分离线），决策权始终归属人。</p>
+<p><strong>三条核心业务流</strong>：公路熔断→评估运河可行→切陆水联运（推司机去港/船长备装/港口泊位）；运河能见度&lt;1000m 禁航→反向评估公路绕行芒街（船长取消装船/司机改走公路/口岸预约）；拔网线后重复全流程，本地推理＋缓存数据，功能正常、数据不出境。</p>
+<h2>四、核心机制与创新点</h2>
+<h3>4.1 天气 → 风险 → 算路熔断联动</h3>
+<p>风险引擎对路网边打惩罚分，超阈值即熔断改走。台风判定采用<strong>气压 + 风速双条件</strong>（<code>TyphoonRiskRule</code>）：仅当气压 ≤ 990hPa <strong>且</strong>风速达标才判台风，避免静风低压误触发。风阈值分档：40km/h 侧风预警、60km/h 高危、<code>IMPASSABLE_PENALTY=100</code> 为不可通行；真实侧风 ≥ 60km/h 判 HIGH、≥ 100km/h 判 CRITICAL。</p>
+<h3>4.2 陆水联运与禁航换线</h3>
+<p>平陆运河按风/雨顶穿红线时置 <code>waterBlocked</code>；公路段最大风速按 <code>/3.6</code> 折算灌入水运引擎，使公路与水运风险<strong>同源联动</strong>。口岸熔断（<code>roadBlocked</code>）触发时本程算路自动绕开；全域受阻时由 <code>CorridorAdvisoryService</code> 给出 DEFER/RETURN/HOLD 三种处置建议。</p>
+<h3>4.3 决策沙盘（可演示的因果）</h3>
+<p><code>/api/sandbox</code> 提供 15 个接口，可手动调节气压/风速滑杆，实时观察熔断、改走、水运禁航、司机标红的连锁反应——把「黑箱决策」变成「可当场验证的因果链」。</p>
+<h3>4.4 分级叫应与留痕</h3>
+<p><code>/api/outreach</code> 按风险等级触发语音/文字叫应并留存记录，形成闭环证据链。</p>
+<h2>五、后端模块结构</h2>
+<p>后端为单体重现工程（<code>src/main/java/com/example/aseanweatherlogistics</code>），经接口取证脚本统计，共 <strong>19 个 REST 控制器、96 个端点</strong>，统一由 <code>GlobalExceptionHandler</code> 产出带中文 <code>message</code> 的错误体。核心服务按职责分组：</p>
+<table><thead><tr><th>分组</th><th>关键类</th><th>职责</th></tr></thead><tbody><tr><td>算路与风险</td><td><code>RouteService</code>（邻接表 + A* + 逐边惩罚硬熔断）、<code>RouteAgentService</code>（300ms 防抖重算 + SSE 广播）、<code>TyphoonRiskRule</code>/<code>DriverRiskTipRule</code>/<code>RoadRiskIndex</code></td><td>边权惩罚、熔断改走、司机侧预警</td></tr><tr><td>多源气象</td><td><code>RealWeatherService</code>（节流 + 熔断）、<code>ContestWeatherProvider</code>/<code>OpenMeteoWeatherProvider</code>/<code>SimulatedWeatherProvider</code>、<code>WeatherWatchdogService</code>（60s 守护）</td><td>官方→公网→模拟三级降级</td></tr><tr><td>三智能体</td><td><code>DecisionOrchestrator</code>（编排入口）、<code>RiskAgent</code>/<code>SolutionAgent</code>/<code>TouchAgent</code>、<code>RecommendationPool</code></td><td>态势解读、方案轮换</td></tr><tr><td>大模型通道</td><td><code>OllamaService</code>（本地）/<code>DeepseekService</code>（在线）/<code>AIService</code>（降级）</td><td>三级 AI 降级</td></tr><tr><td>水运联运</td><td><code>WaterRiskEngine</code>（四条禁航红线）、<code>TributaryRiskService</code>、<code>IntermodalService</code></td><td>禁航判定、陆水切换</td></tr><tr><td>业务支撑</td><td><code>TaskService</code>、<code>TripSignalService</code>、<code>DecisionSandboxService</code>、<code>DecisionLogService</code>、<code>OutreachService</code></td><td>任务/在途/沙盘/留痕/叫应</td></tr></tbody></table>
+<p><strong>接口分布</strong>：<code>/api/routes</code>(12)、<code>/api/sandbox</code>(15)、<code>/api/weather</code>(13)、<code>/api/v1</code>(4)、<code>/api/agent</code>(4+1)、<code>/api/task</code>+<code>/api/trip</code>(5+4)、<code>/api/canal</code>+<code>/api/waterway</code>(6+3)、<code>/api/outreach</code>(6)、<code>/api/ai</code>(5)，其余健康检查/静态资源若干。</p>
+<h2>六、前端架构</h2>
+<p>前端为 Vue3 + Vite 工程，地图统一使用 <strong>Leaflet 1.9.4（Canvas 渲染）</strong>，分调度大屏与司机端两套入口。</p>
+<table><thead><tr><th>模块</th><th>文件</th><th>体量</th><th>职责</th></tr></thead><tbody><tr><td>大屏主应用</td><td><code>App.vue</code></td><td>108 KB</td><td>全局态势 + 布局编排</td></tr><tr><td>司机端</td><td><code>driver/DriverApp.vue</code></td><td>416 KB</td><td>接单/在途上报/触达弹窗/双语语音</td></tr><tr><td>地图</td><td><code>components/MapView.vue</code></td><td>45 KB</td><td>路网骨骼、风险边着色、路线绘制</td></tr><tr><td>决策沙盘</td><td><code>components/DecisionSandbox.vue</code></td><td>43 KB</td><td>气压/风速滑杆实时推演</td></tr><tr><td>三智能体面板</td><td><code>components/AgentPanel.vue</code></td><td>54 KB</td><td>智能体状态、<code>riskTips</code> 渲染</td></tr><tr><td>水运/支流</td><td><code>components/TributaryPanel.vue</code></td><td>17 KB</td><td>禁航与支流风险</td></tr><tr><td>叫应/派单</td><td><code>OutreachPanel.vue</code>/<code>TaskDispatchPanel.vue</code></td><td>11/10 KB</td><td>分级触达、任务派发</td></tr><tr><td>其余</td><td><code>PlaceInput</code>/<code>PlatformConfigurator</code>/<code>CarbonCalc</code>/<code>GrowthPath</code>/<code>ETAIndicator</code>/<code>RiskStrip</code>/<code>BriefingPanel</code>/<code>DecisionLogTimeline</code></td><td>—</td><td>地名输入、企业画像、碳排、路径成长等</td></tr></tbody></table>
+<p><strong>关键工具链</strong>（<code>utils/</code>）：<code>routeFlow.js</code>(25KB) 路线流光特效；<code>perfMode.js</code>(10KB) <strong>自动轻界面降级</strong>——平均帧率&lt;40fps 或单帧间隔&gt;250ms，或静态弱机信号（核心≤2 / 设备内存≤4GB / 系统要求减少动效）时关闭毛玻璃与流光等纯装饰，<strong>功能/数据/红绿分段全不变</strong>，且不写死（换好机器仍是满特效）；<code>ttsNormalizer.js</code>(13KB) 中越双语语音归一；<code>leafletCanvasGuard.js</code>(9KB) 渲染器守卫；<code>corridorAdvisory.js</code>(5KB) 全域受阻建议；<code>geocoder.js</code>/<code>tileSources.js</code>/<code>pathReshape.js</code> 地理编码与瓦片源管理。司机端可 Capacitor 打 APK，亦可直接浏览器开 <code>/driver.html</code>（同一套）。</p>
+<h2>七、地图与数据：离线可复现的根基</h2>
+<p><strong>自动降级链</strong>保证任何网络条件下地图与气象都不白屏：</p>
+<ul><li><strong>气象</strong>：官方 CRA40 观测 → 公网 Open-Meteo → 内置模拟；界面如实标注当前真正服务的源（<code>selectedSource</code> 与 <code>servedSource</code> 分开回显，不假装官方）。</li><li><strong>底图</strong>：在线天地图（密钥仅存后端，前端走同源代理）→ 本地预热瓦片；未配密钥时 <code>/api/tianditu/**</code> 返回 503，前端自动降级。</li></ul>
+<p>包内预置 <strong>z14 及以上约 1.4 万张</strong>影像瓦片（两级「内存 + 磁盘」缓存），拔网线仍能出图，深层缩放才走实时回源。这是「离线演示」承诺的技术底座。</p>
+<h2>八、数据文件与目录清单</h2>
+<table><thead><tr><th>路径</th><th>内容</th><th>是否入 git</th></tr></thead><tbody><tr><td><code>src/main/resources/data/vietnam-road-network.json</code></td><td>清洗后的中越跨境路网拓扑（约 <strong>8.6 万节点 / 9.8 万边</strong>，含口岸虚拟边，~36 MB）</td><td>✅ clone 即可演示</td></tr><tr><td><code>src/main/resources/data/customs-efficiency.json</code></td><td>口岸通关时效</td><td>✅</td></tr><tr><td><code>src/main/resources/data/knowledge-base.json</code></td><td>行业知识库（RAG 检索源）</td><td>✅</td></tr><tr><td><code>src/main/resources/data/place-names.json</code></td><td>本地地名库 <strong>52 条</strong>（32 条带 <code>nodeId</code>、14 条带 <code>hot</code> 权重作下拉源）</td><td>✅</td></tr><tr><td><code>decision-cache/*.json</code></td><td>多智能体决策预生成缓存 + 文案池</td><td>⛔ 随 Demo 包分发</td></tr><tr><td><code>asean-demo/data/tile-cache</code></td><td>离线包预热瓦片（实测 <strong>29,493 张 / 247.4 MB</strong>：img_w 12158・cia_w 11043・vec_w 3368・cva_w 2924）</td><td>⛔ 不入库</td></tr><tr><td><code>frontend/dist</code></td><td>前端构建产物，后端静态托管</td><td>⛔</td></tr><tr><td><code>.env.example</code> / <code>.env.local</code></td><td>脱敏模板 / 真实密钥</td><td>模板 ✅；密钥 ⛔ 永不入库</td></tr></tbody></table>
+<h2>九、演示证据链（引擎真实行为）</h2>
+<p>以下为决策沙盘与实时接口在本地服务上的实测结果，证明联动确凿生效：</p>
+<table><thead><tr><th>场景</th><th>输入</th><th>系统反应</th></tr></thead><tbody><tr><td>静风低压</td><td>友谊关气压 982.6hPa、风≈0</td><td><strong>不判台风</strong>（双条件生效，防误触发）</td></tr><tr><td>单风顶线</td><td>芒街风 75km/h、气压正常</td><td>公路不熔断，但水运 <code>waterBlocked=true</code>（顶穿运河红线）</td></tr><tr><td>台风达标</td><td>友谊关风 75km/h + 气压 985</td><td><code>roadBlocked=true</code>、<code>rerouted=true</code>，本程 NN→HN 由 329 边改走 E9 的 408 边</td></tr><tr><td>侧风预警</td><td>风 40km/h</td><td>不熔断，但 <code>/api/agent/analysis</code> 中 DRIVER、DRIVER_VN 各下发 1 条侧风预警</td></tr></tbody></table>
+<h2>十、AI 能力与诚实降级</h2>
+<p>在线 DeepSeek 生成态势解读；无外网时自动降级到本地 Ollama，再降级到 <code>decision-cache</code> 离线文案池 + 规则模板。<strong>任何降级都在界面标注来源</strong>，不冒充实时 AI 结论。</p>
+<h2>十一、交付形态与复现</h2>
+<ul><li><strong>可运行 Demo</strong>：<code>asean-demo-offline.zip</code>（含自带 JRE、后端 jar、前端产物、预热瓦片、决策缓存、<code>start.bat</code>），解压后双击即起、浏览器自动打开大屏，开箱即可完成功能核验；三档机器要求与 40fps 自动降级已在 <code>README.txt</code> 写清。</li><li><strong>可视化材料</strong>：系统架构图、分层架构图、服务蓝图、界面原型图、业务流程图、数据使用说明图共 5 类成图（3120px 高清 PNG），Mermaid 源文件另附。</li><li><strong>从零复现</strong>：<code>git clone</code> → <code>copy .env.example .env.local</code>（全留空）→ <code>gradlew compileJava compileTestJava test</code> → 前端 <code>npm ci &amp;&amp; npm run build</code> → <code>gradlew bootRun</code>；不填任何密钥亦可起服务走降级链，密钥仅用于解锁官方数据与在线 AI。</li></ul>
+<h2>十二、技术栈一览</h2>
+<table><thead><tr><th>维度</th><th>选型</th></tr></thead><tbody><tr><td>后端</td><td>Spring Boot 4.1.0 / Java，REST 96 个接口（19 控制器）</td></tr><tr><td>前端</td><td>Vue3 + Vite + Leaflet 1.9.4（Canvas 渲染），Capacitor 打包 Android</td></tr><tr><td>地图</td><td>天地图 + 本地矢量/影像瓦片，多级降级</td></tr><tr><td>气象</td><td>官方 CRA40 + Open-Meteo + 模拟，三级降级</td></tr><tr><td>AI</td><td>Ollama 本地 + DeepSeek 在线 + 离线文案池</td></tr><tr><td>场景</td><td>中越口岸（友谊关/芒街）、平陆运河、NN→HN 走廊</td></tr></tbody></table>
+<blockquote><p>复现步骤、依赖镜像、密钥边界与已知坑，详见《01-技术文档》第五、十、十一章。</p></blockquote></body></html>

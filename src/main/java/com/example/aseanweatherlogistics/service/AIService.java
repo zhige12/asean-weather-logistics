@@ -38,14 +38,18 @@ public class AIService {
     private final RouteService routeService;
     private final KnowledgeBaseService knowledgeBaseService;
     private final WeatherSimulator weatherSimulator;
+    /** 决策沙盘：把调度员「模拟模式」调出的气象并入路线风险预测，让候选卡牌识别到沙盘灾害 */
+    private final DecisionSandboxService sandbox;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public AIService(DeepseekService deepseekService, RouteService routeService,
-                     KnowledgeBaseService knowledgeBaseService, WeatherSimulator weatherSimulator) {
+                     KnowledgeBaseService knowledgeBaseService, WeatherSimulator weatherSimulator,
+                     DecisionSandboxService sandbox) {
         this.deepseekService = deepseekService;
         this.routeService = routeService;
         this.knowledgeBaseService = knowledgeBaseService;
         this.weatherSimulator = weatherSimulator;
+        this.sandbox = sandbox;
     }
 
     /** 单语（中文）预警：plan-with-weather 等前端接口使用 */
@@ -323,6 +327,11 @@ public class AIService {
             weather = new ArrayList<>();
         }
 
+        // 1.5) 决策沙盘模拟叠加：调度员在沙盘「模拟模式」调出的暴雨/大风/大雾/高温，
+        // 只要本程经过对应口岸断面就并入气象点，让候选卡牌逐灾种概率识别到沙盘灾害
+        // （哪怕没到熔断阈值、不会注入风险段，也应如实反映调度员的 what-if 推演）
+        applySandboxOverlay(weather, pathNodeIds, pathEdgeIds);
+
         // 2) 灾害预测：DeepSeek（deep=true）→ 失败降级规则引擎
         List<Map<String, Object>> hazards = new ArrayList<>();
         String source = "rule";
@@ -418,6 +427,35 @@ public class AIService {
     /** 选路场景的快捷重载（不调 DeepSeek，保证候选列表毫秒级返回） */
     public Map<String, Object> predictRouteRisk(String originId, String destinationId, List<String> pathNodeIds) {
         return predictRouteRisk(originId, destinationId, pathNodeIds, null, false);
+    }
+
+    /**
+     * 把决策沙盘「模拟模式」下两断面的可调气象并入本程气象点：按口岸边(E4/E9)/节点(YGG/MC)
+     * 匹配——只有路线真的经过该断面才叠加，避免把芒街的模拟台风算到走友谊关的路线上。
+     * 拿不到路线几何（边/节点都为空）时才整体并入。真实模式不叠加（其数据本就来自实时气象）。
+     */
+    private void applySandboxOverlay(List<Map<String, Object>> weather,
+                                     List<String> pathNodeIds, List<String> pathEdgeIds) {
+        if (sandbox == null || weather == null) {
+            return;
+        }
+        Map<String, Map<String, Object>> overlay = sandbox.simWeatherOverlay();
+        if (overlay.isEmpty()) {
+            return;
+        }
+        boolean noGeom = (pathEdgeIds == null || pathEdgeIds.isEmpty())
+                && (pathNodeIds == null || pathNodeIds.isEmpty());
+        java.util.Set<String> edges = pathEdgeIds == null
+                ? java.util.Set.of() : new java.util.HashSet<>(pathEdgeIds);
+        java.util.Set<String> nodes = pathNodeIds == null
+                ? java.util.Set.of() : new java.util.HashSet<>(pathNodeIds);
+        for (Map<String, Object> w : overlay.values()) {
+            String edgeId = String.valueOf(w.get("edgeId"));
+            String nodeId = String.valueOf(w.get("nodeId"));
+            if (noGeom || edges.contains(edgeId) || nodes.contains(nodeId)) {
+                weather.add(new LinkedHashMap<>(w));
+            }
+        }
     }
 
     /** 高风险阈值（%）：达到即标红；未达一律标绿 */

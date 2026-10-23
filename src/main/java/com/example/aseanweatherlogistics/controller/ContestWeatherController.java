@@ -1,6 +1,7 @@
 package com.example.aseanweatherlogistics.controller;
 
 import com.example.aseanweatherlogistics.util.HttpUtil;
+import com.example.aseanweatherlogistics.util.SecretCodec;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -19,6 +20,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -64,6 +66,12 @@ public class ContestWeatherController {
     private long circuitOpenSeconds;
     @Value("${weather.real.circuit-failure-threshold:3}")
     private long circuitFailureThreshold;
+
+    /** 外发包里凭证为 ENC() 密文，启动阶段还原为明文（开发机明文值原样直通） */
+    @PostConstruct
+    void resolveSecrets() {
+        serverToken = SecretCodec.resolve(serverToken);
+    }
 
     /** 合规：同一查询串在该 TTL 内直接命中缓存，不重复回源 */
     private static final long PROXY_CACHE_TTL_MS = 10 * 60_000L;

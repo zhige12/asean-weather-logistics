@@ -1,6 +1,7 @@
 package com.example.aseanweatherlogistics.service;
 
 import com.example.aseanweatherlogistics.util.HttpUtil;
+import com.example.aseanweatherlogistics.util.SecretCodec;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
@@ -270,7 +271,7 @@ public class ContestForecastService {
                     .timeout(Duration.ofSeconds(Math.max(1, timeoutSeconds)))
                     .header("User-Agent", USER_AGENT)
                     .header("Accept", "application/json")
-                    .header("Authorization", "Bearer " + token)
+                    .header("Authorization", "Bearer " + SecretCodec.resolve(token))
                     .GET()
                     .build();
             HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());

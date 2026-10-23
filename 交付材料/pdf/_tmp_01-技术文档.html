@@ -1,0 +1,219 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>01-技术文档</title><style>
+@page { size: A4; margin: 16mm 14mm; }
+* { box-sizing: border-box; }
+body { font-family: "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;
+  font-size: 10.5pt; line-height: 1.7; color: #1a1a1a; margin: 0; }
+h1 { font-size: 20pt; border-bottom: 3px solid #2c6ecb; padding-bottom: 6px; margin: 4px 0 14px; }
+h2 { font-size: 15pt; border-left: 5px solid #2c6ecb; padding-left: 9px; margin: 20px 0 10px; page-break-after: avoid; }
+h3 { font-size: 12.5pt; margin: 15px 0 7px; color: #23406e; page-break-after: avoid; }
+h4,h5,h6 { font-size: 11pt; margin: 12px 0 6px; page-break-after: avoid; }
+p { margin: 7px 0; }
+ul,ol { margin: 7px 0 7px 4px; padding-left: 22px; }
+li { margin: 3px 0; }
+a { color: #2c6ecb; text-decoration: none; word-break: break-all; }
+code { font-family: "Consolas","Menlo",monospace; background: #eef1f5; padding: 1px 5px; border-radius: 3px; font-size: 9pt; }
+pre { background: #1e2430; color: #e6e6e6; padding: 11px 13px; border-radius: 6px; overflow-x: auto; page-break-inside: avoid; }
+pre code { background: none; color: #e6e6e6; padding: 0; font-size: 8.7pt; line-height: 1.5; }
+blockquote { border-left: 4px solid #c9d4e5; background: #f5f8fc; margin: 9px 0; padding: 6px 14px; color: #445; }
+table { border-collapse: collapse; width: 100%; margin: 11px 0; font-size: 9.3pt; page-break-inside: avoid; }
+th,td { border: 1px solid #c2cbd6; padding: 5px 9px; text-align: left; vertical-align: top; }
+th { background: #2c6ecb; color: #fff; font-weight: 600; }
+tbody tr:nth-child(even) { background: #f2f5fa; }
+hr { border: none; border-top: 1px solid #d3dae3; margin: 16px 0; }
+</style></head><body><p>  # 面向东盟跨境物流的突发气象预警与多路线协同调度平台 · 技术文档</p>
+<blockquote><p>参赛组别：智能应用类 用途：技术实现与复现说明。关键密钥已脱敏（以 <code>&lt;...&gt;</code> 占位），全部步骤可复现。</p>
+<p>与提交要求的对应关系：</p>
+<table><thead><tr><th>提交要求</th><th>对应章节</th></tr></thead><tbody><tr><td>环境配置说明</td><td>二（环境要求）、四（配置项与脱敏模板）、十（依赖获取与网络/代理矩阵）</td></tr><tr><td>依赖列表</td><td>三（后端 / 前端 / 本地模型依赖）、10.1（获取渠道与镜像）</td></tr><tr><td>部署步骤</td><td>五（后端、大屏、司机端 Web、Android、离线演示）、11.1（从零复现）</td></tr><tr><td>API 接口清单</td><td>六（19 个控制器 / 96 个端点，由 <code>tools/_api_inventory.mjs</code> 扫描生成）</td></tr><tr><td>关键配置可脱敏且可复现</td><td>10.3（脱敏对照与密钥边界）、11.1（无凭证跑通全流程）、11.2（环境差异与已知坑）</td></tr></tbody></table></blockquote>
+<hr>
+<h2>一、技术栈总览</h2>
+<table><thead><tr><th>层次</th><th>技术选型</th><th>版本</th></tr></thead><tbody><tr><td>后端核心</td><td>Spring Boot</td><td>4.1.0</td></tr><tr><td>语言/运行时</td><td>Java</td><td>21（Gradle toolchain 指定）</td></tr><tr><td>图计算</td><td>自建邻接表 + 优先队列 A*（可采纳启发式：直线距离 ÷ 全图最高限速，最优解与纯 Dijkstra 完全一致，只是剪掉无向扩散）；baseline/current 双路多核并行；GraphHopper（OSM PBF 坐标算路，默认关闭）</td><td>GraphHopper 10.2</td></tr><tr><td>AI 智能体</td><td>Ollama（本地私有化）+ Qwen2.5-14B；三智能体 <code>RiskAgent → SolutionAgent → TouchAgent</code> 串行，由 <code>DecisionOrchestrator</code> 编排并经 SSE <code>agent-status</code> 逐条点亮</td><td>qwen2.5:14b / deepseek-chat</td></tr><tr><td>PC 调度大屏</td><td>Vue 3 + Vite + Leaflet（Canvas 渲染保护 + 底图四级降级链）</td><td>Vue 3.5 / Vite 8 / Leaflet 1.9.4</td></tr><tr><td>实时通道</td><td>Spring MVC <code>SseEmitter</code> 单条流（<code>/api/agent/events</code>）承载 6 类业务事件：<code>route-update</code> / <code>task-assigned</code> / <code>agent-status</code> / <code>outreach-update</code> / <code>canal-block</code> / <code>canal-recover</code></td><td>—</td></tr><tr><td>移动端司机 App</td><td>Vue 3 + Capacitor（当前落地 Android）</td><td>Capacitor 8.5</td></tr><tr><td>数据层</td><td>JSON 数据 + 内存/磁盘瓦片缓存 + 决策预生成缓存</td><td>—</td></tr><tr><td>构建</td><td>Gradle（后端）、npm/Vite（前端）</td><td>—</td></tr></tbody></table>
+<hr>
+<h2>二、环境要求</h2>
+<ul><li><strong>JDK 21+</strong>（项目 toolchain 锁定 Java 21；更高版本 JDK 亦可编译运行）</li><li><strong>Node.js 20+</strong>（前端 Vite 8 构建；实测 Node 26 可用）</li><li><strong>Android SDK</strong>（仅打包司机端 APK 时需要）</li><li><strong>Ollama</strong>（本地大模型推理，离线演示必需）</li></ul>
+<hr>
+<h2>三、依赖清单</h2>
+<h3>3.1 后端（<code>../build.gradle</code>）</h3>
+<pre><code class="lang-gradle">plugins {
+    id 'java'
+    id 'org.springframework.boot' version '4.1.0'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    developmentOnly  'org.springframework.boot:spring-boot-devtools'
+    compileOnly      'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+
+    // 图算法（依赖已声明；当前路径规划以自建 Dijkstra 为主）
+    implementation 'org.jgrapht:jgrapht-core:1.5.2'
+    implementation 'org.jgrapht:jgrapht-io:1.5.2'
+
+    // GraphHopper：直接读取 OSM PBF 做坐标算路
+    implementation('com.graphhopper:graphhopper-core:10.2') {
+        exclude group: 'org.slf4j', module: 'slf4j-simple'
+    }
+    // OSM PBF 解析
+    implementation 'org.openstreetmap.osmosis:osmosis-core:0.49.1'
+    implementation 'org.openstreetmap.osmosis:osmosis-pbf:0.49.1'
+    implementation 'org.openstreetmap.pbf:osmpbf:1.5.0'
+
+    implementation 'com.google.code.gson:gson:2.10.1'   // jackson 由 Spring Boot BOM 管理
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+
+tasks.named('bootRun') { jvmArgs = ['-Xms2g', '-Xmx6g', '-XX:+UseZGC'] }</code></pre>
+<h3>3.2 前端（<code>../frontend/package.json</code>）</h3>
+<pre><code class="lang-json">{
+  "dependencies": {
+    "@capacitor-community/text-to-speech": "^8.0.2",
+    "@capacitor/geolocation": "^8.2.2",
+    "axios": "^1.19.0",
+    "leaflet": "^1.9.4",
+    "vue": "^3.5.40"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.5.2",
+    "@capacitor/core": "^8.5.2",
+    "@capacitor/ios": "^8.5.2",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "vite": "^8.2.0"
+  }
+}</code></pre>
+<blockquote><p><strong>底图不使用 MapLibre / 矢量瓦片 GPU 渲染</strong>。四级降级链全部是 Leaflet 标准 <code>L.tileLayer</code>，源定义集中在 <code>../frontend/src/utils/tileSources.js</code>（大屏与司机端共用同一份顺序）： 底图1 天地图影像 <code>img_w</code>+注记 <code>cia_w</code> → 底图2 天地图矢量 <code>vec_w</code>+注记 <code>cva_w</code> → 底图3 OSM 在线栅格 → 底图4 离线瓦片（<code>/tiles/{z}/{x}/{y}.jpg</code>，EPSG:4326，由 <code>WebConfig</code> 静态托管）。 天地图三种一律走同源后端代理 <code>/api/tianditu/{layer}/{z}/{x}/{y}.png</code>，<strong>浏览器包内零密钥</strong>。</p></blockquote>
+<h3>3.3 本地大模型</h3>
+<pre><code class="lang-bash"># 安装 Ollama 后拉取模型（约 9GB）
+ollama pull qwen2.5:14b
+# 服务默认监听 http://localhost:11434</code></pre>
+<hr>
+<h2>四、配置说明（<code>../src/main/resources/application.properties</code> + <code>.env.local</code>）</h2>
+<p>后端通过 <code>spring.config.import=optional:file:./.env.local[.properties]</code> 读取根目录 <code>.env.local</code> 环境变量。以下为<strong>脱敏</strong>后的关键项：</p>
+<table><thead><tr><th>配置项</th><th>说明</th><th>默认值 / 示例（已脱敏）</th></tr></thead><tbody><tr><td><code>server.address</code></td><td>监听地址，<code>0.0.0.0</code> 使手机同 WiFi 可连</td><td><code>0.0.0.0</code></td></tr><tr><td><code>weather.real.base-url</code></td><td>大赛官方 CRA40 实况/预报接口（GOWFS 共用）</td><td><code>http://&lt;官方地址&gt;:8001</code></td></tr><tr><td><code>weather.real.token</code></td><td>官方气象接口 Token（<strong>仅存后端</strong>）</td><td><code>&lt;气象TOKEN&gt;</code></td></tr><tr><td><code>weather.real.observation-time</code></td><td>实况起报时次 <code>YYYYMMDDHHMM</code></td><td><code>202412312000</code></td></tr><tr><td><code>weather.source</code></td><td>数据源切换：<code>contest-observation</code> / <code>open-meteo</code> / <code>simulated</code></td><td><code>contest-observation</code></td></tr><tr><td><code>weather.real.ttl-minutes</code></td><td>实况内存缓存时长</td><td><code>10</code></td></tr><tr><td><code>weather.real.min-request-interval-seconds</code></td><td><strong>每源各自</strong>最小回源间隔（切源不被上一个源的窗口挡住）</td><td><code>60</code></td></tr><tr><td><code>weather.real.min-source-switch-gap-seconds</code></td><td>跨源最小回源间隔（防“来回切源”把窗口变摆设）</td><td><code>5</code></td></tr><tr><td><code>weather.real.circuit-failure-threshold</code> / <code>circuit-open-seconds</code></td><td>连败开熔断阈值 / 静默时长（<strong>熔断态也按源各自算</strong>，官方 Token 失效不连带封 Open-Meteo）</td><td><code>3</code> / <code>300</code></td></tr><tr><td><code>weather.forecast.min-request-interval-seconds</code></td><td>GOWFS 3h 预报独立节流（与实况不抢额度）</td><td><code>1800</code>（静默 <code>600</code>）</td></tr><tr><td><code>weather.forecast.run-time</code> / <code>hours</code></td><td>预报起报时次（仅 <code>08:00</code>/<code>20:00</code>）与累计时效（3 的倍数，最多 5 个）</td><td><code>202412312000</code> / <code>3,6</code>（即未来 6h）</td></tr><tr><td><code>weather.watchdog.enabled</code> / <code>interval</code></td><td>后台气象守护（<strong>不依赖客户端轮询</strong>的真实检测触发源）</td><td><code>true</code> / <code>60s</code>（启动延迟 20s）</td></tr><tr><td><code>ollama.enabled</code> / <code>model</code> / <code>url</code></td><td>本地大模型开关与 OpenAI 兼容端点（离线演示置 true）</td><td><code>true</code> / <code>qwen2.5:14b</code> / <code>http://localhost:11434/v1/chat/completions</code></td></tr><tr><td><code>deepseek.fallback.key</code></td><td>在线 DeepSeek 兜底 Key（<strong>未填即视为该通道未启用</strong>，直接降级不假装成功）</td><td><code>&lt;DEEPSEEK_KEY&gt;</code></td></tr><tr><td><code>decision.cache.dir</code></td><td>多智能体预生成缓存目录</td><td><code>decision-cache</code></td></tr><tr><td><code>tianditu.tk</code> / <code>tianditu.keys</code></td><td>天地图单密钥 / <strong>密钥池</strong>（轮转 + per-key 熔断，仅存后端）</td><td><code>&lt;TK1,TK2,...&gt;</code></td></tr><tr><td><code>tianditu.cache-dir</code> / <code>mem-cache-entries</code> / <code>referer</code> / <code>timeout-seconds</code></td><td>瓦片磁盘缓存目录 / 内存 LRU 上限 / 密钥未授权域名时的兜底 Referer / 单张超时（超时即冷却该 key 并换 key 重试，全池失败才 503 让前端降级）</td><td><code>../data/tile-cache</code> / <code>20000</code> / <code>&lt;已授权域名&gt;</code> / <code>6</code></td></tr><tr><td><code>geocode.nominatim.enabled</code> / <code>endpoint</code> / <code>proxy</code> / <code>region-bias</code></td><td>越南街道/店名兜底 Nominatim（天地图对越南 POI 几乎无结果）；代理端口留空则直连；裸地名命中外地同名点时用城市前缀纠偏</td><td><code>true</code> / 官方端点 / <code>&lt;可空&gt;</code> / <code>南宁市</code></td></tr><tr><td><code>demo.guard.enabled</code> / <code>deny-osm-loader</code> / <code>strict-limit-per-minute</code> / <code>normal-limit-per-minute</code></td><td>公网演示护栏：总开关 / 封死 311 MB PBF 加载入口 / 改全局状态的写接口限流 / 其余写接口限流</td><td><code>true</code> / <code>true</code> / <code>20</code> / <code>180</code></td></tr><tr><td><code>waterway.source</code> / <code>official.api-base</code> / <code>official.token</code> / <code>poll-interval-ms</code></td><td>平陆运河通航观测接入：<code>mock</code>（手动推送验证同一链路）/ <code>official</code>；轮询与水文站 15 min 上报同频（<strong>mock 模式不轮询</strong>，免得定时把演示剧本打回正常）</td><td><code>mock</code> / <code>&lt;待协议获取&gt;</code> / <code>&lt;预留&gt;</code> / <code>900000</code></td></tr><tr><td><code>osm.loader.enabled</code></td><td>GraphHopper OSM PBF 加载开关（坐标算路模式）</td><td><code>false</code></td></tr></tbody></table>
+<blockquote><p><strong>合规说明</strong>：气象 Token、天地图密钥池、DeepSeek Key、预留的水运官方 Token 全部只存后端环境变量（真值写本机 <code>.env.local</code>，已 <code>../.gitignore</code>），前端与 APK 构建产物零密钥；未配置的通道一律按“未启用”处理并自动降级，不使用占位凭证伪称调用成功。 AI 降级链为 <strong>本地 Ollama（优先，数据不出境）→ 在线 DeepSeek → 历史 AI 文案池轮换 → 规则模板</strong> 四级；实际命中哪一级就在界面标注哪一级，三智能体的汇总标签取其中远程程度最高的一级，不存在“本地推理”标签下实际走了在线通道的情况。</p></blockquote>
+<p><strong><code>.env.local</code> 模板</strong>：仓库根目录已提供可直接复制的脱敏模板 <a href="../.env.example"><code>.env.example</code></a>（<code>copy .env.example .env.local</code>），其中每一项都带“留空会怎样”的注释。手工填写时的最小集合如下：</p>
+<pre><code class="lang-properties">WEATHER_REAL_BASE_URL=http://&lt;官方地址&gt;:8001
+WEATHER_REAL_TOKEN=&lt;气象TOKEN&gt;
+WEATHER_REAL_OBSERVATION_TIME=202412312000
+OLLAMA_ENABLED=true
+OLLAMA_MODEL=qwen2.5:14b
+TIANDITU_KEYS=&lt;TK1,TK2,TK3,TK4,TK5&gt;
+DEEPSEEK_FALLBACK_KEY=&lt;可选&gt;
+GEOCODE_NOMINATIM_PROXY=&lt;本机代理端口，可留空&gt;
+# 可选：tianditu.mem-cache-entries=20000、WEATHER_FORECAST_RUN_TIME=202407152000（雨季真实降水样例）</code></pre>
+<p>前端<strong>不需要任何环境变量与密钥</strong>：<code>../frontend</code> 下不存在 <code>.env.local</code>，全部前端代码只读取 <code>import.meta.env.PROD</code> 一个构建期常量；历史上遗留的 <code>VITE_TIANDITU_TK</code> 已随“浏览器直连天地图”方案一起移除（改走后端同源代理后无任何代码读取它）。</p>
+<hr>
+<h2>五、部署与运行步骤</h2>
+<blockquote><p>前提：clone 后先准备 <code>.env.local</code>（可直接用根目录 <code>.env.example</code> 复制，全部留空也能启动）。 JDK 不需额外配置：<code>../gradle.properties</code> 已启用 toolchain 的 auto-detect / auto-download，<strong>不写死任何开发机的 JDK 绝对路径</strong>； 若本机已装多个 JDK 需指定，取消 <code>org.gradle.java.home</code> 一行的注释并改为本机路径即可（默认保持注释状态）。</p></blockquote>
+<h3>5.1 后端服务</h3>
+<pre><code class="lang-bash"># Windows
+gradlew.bat bootRun
+# Linux / macOS
+./gradlew bootRun</code></pre>
+<ul><li>启动后监听 <code>http://&lt;本机IP&gt;:8080</code>，<code>GET /ping</code> 返回 <code>OK</code> 即成功。</li><li>启动时自动加载 <code>resources/data/vietnam-road-network.json</code> 构建拓扑图（<code>StartupWarmup</code> 预热）。</li></ul>
+<h3>5.2 PC 调度大屏 / 司机端（Web）</h3>
+<pre><code class="lang-bash">cd frontend
+npm install
+npm run dev          # 开发：Vite 热更新，默认 http://localhost:5173
+# 或构建产物（后端会从 file:frontend/dist 托管）：
+npm run build        # 输出到 frontend/dist</code></pre>
+<ul><li>大屏入口：<code>http://&lt;本机IP&gt;:8080/</code></li><li>司机端入口：<code>http://&lt;本机IP&gt;:8080/driver.html</code></li></ul>
+<blockquote><p>注意：Spring 静态托管读的是<strong>已构建的 dist</strong>，改前端代码后需 <code>npm run build</code> 重新构建；开发调试则用 Vite dev server。</p></blockquote>
+<h3>5.3 司机端 Android APK（瘦客户端）</h3>
+<pre><code class="lang-bash">cd frontend
+npm run build
+npx cap sync android
+cd android
+gradlew assembleDebug --no-daemon
+# 产物：android/app/build/outputs/apk/debug/app-debug.apk</code></pre>
+<ul><li><code>capacitor.config.json</code> 的 <code>server.url</code> 指向<strong>运行后端的电脑局域网 IP</strong>（示例 <code>http://192.168.200.140:8080/driver.html</code>）。演示前需把该 IP 改为当前后端机器 IP，手机与电脑连同一 WiFi 即可。</li><li>瘦客户端机制：APK 运行时 WebView 加载电脑上的 dist，因此前端改动只需重新 <code>npm run build</code> + 后端在跑，手机重开 App 即更新，无需重装 APK。</li></ul>
+<h3>5.4 离线演示（拔网线）清单</h3>
+<ol><li>提前 <code>ollama pull qwen2.5:14b</code> 并让 Ollama 随系统启动（<code>OLLAMA_ENABLED=true</code>）。</li><li>提前拉取一次气象数据 / 或切 <code>weather.source=simulated</code>。</li><li>提前生成决策缓存：<code>../tools/pregen_agent_cache.ps1</code> 按 scenarioId 跑好三组场景，产出 <code>decision-cache/*.json</code>（<code>scenario_heavy_rain / scenario_light_rain / scenario_dual_risk</code>）与文案池 <code>recommendation-pool.json</code>。<strong>在途行程不读缓存</strong>（缓存里的推荐没考虑车的位置）。</li><li>天地图瓦片：已两级缓存（内存 + <code>../data/tile-cache</code> 磁盘），演示前预热热门瓦片。</li><li>断网后重复核心流程验证：本地推理、本地算路、本地瓦片全部可用；界面上的来源/通道徽标应如实变为「模拟降级 / 缓存 / 模板」而不是继续谎称实时。</li></ol>
+<hr>
+<h2>六、API 接口清单</h2>
+<blockquote><p>共 <strong>19 个控制器 / 96 个端点</strong>（由 <code>node tools/_api_inventory.mjs</code> 从 <code>controller/</code> 包直接扫描生成，与代码同步）。 计数含无路径的根映射（如 <code>@GetMapping</code> 不带括号参数的 <code>GET /api/geocode</code>、<code>GET /api/knowledge</code>）；取证脚本早期版本因正则强制要求 <code>(</code> 而漏计这类端点，已修正。 统一前缀 <code>/api</code>；实时事件走 SSE（<code>text/event-stream</code>）。</p></blockquote>
+<h3>6.1 算路与路线状态 <code>RouteController</code>（<code>/api/routes</code>，同时兼容别名 <code>/api/route</code>）（12）</h3>
+<table><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody><tr><td>POST</td><td><code>/plan</code></td><td>路径规划（两种入参二选一：<code>originId+destinationId</code> 节点模式，或 <code>startLat/startLng/endLat/endLng</code> 坐标模式——后者先吸附最近路网节点，超 5 km 报 400「该区域暂未覆盖路网」）；返回 baseline/current/extraHours、风险逐段、<code>routeGeoJSON</code>、吸附信息</td></tr><tr><td>GET</td><td><code>/plan-with-weather</code></td><td>带气象的方案（AI 已移出关键路径，算路不等模型）</td></tr><tr><td>GET</td><td><code>/plan-real</code></td><td>GraphHopper 坐标算路（<code>fromLat/fromLon/toLat/toLon</code>），需 <code>osm.loader.enabled=true</code> 且 PBF 已加载</td></tr><tr><td>GET</td><td><code>/candidates</code></td><td>多候选路线（推荐 / 备选 / 最快）</td></tr><tr><td>POST</td><td><code>/plan-sample</code></td><td>样例路径规划（演示固定起终点）</td></tr><tr><td>POST</td><td><code>/detour</code></td><td>绕行计算（禁用指定风险边的局部重算）</td></tr><tr><td>GET</td><td><code>/status</code></td><td>OSM 加载器状态（<code>enabled/loading/loaded + message</code>，对应顶栏「OSM 状态」）</td></tr><tr><td>POST</td><td><code>/block</code>、<code>/unblock</code></td><td>手动熔断 / 解除某条边（<code>penaltyMultiplier</code> 默认 100）</td></tr><tr><td>POST</td><td><code>/osm/start</code>、<code>/osm/stop</code></td><td>GraphHopper OSM PBF 坐标算路加载开关（<strong>公网演示被护栏直接 403</strong>，它会加载 311 MB PBF）</td></tr><tr><td>GET</td><td><code>/network</code></td><td>路网拓扑（节点/边，供骨骼图与调试）</td></tr></tbody></table>
+<h3>6.2 运输任务与在途 <code>TaskController</code>（<code>/api/task</code>）（5）、<code>TripController</code>（<code>/api/trip</code>）（4）</h3>
+<table><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody><tr><td>POST</td><td><code>/api/task/dispatch</code></td><td>公司派单 → SSE 广播 <code>task-assigned</code>（默认剧本：桂A·D12345 / 阿明 / 18 t 冷鲜 / 南宁→河内）</td></tr><tr><td>GET</td><td><code>/api/task/current</code></td><td>司机端拉取当前任务（SSE 断开时的兜底回到任务模式）</td></tr><tr><td>POST</td><td><code>/api/task/accept</code>、<code>/api/task/reject</code></td><td>司机接单 / 拒单（带原因），回执回流大屏与决策日志</td></tr><tr><td>POST</td><td><code>/api/task/reset</code></td><td>演示复位：撤销任务（界面「撤销派单」）</td></tr><tr><td>POST</td><td><code>/api/trip/start</code>、<code>/api/trip/progress</code></td><td>开始行程 / 上报在途进度（司机端约 30 s 一次；超 5 min 视为不在途）</td></tr><tr><td>GET</td><td><code>/api/trip/signal</code>、POST <code>/api/trip/reset</code></td><td>读当前行程信号 / 复位</td></tr></tbody></table>
+<h3>6.3 实时事件与三智能体 <code>AgentController</code>（<code>/api/agent</code>）（4）、<code>AgentAnalysisController</code>（1）</h3>
+<table><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody><tr><td>GET</td><td><code>/api/agent/events</code></td><td><strong>SSE</strong> 唯一长连接；首帧 <code>init</code>，之后推 <code>route-update</code> / <code>task-assigned</code> / <code>agent-status</code> / <code>outreach-update</code> / <code>canal-block</code>·<code>canal-recover</code></td></tr><tr><td>POST</td><td><code>/api/agent/register</code>、<code>/api/agent/unregister</code></td><td>关注路线注册 / 注销（大屏与司机端各自登记自己在看的路线）</td></tr><tr><td>GET</td><td><code>/api/agent/status</code></td><td>守护与重算运行状态（不含密钥）</td></tr><tr><td>GET</td><td><code>/api/agents/analysis</code></td><td>三智能体决策分析（风险研判 / 方案生成 / 触达）+ 通道标签</td></tr></tbody></table>
+<p>事件与两端的适配关系（逐事件比对后端 <code>SseEmitter.event().name(...)</code> 与两端 <code>addEventListener(...)</code> 得出）：</p>
+<table><thead><tr><th>事件</th><th>后端广播位置</th><th>调度大屏 <code>App.vue</code></th><th>司机端 <code>DriverApp.vue</code></th></tr></thead><tbody><tr><td><code>init</code></td><td><code>RouteAgentService</code> 连接建立时</td><td>不监听（当前活动起终点由各端自行 <code>POST /api/agent/register</code> 确定，不依赖首帧）</td><td>不监听（同上，另有 <code>GET /api/task/current</code> 兜底）</td></tr><tr><td><code>route-update</code></td><td><code>RouteAgentService</code> 风险变化重算后（300 ms 防抖）</td><td>✓ 刷路线与风险着色</td><td>✓ 刷导航与换线弹窗</td></tr><tr><td><code>task-assigned</code></td><td><code>TaskController</code> 派单后</td><td>✓ 任务卡状态</td><td>✓ 进任务模式</td></tr><tr><td><code>agent-status</code></td><td><code>DecisionOrchestrator</code> 逐智能体点亮</td><td>✓ 三智能体面板</td><td>— 司机端不展示推理过程，按设计不监听</td></tr><tr><td><code>outreach-update</code></td><td><code>OutreachService</code> 分级叫应状态变化</td><td>✓ 触达进度的时间线</td><td>✓ 指令弹窗</td></tr><tr><td><code>canal-block</code> / <code>canal-recover</code></td><td><code>DecisionSandboxService</code> 禁航判定与解除</td><td>✓ 水运层禁航态</td><td>✓ 司机端禁航提示与换路</td></tr></tbody></table>
+<blockquote><p>结论：除 <code>init</code> 为预留帧外，六类业务事件在「后端广播 ↔ 两端监听」两侧名称与语义完全一致，无孤立事件、无未接事件。</p></blockquote>
+<h3>6.4 气象与风险 <code>WeatherController</code>（<code>/api/weather</code>）（13）</h3>
+<p>GET <code>/source</code>（所选源与真正服务源分开回显）、POST <code>/source/{sourceId}</code>（切换源）、<strong>GET <code>/rate-stats</code></strong>（节流审计四计数：真实回源/缓存命中/节流拦下/熔断打开）、GET <code>/real</code>、POST <code>/real/refresh</code>、POST <code>/risk</code>、GET <code>/risk</code>、DELETE <code>/risk/{edgeId}</code>、DELETE <code>/risk</code>、GET <code>/scenarios</code>、POST <code>/scenario/{scenarioId}</code>、DELETE <code>/scenario/{scenarioId}</code>、POST <code>/deepseek/scan</code></p>
+<h3>6.5 官方气象代理 <code>ContestWeatherController</code>（<code>/api/v1</code>）（4）</h3>
+<p>GET <code>/variables</code>、<code>/observations</code>（11 要素，单次最多取 3 个）、<code>/forecasts/3h</code>（<code>run_time</code> 仅 08:00/20:00，<code>forecast_hours</code> 取 3 的倍数、最多 5 个且 ≤168）、<code>/rate-stats</code>。同源代理且要求携带与后端一致的 Bearer，第三方借不到额度；401 立即熔断。</p>
+<h3>6.6 决策沙盘 <code>SandboxController</code>（<code>/api/sandbox</code>）（15）</h3>
+<p>POST <code>/push</code>（灾害剧本注入）、<code>/push-scenario</code>、<code>/push-live</code>（官方接口推送）、<code>/sim/enter</code>、<code>/sim/exit</code>、<code>/sim/params</code>（七要素滑块）、<code>/typhoon</code>、<code>/typhoon/clear</code>、<code>/rainfall</code>（口岸断面降雨）、<code>/water</code>（运河通航条件）、<code>/water/block</code>、<code>/water/clear</code>、<code>/reset</code>；GET <code>/state</code>（全局态势快照）、<code>/forecast-status</code>（GOWFS 通道自检，<strong>不含密钥</strong>）</p>
+<h3>6.7 水运与联运 <code>CanalController</code>（<code>/api/canal</code>）（6）、<code>WaterwayController</code>（<code>/api/waterway</code>）（3）</h3>
+<p>GET <code>/canal/tributaries</code>（支流风险）、POST <code>/canal/tributaries/apply</code>、GET <code>/canal/tributaries/live</code>（支流实况）、POST <code>/canal/tributaries/apply-live</code>、GET <code>/canal/intermodal</code>（陆水联运方案）、GET <code>/canal/corridor</code>（走廊与全域受阻建议）； GET <code>/waterway/status</code>（当前数据源 mock/official）、POST <code>/waterway/push</code>（手动推送验证同一链路）、POST <code>/waterway/poll</code>（触发一次轮询）</p>
+<h3>6.8 分级叫应与留痕 <code>OutreachController</code>（<code>/api/outreach</code>）（6）</h3>
+<p>POST <code>/dispatch</code>（按方案下发五类角色）、POST <code>/confirm</code>（回执确认）、GET <code>/status</code>（逐角色 已送达/已确认/外呼中）、GET <code>/message</code>（中越双语指令与权益保障）、GET <strong><code>/log</code></strong>（<strong>决策日志时间线</strong>，<code>?limit=60</code>）、POST <code>/reset</code></p>
+<h3>6.9 AI 文案 <code>AIController</code>（<code>/api/ai</code>）（5）</h3>
+<p>GET <code>/warning</code>、GET <code>/warning-bilingual</code>（中越双语）、POST <code>/predict-hazards</code>、DELETE <code>/predict-hazards</code>、GET <code>/route-risk</code></p>
+<h3>6.10 其他业务</h3>
+<table><thead><tr><th>控制器（前缀）</th><th>端点</th><th>说明</th></tr></thead><tbody><tr><td><code>CustomsController</code>（<code>/api/customs</code>）4</td><td>GET <code>/efficiency</code>、POST/DELETE <code>/efficiency/{portId}</code>、DELETE <code>/efficiency</code></td><td>口岸通关时效（baseHours 2.5h，normal/peak/holiday 1.0/1.4/1.8）</td></tr><tr><td><code>KnowledgeController</code>（<code>/api/knowledge</code>）3</td><td>GET `<code>（全量条目）、</code>/search<code>、</code>/categories`</td><td>行业知识库检索（标题·关键词·正文<strong>加权匹配，非向量检索</strong>）</td></tr><tr><td><code>BriefingController</code>（<code>/api/briefing</code>）2</td><td>GET+POST <code>/generate</code></td><td>任务简报一键生成</td></tr><tr><td><code>GeocodeController</code>（<code>/api/geocode</code>）4</td><td>GET `<code>（?name=）、</code>/list<code>、</code>/suggest<code>、</code>/snap`</td><td>本地地名库 → 天地图 POI → Nominatim 兜底；<code>/snap</code> 把坐标吸附最近路网节点。<code>/list</code> 同时下发 <code>nodeId</code>（该地名对应的路网内置节点）与 <code>hot</code>（常用地点权重），大屏起终点输入框据此在空输入时展开常用地点下拉，点选自带 <code>nodeId</code> 的条目不再发 <code>/snap</code></td></tr><tr><td><code>PlatformConfigController</code>（<code>/api/platform</code>）3</td><td>GET/PUT <code>/config</code>、POST <code>/template</code></td><td>开放配置平台（千企千面：阈值档/货物/触达角色，改档后沙盘与方案同步重算）</td></tr><tr><td><code>TiandituTileProxyController</code> 1</td><td>GET <code>/api/tianditu/{layer}/{z}/{x}/{y}.png</code></td><td>天地图同源代理（密钥池轮转 + per-key 熔断 + 内存/磁盘两级缓存 + 30 天 immutable）</td></tr><tr><td><code>PingController</code> 1</td><td>GET <code>/ping</code></td><td>健康检查</td></tr></tbody></table>
+<blockquote><p>异常统一由 <code>GlobalExceptionHandler</code> 转成带中文 <code>message</code> 的错误体（前端直接上屏，不靠状态码猜）。 护栏：<code>PublicDemoGuardFilter</code> <strong>只拦 <code>/api/</code> 下的非 GET</strong>（GET 与 SSE 全放行，节流 GET 等于节流演示），改全局状态的写接口 20 次/分/IP、其余写接口 180 次/分，超限 429。</p></blockquote>
+<hr>
+<h2>七、数据文件与目录</h2>
+<table><thead><tr><th>路径</th><th>内容</th><th>是否入 gith</th></tr></thead><tbody><tr><td><code>../src/main/resources/data/vietnam-road-network.json</code></td><td>清洗后的中越跨境路网拓扑（约 8.6 万节点 / 9.8 万边，含口岸虚拟边，~36 MB）</td><td>✅ 入库（保证 clone 即可演示）</td></tr><tr><td><code>../src/main/resources/data/customs-efficiency.json</code></td><td>口岸通关时效数据</td><td>✅</td></tr><tr><td><code>../src/main/resources/data/knowledge-base.json</code></td><td>行业知识库（RAG 检索源）</td><td>✅</td></tr><tr><td><code>../src/main/resources/data/place-names.json</code></td><td>本地地名库 52 条（与地图标注同源）：32 条带 <code>nodeId</code>（路网内置节点），14 条带 <code>hot</code> 权重（调度大屏输入框的“常用地点”下拉数据源）</td><td>✅</td></tr><tr><td><code>decision-cache/*.json</code></td><td>多智能体决策预生成缓存（<code>scenario_*.json</code>）+ 文案池 <code>recommendation-pool.json</code></td><td>⛔ <code>../.gitignore</code>（随 <code>../asean-demo</code> 交付包分发）</td></tr><tr><td><code>../data/tile-cache</code></td><td>天地图瓦片磁盘缓存（img_w/cia_w/vec_w/cva_w）</td><td>⛔ 不入库</td></tr><tr><td><code>../asean-demo/data/tile-cache</code></td><td>离线交付包内的预热瓦片（实测 <strong>29,493 张 / 247.4 MB</strong>，img_w 12158・cia_w 11043・vec_w 3368・cva_w 2924）</td><td>⛔ 不入库</td></tr><tr><td><code>../data/sources</code></td><td>原始地理数据源（OSM/自然地球/水系等）</td><td>⛔</td></tr><tr><td><code>../tools/data</code></td><td>加工作坊中间产物（矢量瓦片等）</td><td>⛔</td></tr><tr><td><code>../frontend/dist</code></td><td>前端构建产物，由后端静态托管</td><td>⛔</td></tr><tr><td><code>.env.example</code>（根目录）</td><td>脱敏配置模板，不含任何凭证，供复现时复制为 <code>.env.local</code></td><td>✅</td></tr><tr><td><code>.env.local</code>（根目录）</td><td>真实密钥与 Token</td><td>⛔ <strong>永不入库、不随压缩包外发</strong></td></tr></tbody></table>
+<hr>
+<h2>八、模块结构（<code>../src/main/java/com/example/aseanweatherlogistics</code>）</h2>
+<ul><li><strong><code>controller/</code> 19 个 REST 控制器</strong>（对应第六节 96 个端点）+ <code>GlobalExceptionHandler</code>（统一中文错误体）</li><li><strong><code>config/</code></strong> <code>WebConfig</code>（CORS 白名单 + dist 缓存头 + <code>/tiles/**</code> 双目录静态托管）、<code>PublicDemoGuardFilter</code>（公网演示护栏）</li><li><strong><code>service/</code> 按职责分组（仅列主线）</strong>：</li><li>算路与风险：<code>RouteService</code>（邻接表 + A* + 逐边惩罚硬熔断）、<code>RouteAgentService</code>（300 ms 防抖重算 + SSE 广播）、<code>GraphHopperRouteService</code>/<code>OsmDataLoader</code>/<code>CNRoadGeom</code>、<code>WeatherSimulator</code>（风险注入）、<code>RoadRiskIndex</code>/<code>TyphoonRiskRule</code>/<code>DriverRiskTipRule</code>/<code>WeatherTrendRule</code>/<code>CargoSafetyIndex</code>、<code>CorridorAdvisoryService</code>（全域受阻 DEFER/RETURN/HOLD）</li><li>多源气象：<code>WeatherSourceService</code>、<code>RealWeatherService</code>（节流+熔断）、<code>ContestWeatherProvider</code>/<code>ContestForecastService</code>/<code>OpenMeteoWeatherProvider</code>/<code>SimulatedWeatherProvider</code>、<code>WeatherWatchdogService</code>（<code>@Scheduled</code> 60 s 守护）</li><li>三智能体：<strong><code>DecisionOrchestrator</code>（真正的编排入口：串行调度 + 预生成缓存 + <code>agent-status</code> 广播 + 通道标签汇总）</strong>、<code>RiskAgent</code>/<code>SolutionAgent</code>/<code>TouchAgent</code>、<code>RecommendationPool</code>（历史文案池轮换）</li><li>大模型通道：<code>OllamaService</code>（本地）/<code>DeepseekService</code>（在线）/<code>AIService</code>（预警文案与降级）、<code>AgentJson</code>（输出解析）</li><li>代价与方案：<code>CostCalculator</code>、<code>IntermodalService</code>、<code>DemoConfigService</code>（企业画像/阈值档）、<code>StartupWarmup</code></li><li>水运：<code>WaterRiskEngine</code>（四条禁航红线）、<code>TributaryRiskService</code>、<code>waterway/</code>（<code>WaterwayDataService</code> + <code>Mock</code>/<code>Official</code> 双数据源）</li><li>业务支撑：<code>TaskService</code>（NONE/DISPATCHED/ACCEPTED/REJECTED）、<code>TripSignalService</code>（在途进度与新鲜度）、<code>DecisionSandboxService</code>（沙盘状态机与方向判定）、<code>DecisionLogService</code>（留痕）、<code>OutreachService</code>（分级叫应）、<code>CustomsEfficiencyService</code>、<code>KnowledgeBaseService</code>、<code>GeocodeService</code>、<code>BriefingService</code></li><li><strong><code>repository/</code></strong> <code>RouteRepository</code>/<code>CustomsEfficiencyRepository</code>/<code>KnowledgeBaseRepository</code>（JSON 载入）</li><li><strong><code>model/</code></strong> <code>dto</code>（<code>RouteRequest</code>/<code>RouteResponse</code>/<code>RiskSegment</code>/<code>TransportTask</code>）、<code>entity</code>（<code>RoadNode</code>/<code>RoadEdge</code>/<code>KnowledgeEntry</code>）、<code>vo</code>（<code>WarningVO</code>）</li><li><strong><code>util/</code></strong> <code>GeoUtils</code>（球面距离）、<code>HttpUtil</code>、<code>DemoClock</code>（装船/到达等时刻基于真实时钟推导，不写死）</li></ul>
+<blockquote><p>说明：仓库里曾有一个空的 <code>MultiAgentService.java</code>（无任何引用、也不参与编译产物），实际编排在 <code>DecisionOrchestrator</code>；旧文档里把它当编排层写是错的，本次一并清理。</p></blockquote>
+<hr>
+<h2>九、服务设计可视化材料（图文对照）</h2>
+<p>方案的完整可视化见下列成品图（HTML 源与同名 PNG，高清图可直接用于展示）：</p>
+<table><thead><tr><th>图号</th><th>文件</th><th>回答什么问题</th></tr></thead><tbody><tr><td>图 1</td><td><code>08-系统架构图.png</code></td><td>气象从哪来 → 有什么用 → 怎么与 AI 交互 → 指导了什么（四段因果链）</td></tr><tr><td>图 2</td><td><code>../../../桌面/织途者（材料提交）/服务设计可视化材料/09-系统架构图-分层版.png</code></td><td>分层泳道与模块归属（PPT 主图）</td></tr><tr><td>图 3</td><td><code>../../../桌面/织途者（材料提交）/服务设计可视化材料/10-服务蓝图.png</code></td><td>五阶段 × 四泳道，粉线（互动线）/绿线（可视分离线）+ 分级叫应</td></tr><tr><td>图 4</td><td><code>../../../桌面/织途者（材料提交）/服务设计可视化材料/11-界面原型图.png</code></td><td>真实界面整屏 + 逐卡拆解 + 界面↔组件↔接口对照表</td></tr><tr><td>图 5</td><td><code>../../../桌面/织途者（材料提交）/服务设计可视化材料/12-业务流程示意图.png</code></td><td>主流程 12 步 + 四条分支 + 在途链路 + 断网降级链</td></tr><tr><td>图 6</td><td><code>../../../桌面/织途者（材料提交）/服务设计可视化材料/13-数据使用说明图.png</code></td><td>数据资产清单、流向、溯源与密钥边界</td></tr></tbody></table>
+<p>成图与截图的生产链（改完重跑即可，不依赖任何手工修图）：</p>
+<pre><code class="lang-bash">node tools/_ui_shots.mjs        # CDP 驱动 headless Edge 打 8080 与 /driver.html，逐卡视口截图
+node tools/_ui_pack.mjs        # 按交付名复制进 交付材料/_ui/
+powershell -File tools/_arch_shot.ps1 -Pattern '11-*.html' -H 4150   # HTML → 同名 PNG（@2x）
+node tools/_api_inventory.mjs  # 接口清单取证（第六节接口数据即由此产出）</code></pre>
+<hr>
+<h2>十、依赖获取与网络访问矩阵</h2>
+<h3>10.1 构建期依赖：获取渠道、体量与镜像</h3>
+<table><thead><tr><th>依赖</th><th>版本</th><th>获取渠道</th><th>国内直连</th><th>体量</th><th>加速 / 离线手段</th></tr></thead><tbody><tr><td>Gradle</td><td>9.5.1</td><td><code>../gradle/wrapper/gradle-wrapper.properties</code> 指向 services.gradle.org，<code>gradlew</code> 首次运行自动下载</td><td>可达，偶发慢</td><td>约 130 MB</td><td>把 distributionUrl 换为 <code>https://mirrors.cloud.tencent.com/gradle/gradle-9.5.1-bin.zip</code>，或预先把 zip 放进 <code>~/.gradle/wrapper/dists</code></td></tr><tr><td>JDK</td><td>21</td><td>Gradle toolchain auto-detect；本机无匹配版本时 auto-download（Adoptium）</td><td>可达</td><td>约 200 MB</td><td>自装 JDK 21+；或在 <code>../gradle.properties</code> 指定 <code>org.gradle.java.home</code></td></tr><tr><td>后端 Maven 依赖</td><td>见 3.1</td><td>Maven Central</td><td>可达</td><td>约 120 MB</td><td>在 <code>../build.gradle</code> 的 <code>repositories</code> 首位加 <code>maven { url 'https://maven.aliyun.com/repository/public' }</code>；处于公司/校园代理后还需配 <code>systemProp.http(s)ProxyHost/Port</code></td></tr><tr><td>前端 npm 依赖</td><td>见 3.2</td><td>registry.npmjs.org；<code>../frontend/package-lock.json</code> 已入库</td><td>可达</td><td>约 200 MB（node_modules）</td><td><code>npm config set registry https://registry.npmmirror.com</code>；精确复现用 <code>npm ci</code></td></tr><tr><td>本地大模型</td><td>qwen2.5:14b</td><td>Ollama 安装包 + <code>ollama pull qwen2.5:14b</code>（registry.ollama.ai）</td><td><strong>通常需代理</strong></td><td>约 9 GB</td><td>从已拉取的机器拷贝 <code>~/.ollama/models</code>（manifest + blobs）；或跳过本地通道，推理自动落到文案池与模板</td></tr><tr><td>Android SDK / Gradle</td><td>Capacitor 8.5</td><td>developer.android.com 或 Android Studio</td><td>可达，建议走官方镜像</td><td>约 1 GB</td><td><strong>仅打 APK 需要</strong>；浏览器打开 <code>/driver.html</code> 即是同一套司机端，不需要 Android 环境</td></tr></tbody></table>
+<p>预热两条命令（在能联网的机器上跑一次，缓存目录整体拷走即可离线复用）：</p>
+<pre><code class="lang-bash">gradlew.bat dependencies --configuration runtimeClasspath   # 后端依赖落本地 Gradle 缓存
+cd frontend &amp;&amp; npm ci                                       # 前端依赖落 node_modules</code></pre>
+<h3>10.2 运行期外部端点：谁要联网、谁要挂代理</h3>
+<table><thead><tr><th>端点</th><th>用途</th><th>凭证</th><th>网络要求</th><th>不可达时的系统行为</th></tr></thead><tbody><tr><td><code>180.149.156.4:8001</code></td><td>大赛官方 CRA40 实况 / GOWFS 3h 预报</td><td><code>WEATHER_REAL_TOKEN</code>（组委会下发）</td><td>需组委会侧网络可达，部分网络屏蔽该 IP:端口</td><td>连败 3 次熔断 300 s；自动降级 Open-Meteo，大屏「实时气象」标题显示真正服务的源</td></tr><tr><td><code>api.open-meteo.com</code></td><td>免凭证真实气象备源</td><td>无</td><td>国际公网，一般直连可达</td><td>再降级 <code>simulated</code> 离线模拟源，界面标「模拟降级」</td></tr><tr><td><code>t0~t7.tianditu.gov.cn</code></td><td>底图 1/2（影像 + 注记 / 矢量 + 注记）</td><td><code>TIANDITU_KEYS</code>（<strong>服务端类型</strong>密钥 + 授权白名单）</td><td>中国境内直连</td><td>未配置密钥时 <code>/api/tianditu/**</code> 返回 503，前端按四级降级链切 OSM 在线 / 离线瓦片；已落盘瓦片不受影响</td></tr><tr><td><code>nominatim.openstreetmap.org</code></td><td>越南街道 / 店铺 POI 兜底</td><td>无（自定义 User-Agent）</td><td><strong>需出国际公网，通常要挂代理</strong>：<code>GEOCODE_NOMINATIM_PROXY=127.0.0.1:&lt;代理端口&gt;</code></td><td>仅影响越南街道联想；中国地名走天地图主通道，不受影响</td></tr><tr><td><code>api.deepseek.com</code></td><td>在线推理兜底</td><td><code>DEEPSEEK_FALLBACK_KEY</code></td><td>公网直连可达</td><td>Key 留空即视为通道未启用，请求不发本机，落到文案池 + 规则模板</td></tr><tr><td><code>localhost:11434</code></td><td>本地 Ollama</td><td>无</td><td>无需联网</td><td>连接超时 2 s，连败 2 次冷却 2 min 后转在线通道</td></tr><tr><td>手机 → <code>/driver.html</code></td><td>司机端</td><td>无</td><td>与后端同一局域网即可，<strong>不需要公网</strong></td><td>—</td></tr></tbody></table>
+<p>三条结论：</p>
+<ol><li><strong>主流程不需要任何凭证与外网</strong>：路网拓扑、地名库、知识库、瓦片缓存、决策预生成缓存均随仓库或交付包分发，断网机器上算路、风险判定、禁航、分级叫应、司机端触达链路可完整跑通。</li><li><strong>需要联网才能核验的是“数据来源真实性”</strong>：官方气象需 Token 与组委会侧网络，天地图需密钥与授权白名单，越南街道兜底需代理。三者不可达时界面显示降级后的真实来源，不做伪装。</li><li><strong>完全离线演示请直接用 <code>../asean-demo</code> 交付包</strong>（内嵌 JRE + 2.9 万张预热瓦片 + 决策缓存；包内 <code>.env.local</code> 为便于开箱即可核验而内含申请人本人凭证，边界见 10.3），双击 <code>start.bat</code> 即可，不需要装 JDK / Gradle / Node。</li></ol>
+<h3>10.3 脱敏对照与密钥边界</h3>
+<table><thead><tr><th>文档中的占位</th><th>真实环境变量 / 配置项</th><th>存放位置</th><th>获取途径</th><th>缺失能否复现主流程</th></tr></thead><tbody><tr><td><code>&lt;气象TOKEN&gt;</code></td><td><code>WEATHER_REAL_TOKEN</code> → <code>weather.real.token</code></td><td>根目录 <code>.env.local</code>（已 gitignore）</td><td>组委会随参赛通知下发</td><td>能；降级 Open-Meteo 并如实标注</td></tr><tr><td><code>&lt;官方地址&gt;</code></td><td><code>weather.real.base-url</code></td><td><code>application.properties</code> 内为真实地址（接口地址本身不是凭证）</td><td>参赛通知</td><td>能</td></tr><tr><td><code>&lt;TK1,TK2,...&gt;</code></td><td><code>TIANDITU_KEYS</code> → <code>tianditu.keys</code></td><td>根目录 <code>.env.local</code></td><td>天地图开放平台申请<strong>服务端类型</strong>密钥，并把演示机出口 IP / 域名加入授权白名单</td><td>能；走包内预热瓦片与降级链</td></tr><tr><td><code>&lt;已授权域名&gt;</code></td><td><code>tianditu.referer</code></td><td>根目录 <code>.env.local</code></td><td>与密钥授权范围一致</td><td>能</td></tr><tr><td><code>&lt;DEEPSEEK_KEY&gt;</code></td><td><code>DEEPSEEK_FALLBACK_KEY</code> → <code>deepseek.fallback.key</code></td><td>根目录 <code>.env.local</code></td><td>DeepSeek 开放平台</td><td>能；本地 Ollama → 文案池 → 模板</td></tr><tr><td><code>&lt;本机代理端口&gt;</code></td><td><code>GEOCODE_NOMINATIM_PROXY</code></td><td>根目录 <code>.env.local</code></td><td>本机代理的 HTTP 混合端口</td><td>能；仅少越南街道联想</td></tr><tr><td><code>&lt;待协议获取&gt;</code></td><td><code>waterway.official.api-base</code> / <code>.token</code></td><td>未申请，默认 <code>mock</code></td><td>广西水运调度平台无自助 API，需合作协议</td><td>能；<code>mock</code> 源手动推送验证同一条链路</td></tr><tr><td><code>192.168.200.140</code></td><td><code>../frontend/capacitor.config.json</code> 的 <code>server.url</code></td><td>已入库（局域网地址，不是凭证）</td><td>开发机当时的内网 IP</td><td>能；换机器时改成当前后端 IP，或直接用浏览器打开 <code>/driver.html</code></td></tr></tbody></table>
+<p>密钥边界声明：</p>
+<ul><li>仓库内<strong>被版本控制的文件不含任何真实凭证</strong>：<code>application.properties</code> 中所有凭证项一律写成 <code>${VAR:}</code> 空默认值；<code>../asean-demo/</code>（离线演示包目录）整体被 <code>.gitignore</code> 排除，不入库。复核命令（无输出即无凭证）：</li></ul>
+<p>  ``<code>bash   git grep -n -E "(TOKEN|_KEY|KEYS|_TK)[=:][0-9a-zA-Z]{8}"   git grep -n -E "sk-[0-9a-f]{16,}"   </code>``</p>
+<ul><li>真值只存在于开发机根目录 <code>.env.local</code>，该文件被 <code>../.gitignore</code> 排除；<strong>提交或压缩外发整个文件夹时请勿包含它</strong>。</li><li>可运行 Demo 包（<code>../asean-demo/.env.local</code>，exe 与 zip 同源）为便于开箱即可核验官方气象、影像底图与真实模型推理，<strong>内含申请人本人的三份凭证</strong>（组委会气象 Token、天地图密钥池、DeepSeek Key）。该目录不入库，本包只定向交付，不得上传公开网盘或群发链接。</li><li>早期版本的外发离线包曾以明文携带过同类凭证，且当前版本仍选择随包外发，因此这些凭证一律应视为已扩散：<strong>展示结束后即在天地图 / DeepSeek 控制台作废并重新申请</strong>，新值只写入本机 <code>.env.local</code>，不写进文档与仓库。源代码与技术文档本身仍保持脱敏处理（上述占位表即为脱敏版）。</li></ul>
+<hr>
+<h2>十一、从零复现与常见故障</h2>
+<h3>11.1 从零复现（不填任何密钥）</h3>
+<pre><code class="lang-bash"># 0) 环境自检
+java -version            # 需要 21+；没有也行，Gradle toolchain 会自动下载
+git --version
+node -v                  # 需要 20+
+
+# 1) 取源码
+git clone https://github.com/zhige12/asean-weather-logistics.git
+cd asean-weather-logistics
+copy .env.example .env.local        # 全部留空即可，官方数据要核验时再填自己的凭证
+
+# 2) 后端编译 + 单元测试
+gradlew.bat compileJava compileTestJava test
+
+# 3) 前端构建（后端从 file:frontend/dist 托管页面）
+cd frontend &amp;&amp; npm ci &amp;&amp; npm run build &amp;&amp; cd ..
+
+# 4) 启动
+gradlew.bat bootRun</code></pre>
+<p>预期结果与自检点：</p>
+<table><thead><tr><th>检查项</th><th>命令 / 操作</th><th>预期</th></tr></thead><tbody><tr><td>服务存活</td><td><code>curl http://localhost:8080/ping</code></td><td><code>OK</code></td></tr><tr><td>路网就绪</td><td>启动日志</td><td><code>StartupWarmup</code> 加载 8.6 万节点 / 9.8 万边完成，首屏 10–30 s</td></tr><tr><td>大屏</td><td>浏览器打开 <code>http://localhost:8080/</code></td><td>地图出图、路线可规划、风险卡有数据</td></tr><tr><td>地名下拉</td><td>点一下起点输入框不输字</td><td>展开 14 条常用地点（来自地名库 <code>hot</code> 标记，零网络配额）；点选即填入节点 id</td></tr><tr><td>司机端</td><td>打开 <code>http://localhost:8080/driver.html</code></td><td>接单 / 在途上报 / 触达弹窗可用</td></tr><tr><td>实时通道</td><td>大屏派单后看司机端</td><td>SSE <code>/api/agent/events</code> 推 <code>task-assigned</code>，无需刷新</td></tr><tr><td>气象源</td><td><code>curl http://localhost:8080/api/weather/source</code></td><td>未填 Token 时 <code>selectedSource=contest-observation</code>、<code>servedSource=open-meteo</code>（两者分开回显，不假装官方）</td></tr><tr><td>节流审计</td><td><code>curl http://localhost:8080/api/weather/rate-stats</code></td><td>四个计数（真实回源 / 缓存命中 / 节流拦下 / 熔断打开）</td></tr><tr><td>天地图代理</td><td>浏览器请求 <code>/api/tianditu/img_w/7/103/74.png</code></td><td>未配密钥返回 503，前端自动降级底图 3/4</td></tr><tr><td>推理通道</td><td>大屏三智能体汇总标签</td><td>无 Ollama、无 Key 时显示「文案池 / 模板」</td></tr></tbody></table>
+<h3>11.2 环境差异与已知坑</h3>
+<table><thead><tr><th>现象</th><th>原因</th><th>处理</th></tr></thead><tbody><tr><td>编译报找不到符号 <code>CorridorAdvisoryService</code> / <code>RecommendationPool</code></td><td>新增源文件未随提交入库</td><td>确认 <code>src/main/java/.../service/</code> 下这两个类与 <code>../frontend/src/utils/corridorAdvisory.js</code>、<code>src/test/.../SolutionAgentDetourTriggerTest.java</code> 均在提交物内</td></tr><tr><td><code>Unsupported class file major version</code> / toolchain 报错</td><td>本机 JDK 低于 21</td><td>装 JDK 21+，或让 toolchain 自动下载（<code>../gradle.properties</code> 已开 auto-download）</td></tr><tr><td>页面改了但没变化</td><td>Spring 托管的是已构建的 <code>../frontend/dist</code></td><td>重新 <code>npm run build</code>，浏览器 Ctrl+F5</td></tr><tr><td>8080 被占用</td><td>端口冲突</td><td><code>gradlew.bat bootRun --args='--server.port=8090'</code>；离线包 <code>start.bat</code> 会自动在 8080–8089 找空端口</td></tr><tr><td>底图全空</td><td>既无密钥也无预热瓦片</td><td>属预期降级；需离线出图请填 <code>TIANDITU_KEYS</code> 或直接使用 <code>../asean-demo</code> 包</td></tr><tr><td>越南街道搜不到</td><td>Nominatim 需出国际公网</td><td>填 <code>GEOCODE_NOMINATIM_PROXY</code>，或置 <code>GEOCODE_NOMINATIM_ENABLED=false</code></td></tr><tr><td>写接口返回 429</td><td>公网演示护栏限流</td><td>属设计行为；单人演示机可上调 <code>DEMO_GUARD_STRICT_LIMIT</code> / <code>NORMAL_LIMIT</code></td></tr><tr><td>点击普遍变慢</td><td>内存热缓存过大导致小内存机器频繁换页</td><td>调小 <code>tianditu.mem-cache-entries</code>（离线包已设 5000）</td></tr><tr><td>Android 端白屏</td><td><code>server.url</code> 指向的电脑 IP 变了，或手机与电脑不在同一 WiFi</td><td>改 <code>../frontend/capacitor.config.json</code> 后 <code>npx cap sync android</code> 重装；或直接用手机浏览器打开 <code>/driver.html</code></td></tr></tbody></table></body></html>

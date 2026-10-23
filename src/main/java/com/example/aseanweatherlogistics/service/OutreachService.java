@@ -85,6 +85,13 @@ public class OutreachService {
     private volatile long dispatchedAt;
     /** 当前批次的分级叫应等级（NORMAL/YELLOW/ORANGE/RED），由沙盘风险状态研判 */
     private volatile String alertLevel = "NORMAL";
+    /**
+     * 本批次是否为「风险解除后调度员下发原路线」：planId=A 且公路/水运均已恢复。
+     * 在 {@link #dispatch} 时按当时的实际阻断态定格（而不是司机端拉取 message 时再算，
+     * 避免沙盘状态在两次读之间翻转造成「卡片说解除、语音说预警」的自相矛盾）。
+     * 司机端 _handleDispatchDuringNav 据此把语音/卡片念成「原路线…风险已解除，调度中心已为你切换为原路线」。
+     */
+    private volatile boolean riskCleared;
     /** 红色级：叫应窗口结束仍未确认、已自动上报调度端的目标 id */
     private final Set<String> reported = ConcurrentHashMap.newKeySet();
 
@@ -120,6 +127,9 @@ public class OutreachService {
         boolean waterBlocked = sandbox.waterBlocked();
         boolean roadBlocked = sandbox.roadBlocked();
         String direction = sandbox.direction();
+        // 风险解除后调度员仍下发「方案A（回原目的地）」且公路/水运都已不阻断 → 这是「恢复原路线」而非新绕行。
+        // driverMessages 的 "A" && !roadBlocked 分支已据此生成「解除」文案，这里再落一个机器可读标志供司机端语音判断。
+        this.riskCleared = "A".equals(planId) && !roadBlocked && !waterBlocked;
 
         decisionLog.log("DISPATCH", "确认切换方案",
                 String.format("调度员确认方案%s（%s），任务变更指令生成并下发（切换方向：%s，叫应等级：%s）",
@@ -136,14 +146,14 @@ public class OutreachService {
         if (config.targetEnabled(DemoConfigService.TARGET_DRIVER)) {
             put(new TargetStatus("driver-1", DemoConfigService.TARGET_DRIVER,
                     "货车司机", "阿明（桂A·D12345）", true, false, false, LEVEL_CHANNELS.get(alertLevel), null),
-                    driverMessages(planId, waterBlocked));
+                    driverMessages(planId, waterBlocked, roadBlocked));
         }
 
         // ---- 越方接力司机阿雄（第⑨幕「越南同事也收到通知」）：越南语为主文案 ----
         if (config.targetEnabled(DemoConfigService.TARGET_DRIVER_VN)) {
             put(new TargetStatus("driver-vn-1", DemoConfigService.TARGET_DRIVER_VN,
                     "越南司机", "阿雄（越籍车队）", true, false, false, LEVEL_CHANNELS.get(alertLevel) + "（越语）", null),
-                    driverMessagesVn(planId, waterBlocked));
+                    driverMessagesVn(planId, waterBlocked, roadBlocked));
         }
 
         // ---- 船东/船员：按切换方向生成（公路切水运=准备装船 / 水运切公路=取消装船 / 正常=过闸建议） ----
@@ -207,6 +217,8 @@ public class OutreachService {
         Map<String, Object> m = new LinkedHashMap<>(t.toMap());
         m.putAll(messages.getOrDefault(targetId, Map.of()));
         m.put("planId", activePlanId == null ? "" : activePlanId);
+        // 供司机端区分「新风险绕行」与「风险解除切回原路线」，与 message 文案同源
+        m.put("riskCleared", riskCleared);
         // 批次时间戳：司机端据此识别"同一会话内调度端二次下发"（id 不变但方案已变）
         m.put("dispatchedAt", dispatchedAt);
         m.put("alertLevel", alertLevel);
@@ -231,6 +243,7 @@ public class OutreachService {
         }
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("planId", activePlanId == null ? "" : activePlanId);
+        m.put("riskCleared", riskCleared);
         m.put("dispatchedAt", dispatchedAt);
         m.put("targets", rows);
         m.put("total", rows.size());
@@ -253,6 +266,7 @@ public class OutreachService {
         activePlanId = null;
         dispatchedAt = 0;
         alertLevel = "NORMAL";
+        riskCleared = false;
         reported.clear();
         broadcast();
         return status();
@@ -405,9 +419,10 @@ public class OutreachService {
     /** 船东/船员指令：公路切水运=准备装船；水运切公路=取消装船；双线风险=锚泊等待；正常=过闸建议。 */
     private String shipMessage(String planId, boolean waterBlocked, boolean roadBlocked) {
         if ("B".equals(planId)) {
-            // 装船时刻跟真实时钟走（原写死 15:30，与演示实际时间脱节）
+            // 装船时刻跟真实时钟走（原写死 15:30，与演示实际时间脱节）；
+            // 熔断口岸与成因同样按实际状态取词，不写死"友谊关公路熔断"
             return "🚢 装船准备通知\n"
-                    + "友谊关公路熔断，调度中心已切换陆水联运方案，改走平陆运河。\n"
+                    + blockedShort() + "公路段因" + roadCauseZh() + "熔断，调度中心已切换陆水联运方案，改走平陆运河。\n"
                     + "请做好装船准备：车辆滚装预计" + DemoClock.boarding().start() + "开始，港口已安排六景作业区泊位。\n"
                     + "请检查冷链恒温舱供电接口，装船完成后回报离泊时间。";
         }
@@ -429,10 +444,63 @@ public class OutreachService {
                 + "若" + DemoClock.slot(180) + "后能见度降至1000m以下，建议锚泊等待，预计等待时间3小时。";
     }
 
+    /** 公路熔断成因中文短词（默认暴雨，与旧口径兼容；雾熔断时说"浓雾"、台风时说"台风"） */
+    private String roadCauseZh() {
+        String w = DecisionSandboxService.causeWordZh(sandbox.fuseCause());
+        return w.isEmpty() ? "暴雨" : w;
+    }
+
+    /**
+     * 当前熔断口岸短名（友谊关 / 芒街 / 两者）；无熔断信息时沿用剧本口径返回友谊关。
+     * 与 SolutionAgent#detourNote 同一数据源（sandbox.blockedPortNames），避免方案卡与
+     * 司机指令对「断的是哪个口岸」说法不一致。
+     */
+    private String blockedShort() {
+        String names = sandbox.blockedPortNames();
+        return names == null ? "友谊关" : names.replace("口岸", "");
+    }
+
+    /** 可绕行的另一侧口岸（未熔断的那个）；两个都断返回 null */
+    private String detourShort() {
+        String blocked = sandbox.blockedPortNames();
+        if (blocked == null) {
+            return "芒街"; // 无熔断信息：沿用原剧本口径
+        }
+        List<String> free = new ArrayList<>();
+        if (!blocked.contains(sandbox.ygg().name)) {
+            free.add(sandbox.ygg().name.replace("口岸", ""));
+        }
+        if (!blocked.contains(sandbox.mc().name)) {
+            free.add(sandbox.mc().name.replace("口岸", ""));
+        }
+        return free.isEmpty() ? null : String.join("、", free);
+    }
+
+    /** 口岸中文名 → 越南语写法（友谊关→Hữu Nghị Quan，芒街→Móng Cái；支持"、"多口岸） */
+    private static String portVi(String zh) {
+        return zh.replace("友谊关", "Hữu Nghị Quan").replace("芒街", "Móng Cái");
+    }
+
+    /** 公路熔断成因越南语短语（供司机端越文播报/短信，避免雾被说成 mưa lớn=暴雨） */
+    private String roadCauseVi() {
+        return switch (sandbox.fuseCause() == null ? "" : sandbox.fuseCause()) {
+            case "typhoon", "rain+typhoon" -> "bão";
+            case "fog", "rain+fog" -> "sương mù dày đặc";
+            default -> "mưa lớn";
+        };
+    }
+
     /** 司机任务变更通知：执行指令 + 权益保障包。越南语文案为人工撰写底稿（待母语者校验）。 */
-    private Map<String, String> driverMessages(String planId, boolean waterBlocked) {
+    private Map<String, String> driverMessages(String planId, boolean waterBlocked, boolean roadBlocked) {
         String zh;
         String vi;
+        // 成因与熔断口岸按实际状态生成，不写死"暴雨/友谊关"：否则浓雾熔断说成暴雨、
+        // 芒街熔断说成友谊关、风险解除回原路线说成"已切换绕行"，司机端文案与事实矛盾
+        String cz = roadCauseZh();
+        String cv = roadCauseVi();
+        String b = blockedShort();
+        String bv = portVi(b);
+        String d = detourShort();
         if ("A".equals(planId) && waterBlocked) {
             // 水运切公路：司机准备接货、口岸安排通关
             zh = "📱 任务变更通知\n"
@@ -456,7 +524,7 @@ public class OutreachService {
             // 抵达截止时刻用同一次计算结果，中越两版文案随之统一（原写死 15:30）
             DemoClock.Boarding boarding = DemoClock.boarding();
             zh = "📱 任务变更通知\n"
-                    + "原路线友谊关段因暴雨熔断，调度中心已切换陆水联运方案，改走平陆运河。\n"
+                    + "原路线" + b + "段因" + cz + "熔断，调度中心已切换陆水联运方案，改走平陆运河。\n"
                     + "请于" + boarding.arriveBy() + "前抵达南宁港六景作业区，将车辆交由代驾上船。\n"
                     + "您本人作为乘客随船，经平陆运河至越南海防港，船上已安排休息舱位。\n\n"
                     + "您的权益保障：\n"
@@ -467,7 +535,7 @@ public class OutreachService {
                     + "· 本次变更属于不可抗力导致的调度调整，不视为司机违约\n\n"
                     + "请确认接收。如有异议，点击\"联系调度\"。";
             vi = "📱 Thông báo thay đổi nhiệm vụ\n"
-                    + "Tuyến qua cửa khẩu Hữu Nghị Quan bị phong tỏa do mưa lớn. "
+                    + "Tuyến qua cửa khẩu " + bv + " bị phong tỏa do " + cv + ". "
                     + "Trung tâm điều độ đã chuyển sang phương án vận tải liên hợp đường bộ - đường thủy, qua kênh đào Bình Lục.\n"
                     + "Anh vui lòng có mặt tại khu vực Lục Cảnh, cảng Nam Ninh trước " + boarding.arriveBy() + ", "
                     + "bàn giao xe cho tài xế thay để đưa lên tàu.\n"
@@ -480,33 +548,71 @@ public class OutreachService {
                     + "· Sau khi đến Hải Phòng, công ty bố trí phương tiện đưa về\n"
                     + "· Thay đổi lần này do bất khả kháng, không tính là vi phạm hợp đồng của tài xế\n\n"
                     + "Vui lòng xác nhận đã nhận. Nếu có thắc mắc, bấm \"Liên hệ điều độ\".";
-        } else if ("A".equals(planId)) {
+        } else if ("A".equals(planId) && roadBlocked && d != null) {
+            // 真实的公路绕行：熔断口岸与绕行口岸都按实际状态取词
+            //（原写死"友谊关熔断→改走芒街"，台风断芒街时会把绕行方向说反）
+            String dv = portVi(d);
             zh = "📱 任务变更通知\n"
-                    + "原路线友谊关段因暴雨熔断，调度中心已切换公路绕行方案：改走芒街口岸入境。\n"
-                    + "新路线已下发，请按导航行驶，芒街段降雨偏高请减速慢行。\n\n"
+                    + "原路线" + b + "段因" + cz + "熔断，调度中心已切换公路绕行方案：改走" + d + "口岸入境。\n"
+                    + "新路线已下发，请按导航行驶，" + d + "段天气复杂请减速慢行。\n\n"
                     + "您的权益保障：\n"
                     + "· 绕行增加工时按出勤计算，发放绕行补贴\n"
                     + "· 本次变更属于不可抗力导致的调度调整，不视为司机违约\n\n"
                     + "请确认接收。如有异议，点击\"联系调度\"。";
             vi = "📱 Thông báo thay đổi nhiệm vụ\n"
-                    + "Tuyến qua cửa khẩu Hữu Nghị Quan bị phong tỏa do mưa lớn. "
-                    + "Trung tâm điều độ đã chuyển sang phương án đường bộ vòng qua cửa khẩu Móng Cái.\n"
+                    + "Tuyến qua cửa khẩu " + bv + " bị phong tỏa do " + cv + ". "
+                    + "Trung tâm điều độ đã chuyển sang phương án đường bộ vòng qua cửa khẩu " + dv + ".\n"
                     + "Lộ trình mới đã được gửi, anh vui lòng đi theo chỉ đường, "
-                    + "đoạn Móng Cái có mưa lớn vui lòng giảm tốc độ.\n\n"
+                    + "đoạn " + dv + " thời tiết phức tạp, vui lòng giảm tốc độ.\n\n"
                     + "Quyền lợi của anh:\n"
                     + "· Thởi gian tăng thêm do đi vòng được tính công tác, có phụ cấp\n"
                     + "· Thay đổi lần này do bất khả kháng, không tính là vi phạm hợp đồng\n\n"
                     + "Vui lòng xác nhận đã nhận. Nếu có thắc mắc, bấm \"Liên hệ điều độ\".";
+        } else if ("A".equals(planId) && !roadBlocked) {
+            // ★ 风险解除、调度回原路线：旧模板把「方案A」一律说成"暴雨熔断已切换绕行"，
+            // 解除后下发的回原路线指令会顶着绕行文案，与地图上的实际动作自相矛盾
+            zh = "📱 任务变更通知\n"
+                    + "原路线" + b + "段道路熔断已解除（恶劣天气已过），调度中心恢复原路线：继续经" + b + "口岸入境。\n"
+                    + "新路线已下发，请按导航行驶，" + b + "段通行与通关已恢复正常。\n\n"
+                    + "您的权益保障：\n"
+                    + "· 此前绕行/等待期间工时按出勤计算，相关补贴照常发放\n"
+                    + "· 本次变更属于风险解除后的正常调度恢复，不视为司机违约\n\n"
+                    + "请确认接收。如有异议，点击\"联系调度\"。";
+            vi = "📱 Thông báo thay đổi nhiệm vụ\n"
+                    + "Lệnh phong tỏa đoạn " + bv + " đã được gỡ bỏ (thời tiết xấu đã qua). "
+                    + "Trung tâm điều độ đã khôi phục lộ trình ban đầu qua cửa khẩu " + bv + ".\n"
+                    + "Lộ trình mới đã được gửi, anh vui lòng đi theo chỉ đường, đoạn " + bv + " đã thông quan bình thường.\n\n"
+                    + "Quyền lợi của anh:\n"
+                    + "· Thời gian đi vòng chờ trước đó vẫn tính công tác, phụ cấp giữ nguyên\n"
+                    + "· Thay đổi lần này là khôi phục bình thường sau khi gỡ bỏ rủi ro, không tính là vi phạm hợp đồng\n\n"
+                    + "Vui lòng xác nhận đã nhận. Nếu có thắc mắc, bấm \"Liên hệ điều độ\".";
+        } else if ("A".equals(planId)) {
+            // 两口岸均熔断却仍下发公路方案（防御性分支）：如实说无可用通道
+            zh = "📱 任务变更通知\n"
+                    + "友谊关、芒街两口岸段均因" + cz + "熔断，公路走廊暂无可用通道。\n"
+                    + "请就近安全停靠，等待调度中心评估其他运输方式后进一步指令。\n\n"
+                    + "您的权益保障：\n"
+                    + "· 等待期间按出勤计算工时\n"
+                    + "· 本次变更属于不可抗力导致的调度调整，不视为司机违约\n\n"
+                    + "请确认接收。如有异议，点击\"联系调度\"。";
+            vi = "📱 Thông báo thay đổi nhiệm vụ\n"
+                    + "Cả hai cửa khẩu Hữu Nghị Quan và Móng Cái đều bị phong tỏa do " + cv + ". "
+                    + "Hiện chưa có lối đi đường bộ khả dụng.\n"
+                    + "Anh vui lòng đỗ xe tại khu vực an toàn gần nhất và chờ chỉ thị tiếp theo từ trung tâm điều độ.\n\n"
+                    + "Quyền lợi của anh:\n"
+                    + "· Thởi gian chờ được tính công tác\n"
+                    + "· Thay đổi lần này do bất khả kháng, không tính là vi phạm hợp đồng\n\n"
+                    + "Vui lòng xác nhận đã nhận. Nếu có thắc mắc, bấm \"Liên hệ điều độ\".";
         } else {
             zh = "📱 任务变更通知\n"
-                    + "原路线友谊关段因暴雨熔断，调度中心决定原地等待，预计等待6小时。\n"
+                    + "原路线" + b + "段因" + cz + "熔断，调度中心决定原地等待，预计等待6小时。\n"
                     + "请就近停靠安全区域，保持冷链机组运行，每小时汇报一次车厢温度。\n\n"
                     + "您的权益保障：\n"
                     + "· 等待期间按出勤计算工时\n"
                     + "· 本次变更属于不可抗力导致的调度调整，不视为司机违约\n\n"
                     + "请确认接收。如有异议，点击\"联系调度\"。";
             vi = "📱 Thông báo thay đổi nhiệm vụ\n"
-                    + "Tuyến qua cửa khẩu Hữu Nghị Quan bị phong tỏa do mưa lớn. "
+                    + "Tuyến qua cửa khẩu " + bv + " bị phong tỏa do " + cv + ". "
                     + "Trung tâm điều độ quyết định chờ tại chỗ, dự kiến 6 giờ.\n"
                     + "Anh vui lòng đỗ xe tại khu vực an toàn gần nhất, giữ máy lạnh hoạt động, "
                     + "báo cáo nhiệt độ thùng xe mỗi giờ.\n\n"
@@ -528,8 +634,8 @@ public class OutreachService {
      * 避免同一套保障条款维护两份译文而产生不一致。
      * 返回 {@code message}=越南语（司机端默认显示）、{@code messageZh}=中文（供切换查看）。
      */
-    private Map<String, String> driverMessagesVn(String planId, boolean waterBlocked) {
-        Map<String, String> bilingual = driverMessages(planId, waterBlocked);
+    private Map<String, String> driverMessagesVn(String planId, boolean waterBlocked, boolean roadBlocked) {
+        Map<String, String> bilingual = driverMessages(planId, waterBlocked, roadBlocked);
         String vi = bilingual.get("messageVi");
         String zh = bilingual.get("message");
         Map<String, String> m = new LinkedHashMap<>();

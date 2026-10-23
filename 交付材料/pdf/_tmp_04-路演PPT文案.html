@@ -1,0 +1,56 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>04-路演PPT文案</title><style>
+@page { size: A4; margin: 16mm 14mm; }
+* { box-sizing: border-box; }
+body { font-family: "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;
+  font-size: 10.5pt; line-height: 1.7; color: #1a1a1a; margin: 0; }
+h1 { font-size: 20pt; border-bottom: 3px solid #2c6ecb; padding-bottom: 6px; margin: 4px 0 14px; }
+h2 { font-size: 15pt; border-left: 5px solid #2c6ecb; padding-left: 9px; margin: 20px 0 10px; page-break-after: avoid; }
+h3 { font-size: 12.5pt; margin: 15px 0 7px; color: #23406e; page-break-after: avoid; }
+h4,h5,h6 { font-size: 11pt; margin: 12px 0 6px; page-break-after: avoid; }
+p { margin: 7px 0; }
+ul,ol { margin: 7px 0 7px 4px; padding-left: 22px; }
+li { margin: 3px 0; }
+a { color: #2c6ecb; text-decoration: none; word-break: break-all; }
+code { font-family: "Consolas","Menlo",monospace; background: #eef1f5; padding: 1px 5px; border-radius: 3px; font-size: 9pt; }
+pre { background: #1e2430; color: #e6e6e6; padding: 11px 13px; border-radius: 6px; overflow-x: auto; page-break-inside: avoid; }
+pre code { background: none; color: #e6e6e6; padding: 0; font-size: 8.7pt; line-height: 1.5; }
+blockquote { border-left: 4px solid #c9d4e5; background: #f5f8fc; margin: 9px 0; padding: 6px 14px; color: #445; }
+table { border-collapse: collapse; width: 100%; margin: 11px 0; font-size: 9.3pt; page-break-inside: avoid; }
+th,td { border: 1px solid #c2cbd6; padding: 5px 9px; text-align: left; vertical-align: top; }
+th { background: #2c6ecb; color: #fff; font-weight: 600; }
+tbody tr:nth-child(even) { background: #f2f5fa; }
+hr { border: none; border-top: 1px solid #d3dae3; margin: 16px 0; }
+</style></head><body><h1>路演 PPT 文案（决赛现场演示用 · 约 14 页）</h1>
+<blockquote><p>每页给出【标题】【要点】【讲稿提示】。可直接复制到 PPT 模板。</p></blockquote>
+<hr>
+<p><strong>P1 封面</strong></p>
+<ul><li>面向东盟跨境物流的突发气象预警与多路线协同调度平台</li><li>——平陆运河时代陆水联运双向决策引擎</li><li>参赛组别：智能应用类</li><li>讲稿：一句话定位——"预警不止于提示，风险导向可执行决策"。</li></ul>
+<p><strong>P2 痛点（一句话钩子）</strong></p>
+<ul><li>运河通了，但"预警之后怎么办"没人管</li><li>四大断层：预警—决策断层 / 陆水信息孤岛 / 跨境链路堵点 / 数据合规困境</li><li>讲稿：引用调度员原话"最怕的不是没预警，是预警来了我要花半小时拼信息，等拼完最佳绕行窗口已经过了"。</li></ul>
+<p><strong>P3 调研背书</strong></p>
+<ul><li>三维田野调查：12 名调度员深访 + 86 名中国司机 + 32 名越南司机 + 口岸/船闸/沿岸百姓</li><li>越南籍成员母语校验（非机翻）</li><li>讲稿：所有功能都来自一线真实困境，不是纸面推演。</li></ul>
+<p><strong>P4 核心创新：公—水动态边权共生决策模型</strong></p>
+<ul><li>一套图计算内核，公路边 + 水运边共享边权</li><li>阶跃式惩罚 = 逻辑熔断；双向互备</li><li>讲稿：强调"不是公路模块+水运模块两套系统"。</li></ul>
+<p><strong>P5 系统架构（放架构图）</strong></p>
+<ul><li>主图用 <code>09-系统架构图-分层版.png</code>（分层泳道）：接入展现 / 通讯护栏 / <strong>①气象数据接入</strong> / <strong>②风险引擎</strong> / <strong>③AI 智能体</strong> / <strong>④调度执行</strong> / 数据底座</li><li>讲稿顺序跟着圈号走：气象数据从大赛官方接口进来① → 雨量直接改写路段可通行性② → 引擎给边界、大模型只给文字③ → 最后落到换线绕行、改走水运、停驶等待、分级叫应④</li><li>需要“气象→动作”四段横向因果链特写时，改用 <code>08-系统架构图.png</code></li><li>技术标签（图上不写，放讲稿或角标）：Spring Boot、Vue3+Capacitor、GraphHopper/JGraphT 剩余图重算、本地大模型→内网网关→在线大模型→规则模板逐级兜底</li><li>讲稿：一图讲清全貌；重点说“①与③都可当场核验”（数据源与 AI 通道均如实标注），而不是只讲我们做了什么。</li></ul>
+<p><strong>P6 技术亮点①：动态边权熔断引擎</strong></p>
+<ul><li>12h累计降雨&gt;80mm → penalty=100 硬熔断（阈值随风险画像可调 80/100/120mm）；泥石流&gt;0.7 → 1000 切断；运河能见度&lt;1000m 禁航</li><li>全线熔断时降级兜底，永不"无路可走报错停摆"</li><li>讲稿：毫秒级重算。</li></ul>
+<p><strong>P7 技术亮点②：三智能体 + 本地私有化</strong></p>
+<ul><li>RiskAgent→SolutionAgent→TouchAgent 串行</li><li>Ollama 本地部署，数据不出境（降级链兜底）</li><li>六维对比：耗时/风险/货损/油耗/费用/碳排放</li><li>讲稿：AI 干到 90%，人做最后 10%。</li></ul>
+<p><strong>P8 技术亮点③：分级叫应闭环</strong></p>
+<ul><li>黄/橙/红三级，渠道逐级增强，未确认自动升级上报</li><li>SSE 实时推送 + 确认回执留痕</li><li>讲稿：指令"发了"不等于"收到"。</li></ul>
+<p><strong>P9 产品形态</strong></p>
+<ul><li>PC 调度大屏 / 移动端司机 App / 公众模式 / 开放配置平台</li><li>讲稿：B 端核心 + C 端引流 + 千企千面。</li></ul>
+<p><strong>P10 案例实证（现场 Demo 引子）</strong></p>
+<ul><li>案例一：火龙果冷链暴雨熔断 → 切陆水联运</li><li>案例二：运河能见度禁航 → 反向切回公路</li><li>讲稿：接演示视频/现场操作。</li></ul>
+<p><strong>P11 离线能力（差异化杀手锏）</strong></p>
+<ul><li>拔网线全流程照常：本地推理 + 数据预缓存 + 本地算路 + 磁盘瓦片</li><li>讲稿：现场拔网线演示。</li></ul>
+<p><strong>P12 商业模式</strong></p>
+<ul><li>B 端订阅 300—500 元/车·月 + AI 调用 + API 输出；C 端免费引流</li><li>50 台车客户 ROI &gt; 10 倍（24 万订阅 vs 288 万减损，测算值）</li><li>讲稿：坦诚标注为模型测算目标。</li></ul>
+<p><strong>P13 价值与规划</strong></p>
+<ul><li>产业/商业/社会三价值；三步走：决策引擎→开放接口→众创平台</li><li>讲稿：面向中南半岛多式联运。</li></ul>
+<p><strong>P14 结尾</strong></p>
+<ul><li>"把冰冷的气象参数，翻译成调度员可直接使用的业务方案"</li><li>团队 + 致谢</li></ul>
+<hr>
+<h2>现场演示脚本（8 步，与 Demo 对齐）</h2>
+<table><thead><tr><th>步</th><th>操作</th><th>屏幕</th><th>话术</th></tr></thead><tbody><tr><td>1</td><td>打开大屏</td><td>跨境路网骨骼图</td><td>这是调度大屏</td></tr><tr><td>2</td><td>注入模拟暴雨</td><td>友谊关变红"熔断"</td><td>官方气象接口驱动自动熔断</td></tr><tr><td>3</td><td>拖沙盘滑块</td><td>红→绿决策边界</td><td>调度员可实时调参</td></tr><tr><td>4</td><td>点 AI 多维分析</td><td>三智能体亮起+六维表</td><td>三智能体协同</td></tr><tr><td>5</td><td>选陆水联运</td><td>推送司机/船长/港口</td><td>AI管分析·人管决策·系统管触达</td></tr><tr><td>6</td><td>切手机 App</td><td>任务变更+双语语音</td><td>指令同步+越语播报</td></tr><tr><td>7</td><td>模拟运河禁航</td><td>运河变红禁航</td><td>反向评估公路方案</td></tr><tr><td>8</td><td>拔网线重复2-7</td><td>功能全正常</td><td>全程离线·数据不出境</td></tr></tbody></table></body></html>

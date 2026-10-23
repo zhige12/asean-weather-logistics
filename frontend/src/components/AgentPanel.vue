@@ -69,9 +69,10 @@
         风险状态已变化，以下旧方案已失效，正在重新分析绕行路线…
       </div>
 
-      <!-- 三方案对比（六维分析 + 双向切换）：遇风险改路线模板专属，
-           刚开始导航（常态）不展示——没有风险时不存在绕行/联运/等待的取舍 -->
-      <div v-if="isReroute" class="block">
+      <!-- 三方案对比（六维分析 + 双向切换）：遇风险改路线时展示；
+           司机已接单在途时，即便风险已解除（后端回落 normal）也继续展示，
+           让调度员能把车切回现已畅通的原路线/更优方案（双向切换），不至于解除后方案区整块空白 -->
+      <div v-if="showPlanPanel" class="block">
         <div class="block-title">
           方案生成 · 六维分析 + 双向切换
           <!-- 司机在途时标注行程进度：方案是按车当前位置算的，不是纸上对比 -->
@@ -212,8 +213,10 @@
         <div class="recommend-box">{{ result.recommendation }}</div>
       </div>
 
-      <!-- 开始导航模板（常态）：AI 决策分析下的多条路线，选一条派单给司机 -->
-      <div v-if="!isReroute && (dispatchCandidates.length || dispatchCanal)" class="block">
+      <!-- 开始导航模板（常态）：AI 决策分析下的多条路线，选一条派单给司机。
+           已接单（taskAccepted）后不再重现：这一页的使命只在「第一次派单/导航」时完成，
+           之后遇到灾害只能走下方「绕路/任务变更」模板；订单取消（status 不再是 ACCEPTED）会自动恢复。 -->
+      <div v-if="!isReroute && !taskAccepted && (dispatchCandidates.length || dispatchCanal)" class="block">
         <div class="block-title">开始导航派单 · 从以下路线选一条派给司机</div>
         <!-- 全域受阻：公路走廊全部封闭 + 运河禁航，以下候选都是降级放行的“向前”路线，
              先把这个结论顶在候选列表上方，不让调度员把它当常态候选比选 -->
@@ -224,35 +227,52 @@
         <!-- 常态 AI 结论（方案生成智能体照常计算一次，只不展示风险对比表） -->
         <div class="recommend-box">{{ result.recommendation }}</div>
         <div class="dcand-list">
-          <label
-            v-for="c in dispatchCandidates"
-            :key="c.key"
-            class="dcand-row"
-            :class="{ sel: c.key === dispatchSelected }"
-          >
-            <input type="radio" name="agent-dispatch-route" :value="c.key" v-model="dispatchSelected" @change="previewDispatch(c.key)" />
-            <span class="dcand-radio" :class="{ on: c.key === dispatchSelected }"></span>
-            <span class="dcand-body">
-              <span class="dcand-title">
-                {{ c.label }}
-                <span v-if="c.key === 'recommended'" class="rec-tag">推荐</span>
-                <!-- 全域受阻下靠降级才搜得出的路线：不能顶普通「推荐」继续派单 -->
-                <span v-if="c.notRecommended" class="rec-tag blocked">不建议通行</span>
+          <div v-for="c in dispatchCandidates" :key="c.key" class="dcand-item">
+            <label class="dcand-row" :class="{ sel: c.key === dispatchSelected }">
+              <input type="radio" name="agent-dispatch-route" :value="c.key" v-model="dispatchSelected" @change="previewDispatch(c.key)" />
+              <span class="dcand-radio" :class="{ on: c.key === dispatchSelected }"></span>
+              <span class="dcand-body">
+                <span class="dcand-title">
+                  {{ c.label }}
+                  <span v-if="c.key === 'recommended'" class="rec-tag">推荐</span>
+                  <!-- 全域受阻下靠降级才搜得出的路线：不能顶普通「推荐」继续派单 -->
+                  <span v-if="c.notRecommended" class="rec-tag blocked">不建议通行</span>
+                </span>
+                <span class="dcand-via">{{ viaText(c) }}</span>
+                <span class="dcand-meta">
+                  {{ c.hours }}h · {{ c.distanceKm }}km ·
+                  {{ c.riskCount > 0 ? c.riskCount + " 风险" : "✓ 无风险" }}
+                </span>
               </span>
-              <span class="dcand-via">{{ viaText(c) }}</span>
-              <span class="dcand-meta">
-                {{ c.hours }}h · {{ c.distanceKm }}km ·
-                {{ c.riskCount > 0 ? c.riskCount + " 风险" : "✓ 无风险" }}
+              <span class="dcand-risk">
+                <span
+                  class="risk-chip"
+                  :class="c.hazardProbability >= 0 ? 'risk-' + probKey(c.hazardProbability) : ''"
+                  :title="riskChipTitle(c)"
+                >
+                  {{ probText(c) }}
+                </span>
+                <!-- 角标只显示概率最高的那个灾害，其余点右侧按钮展开看 -->
+                <button
+                  v-if="hasBreakdown(c)"
+                  class="hazard-toggle"
+                  :class="{ open: expandedHazard === c.key }"
+                  :aria-expanded="expandedHazard === c.key"
+                  :title="expandedHazard === c.key ? '收起逐灾种概率' : '展开查看各灾种概率'"
+                  @click.prevent.stop="toggleHazard(c.key)"
+                >{{ expandedHazard === c.key ? '▴' : '▾' }}</button>
               </span>
-            </span>
-            <span
-              class="risk-chip"
-              :class="c.hazardProbability >= 0 ? 'risk-' + probKey(c.hazardProbability) : ''"
-              :title="c.hazardProbability >= 0 && c.hazardProbability < 15 && !c.hazardOccurred ? '灾害概率 ' + c.hazardProbability + '%（低于阈值视为通畅）' : ''"
-            >
-              {{ probText(c) }}
-            </span>
-          </label>
+            </label>
+            <div v-if="expandedHazard === c.key" class="hazard-detail">
+              <div class="hz-head">逐灾种发生概率（按高到低）</div>
+              <div v-for="b in sortedBreakdown(c)" :key="b.key" class="hz-item">
+                <span class="hz-name">{{ shortHazardLabel(b.label) }}</span>
+                <span class="hz-bar"><i :class="b.high ? 'risk-high' : 'risk-low'" :style="{ width: Math.max(3, b.probability) + '%' }"></i></span>
+                <span class="hz-pct" :class="b.high ? 'risk-high' : 'risk-low'">{{ b.probability }}%</span>
+                <span v-if="b.occurred" class="hz-flag">已发生</span>
+              </div>
+            </div>
+          </div>
           <!-- 陆水联运（坐船出境）：目的地在越南侧时后端并带回 canalOption；
                禁航时整行标红、不可选，并说明情况——不能一边禁航一边推荐坐船派单 -->
           <label
@@ -295,7 +315,7 @@
 
       <!-- 触达预览：任务变更角色指令，改路线模板专属；常态下触达状态只看状态条。
            调度员改选非推荐方案时，指令按所选方案改写（与后端 dispatch 的 planId 语义一致）。 -->
-      <div v-if="isReroute" class="block">
+      <div v-if="showPlanPanel" class="block">
         <div class="block-title">
           触达智能体 · 角色专属指令（{{ result.outreachPreview?.count || 0 }} 个角色）
           <span v-if="followingSelection" class="touch-follow">已按所选方案 {{ selectedPlan }}·{{ selectedPlanName }} 改写</span>
@@ -322,12 +342,12 @@
       </div>
 
       <!-- 调度决策（改路线模板）：确认方案 → 下发任务变更 -->
-      <div v-if="isReroute" class="row dispatch-row">
+      <div v-if="showPlanPanel" class="row dispatch-row">
         <button class="btn confirm" :disabled="dispatching || !selectedPlan || stale" @click="dispatch">
           {{ dispatching ? "下发中…" : stale ? "等待新分析结果…" : "确认切换方案" + (selectedPlan || "") + " · 下发任务变更指令" }}
         </button>
       </div>
-      <div v-if="isReroute" class="muted dispatch-hint">
+      <div v-if="showPlanPanel" class="muted dispatch-hint">
         司机收到的是执行指令和权益保障包，不是"你想走公路还是水运"——切换运输方式是调度端的决策权限。
       </div>
     </template>
@@ -348,6 +368,9 @@ const props = defineProps({
   // 没有这条联动时，禁航翻转后派单候选仍按旧快照显示「可坐船」，会把注定走不了的水运任务派给司机
   canalLiveBlock: { type: Boolean, default: undefined },
   canalLiveReason: { type: String, default: "" },
+  // 司机已接单（App.taskStatus.task.status==='ACCEPTED'）：常态「开始导航派单」模板据此不再出现，
+  // 已接单行程只能走绕路/任务变更模板；订单取消后父组件传回 false，模板自动恢复。
+  taskAccepted: { type: Boolean, default: false },
 });
 
 const running = ref(false);
@@ -356,9 +379,20 @@ const result = ref(null);
 const selectedPlan = ref("");
 // 本次分析的触发来源：normal=派单前常态 / hazard=灾害触发重算 / manual=手动
 const trigger = ref("manual");
+// 当前结果里是否真实存在生效灾害：口岸熔断（ygg/mc fused）、水运禁航，或已进入 reroute 打断态。
+// 恢复通航 / 雨量回落到安全线等“风险清除”同样会触发 hazard 重算，此时没有灾害，不能再挂「灾害触发」标签。
+const hasActiveHazard = computed(() => {
+  const r = result.value;
+  if (!r) return false;
+  if (r.analysisMode === "reroute") return true; // reroute 本身就是被灾害打断态
+  const ex = r.explanation || {};
+  return !!(ex.ygg?.fused || ex.mc?.fused || r.waterBlocked || r.roadBlocked);
+});
 const triggerTag = computed(() => {
   if (trigger.value === "normal") return "派单前 · 常态分析";
   if (trigger.value === "hazard") {
+    // 没有真实生效灾害（如刚清除场景/恢复通航）就不写「灾害触发」，避免与下方“未触发熔断”研判自相矛盾
+    if (!hasActiveHazard.value) return "";
     // 灾害只打到别的走廊时后端不会进 reroute 模式，这里也不能谎称「熔断重算」
     return result.value?.analysisMode === "reroute" ? "灾害触发 · 熔断重算" : "灾害触发 · 本程未受影响";
   }
@@ -437,6 +471,8 @@ const dispatchCanal = ref(null);
 // 全域受阻建议（后端与大屏/司机端同一份判据）：非空时候选都是降级放行的“向前”路线
 const dispatchAdvisory = ref(null);
 const dispatchView = computed(() => advisoryView(dispatchAdvisory.value, -1));
+// 展开逐灾种概率的候选 key（同时只展开一条，再点收起）
+const expandedHazard = ref("");
 // 禁航生效态：SSE 实时优先、抓取快照兜底——与司机端 canalBlockedNow/canalBlockReasonNow 同一套判据，
 // 两端不会出现「司机端已标禁航、大屏派单面板还可坐船」的自相矛盾
 const canalBlockedEff = computed(() =>
@@ -477,8 +513,22 @@ const recommendedId = computed(() => {
 // 带六维指标的方案（六维对比表数据源）
 const metricPlans = computed(() => (result.value?.plans || []).filter((p) => p.metrics));
 
-// 分析模式：reroute=已熔断/禁航（展示增量）；normal=常态（展示整趟运输绝对值）
+// 分析模式：reroute=已熔断/禁航（展示增量）；normal=常态（展示整趟运输的绝对值）
 const isReroute = computed(() => result.value?.analysisMode === "reroute");
+
+// 方案面板（六维对比 + 触达预览 + 切换下发）可见性闸门：
+// reroute（灾害打断本程）必然展示；司机已接单在途时，即便风险已解除、后端把模式回落成 normal，
+// 也要继续展示，让调度员走「双向切换」把车切回现已畅通的原路线/更优方案。
+// 否则会出现：解除后 isReroute=false 让本块隐藏，而常态「开始导航派单」块又因 taskAccepted 被屏蔽，
+// 两块都不命中 → 方案区整块空白（正是「风险解除后绕路分析表不见了」）。
+// 注意：块内 delta/绝对值展示仍按 isReroute 切换，解除态用全程绝对值，不会显示全 0 增量。
+// 「已接单」不能单独作为展示条件：第一次导航还没触发任何灾害时，后端只是常态分析，
+// 直接弹出「六维对比 + 方案B」会让调度员误以为要绕路。只记住「本程被打断过」
+// （出现过 reroute 或真实生效灾害），解除后才继续展示；订单取消/重开则清零。
+const everInterrupted = ref(false);
+watch([isReroute, hasActiveHazard], ([r, h]) => { if (r || h) everInterrupted.value = true; });
+watch(() => props.taskAccepted, (v) => { if (!v) everInterrupted.value = false; });
+const showPlanPanel = computed(() => isReroute.value || (props.taskAccepted && everInterrupted.value));
 
 // 全程碳排放等级（常态用绝对值标定；熔断沿用后端增量等级）
 function carbonLevelOf(m) {
@@ -614,38 +664,68 @@ function fmtNum(v) {
   return v == null ? "-" : Number(v).toLocaleString();
 }
 
+/** 把一次分析结果回填到面板（在线 / 缓存两条来源共用，避免重复逻辑） */
+function applyAnalysisResult(data) {
+  result.value = data;
+  stale.value = false;
+  // 回填最终状态（SSE 若未连接也能正确展示）
+  (data.agents || []).forEach((a) => {
+    const node = agentFlow.value.find((n) => n.id === a.id);
+    if (node) {
+      node.status = "DONE";
+      node.elapsedMs = a.elapsedMs || 0;
+      // 逐智能体通道回填：汇总标签可能把三个不同通道“就重不就轻”地合并成一个，
+      // 但评委要查的是“这一段具体是谁写的”，所以每个节点各自存一份
+      node.aiChannel = a.aiChannel || "";
+      node.aiChannelLabel = a.aiChannelLabel || "";
+    }
+  });
+  (data.agentStatus || []).forEach((row, i) => {
+    if (agentFlow.value[i]) agentFlow.value[i].output = row.output;
+  });
+  // 默认选中推荐方案
+  selectedPlan.value = recommendedId.value;
+  // 常态（开始导航）模板的多路线候选已在 runAnalysis 发起时与分析请求并行预取（见那里）。
+  // 这里只在结果为改路线模板时清空候选（候选不用于 reroute）；常态下不再二次拉取，
+  // 避免“分析完 → 再串行等一次 /api/route/candidates”导致路线卡牌迟迟不出。
+  if (data.analysisMode === "reroute") {
+    dispatchCandidates.value = [];
+    dispatchCanal.value = null;
+  }
+}
+
 async function runAnalysis(useCache, triggerSource) {
   running.value = true;
   trigger.value = triggerSource || "manual";
   resetAgentFlow();
+  // 路线候选（/api/route/candidates：多条路线 + 逐条气象灾害概率，是卡牌出现慢的耗时大头）
+  // 只依赖起终点、不依赖分析结果，故与分析请求并行发起、不 await。
+  // 等下面分析结果一到（applyAnalysisResult），候选多半已就绪，卡牌立即渲染，不再串行等第二轮。
+  // 若最终是 reroute 模板，applyAnalysisResult 会自行清空这份预取。
+  loadDispatchCandidates();
+  const base = { originId: props.originId, destinationId: props.destinationId };
   try {
-    const params = { originId: props.originId, destinationId: props.destinationId };
-    if (useCache) params.scenarioId = "heavy_rain";
-    const { data } = await axios.get("/api/agents/analysis", { params, timeout: useCache ? 30000 : 300000 });
-    result.value = data;
-    stale.value = false;
-    // 回填最终状态（SSE 若未连接也能正确展示）
-    (data.agents || []).forEach((a) => {
-      const node = agentFlow.value.find((n) => n.id === a.id);
-      if (node) {
-        node.status = "DONE";
-        node.elapsedMs = a.elapsedMs || 0;
-        // 逐智能体通道回填：汇总标签可能把三个不同通道“就重不就轻”地合并成一个，
-        // 但评委要查的是“这一段具体是谁写的”，所以每个节点各自存一份
-        node.aiChannel = a.aiChannel || "";
-        node.aiChannelLabel = a.aiChannelLabel || "";
-      }
-    });
-    (data.agentStatus || []).forEach((row, i) => {
-      if (agentFlow.value[i]) agentFlow.value[i].output = row.output;
-    });
-    // 默认选中推荐方案
-    selectedPlan.value = recommendedId.value;
-    // 常态（开始导航）模板：同步拉多路线候选供比选派单；改路线模板不需要
-    if (data.analysisMode === "reroute") {
-      dispatchCandidates.value = [];
-    } else {
-      loadDispatchCandidates();
+    if (useCache) {
+      // 显式「缓存模式」按钮：直接读预生成缓存，演示 2 秒出结果
+      const { data } = await axios.get("/api/agents/analysis", {
+        params: { ...base, scenarioId: "heavy_rain" }, timeout: 30000,
+      });
+      applyAnalysisResult(data);
+      return;
+    }
+    // 在线优先：常态 / 手动都先打真实推理（不带 scenarioId → 后端在线三智能体串行、逐节点 SSE 点亮，
+    // 结果溯源标签如实显示「在线」）。服务器无本地 Ollama 时在线延迟极不稳定（实测 4s~58s 都有），
+    // 只给 10s 预算：卡顿超过 10s 就放弃等待、常态自动回落预生成缓存兜底，保证面板迅速出结果不空挂。
+    try {
+      const { data } = await axios.get("/api/agents/analysis", { params: base, timeout: 10000 });
+      applyAnalysisResult(data);
+    } catch (err) {
+      if (triggerSource !== "normal") throw err;
+      console.warn("常态在线推理卡顿超 10s/失败，回落预生成缓存兜底", err);
+      const { data } = await axios.get("/api/agents/analysis", {
+        params: { ...base, scenarioId: "normal" }, timeout: 30000,
+      });
+      applyAnalysisResult(data);
     }
   } catch (e) {
     console.error("agent analysis failed", e);
@@ -706,6 +786,7 @@ async function loadDispatchCandidates() {
   dispatchSelected.value = "";
   dispatchCanal.value = null;
   dispatchAdvisory.value = null;
+  expandedHazard.value = "";
   try {
     const { data } = await axios.get("/api/route/candidates", {
       params: { originId: props.originId, destinationId: props.destinationId, cargoType: "cold" },
@@ -737,12 +818,53 @@ function probKey(p) {
   return p >= 50 ? "high" : "low";
 }
 /** 低阈值不显示百分比：平静天气下各候选都堆在同一个地板值（如 9%），
- * 直接标「通畅」更诚实；已发生灾害或概率达阈值才显示具体数字（文案与司机端 probText 一致） */
+ * 直接标「通畅」更诚实；已发生灾害或概率达阈值才显示。显示时不再只给一个光秃秃的
+ * 百分比，而是标出概率最高的那个灾种名 + 它的概率（与司机端 topHazardName 同口径），
+ * 其余灾种由右侧展开按钮查看。 */
 function probText(c) {
   const p = c.hazardProbability;
   if (p < 0) return "暂无预测";
   if (!c.hazardOccurred && p < 15) return "通畅";
+  const top = topHazard(c);
+  if (top && (top.probability || 0) > 0) return shortHazardLabel(top.label) + " " + top.probability + "%";
   return p + "%";
+}
+// ---------- 逐灾种概率明细（与司机端 topHazardName / openHazardDetail 同口径） ----------
+function breakdownOf(c) {
+  return Array.isArray(c && c.hazardBreakdown) ? c.hazardBreakdown : [];
+}
+function hasBreakdown(c) {
+  return breakdownOf(c).length > 0;
+}
+/** 取该候选概率最高的那个灾种条目（chip 上就显它） */
+function topHazard(c) {
+  const bd = breakdownOf(c);
+  if (!bd.length) return null;
+  return bd.reduce((a, b) => ((b.probability || 0) > (a.probability || 0) ? b : a), bd[0]);
+}
+/** 展开明细的排序：高风险在前，同级按百分比降序 */
+function sortedBreakdown(c) {
+  return [...breakdownOf(c)].sort((a, b) => {
+    if (!!b.high !== !!a.high) return b.high ? 1 : -1;
+    return (b.probability || 0) - (a.probability || 0);
+  });
+}
+/** 灾种名缩短：“暴雨/山洪”→“暴雨”、“大风/台风”→“大风”，chip 与列表都更短 */
+function shortHazardLabel(label) {
+  const s = String(label || "").split("/")[0].replace(/灾害|概率/g, "").trim();
+  return s || "灾害";
+}
+function toggleHazard(key) {
+  expandedHazard.value = expandedHazard.value === key ? "" : key;
+}
+/** chip 悬停提示：把“角标显的是最高灾种、综合概率另算”说清楚 */
+function riskChipTitle(c) {
+  const p = c.hazardProbability;
+  if (p < 0) return "暂无灾害预测数据";
+  const top = topHazard(c);
+  const main = top ? "，最高：" + shortHazardLabel(top.label) + " " + top.probability + "%" : "";
+  const hint = hasBreakdown(c) ? "，点右侧 ▾ 看各灾种" : "";
+  return "综合灾害概率 " + p + "%" + main + hint;
 }
 
 /**
@@ -1509,5 +1631,95 @@ defineExpose({ onSseStatus, notifyRiskChanged, runAnalysis });
   font-weight: 600;
   line-height: 1.5;
   white-space: normal;
+}
+/* 候选行外包：行 + 可展开的逐灾种明细 */
+.dcand-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.dcand-risk {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+/* 展开逐灾种概率的小按钮（不是 radio，点击不能选中该行） */
+.hazard-toggle {
+  border: 1px solid rgba(30, 50, 90, 0.2);
+  background: rgba(255, 255, 255, 0.7);
+  color: #4f6df5;
+  border-radius: 6px;
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+.hazard-toggle:hover {
+  border-color: rgba(79, 109, 245, 0.7);
+  background: rgba(79, 109, 245, 0.1);
+}
+.hazard-detail {
+  margin: 2px 0 4px 22px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(139, 148, 158, 0.1);
+  border-left: 3px solid rgba(79, 109, 245, 0.5);
+}
+.hz-head {
+  font-size: 10px;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+.hz-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  padding: 2px 0;
+}
+.hz-name {
+  flex: 0 0 62px;
+  color: #1c2a44;
+  font-weight: 600;
+}
+.hz-bar {
+  flex: 1 1 auto;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(30, 50, 90, 0.1);
+  overflow: hidden;
+}
+.hz-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+}
+.hz-bar i.risk-high {
+  background: rgba(225, 29, 72, 0.6);
+}
+.hz-bar i.risk-low {
+  background: rgba(22, 163, 74, 0.5);
+}
+.hz-pct {
+  flex: 0 0 40px;
+  text-align: right;
+  font-weight: 700;
+}
+.hz-pct.risk-high {
+  color: #e11d48;
+}
+.hz-pct.risk-low {
+  color: #16a34a;
+}
+.hz-flag {
+  flex: 0 0 auto;
+  font-size: 9px;
+  color: #fff;
+  background: #e11d48;
+  border-radius: 5px;
+  padding: 1px 5px;
 }
 </style>

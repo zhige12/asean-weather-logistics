@@ -1,0 +1,111 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>02-系统架构与数据使用说明</title><style>
+@page { size: A4; margin: 16mm 14mm; }
+* { box-sizing: border-box; }
+body { font-family: "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;
+  font-size: 10.5pt; line-height: 1.7; color: #1a1a1a; margin: 0; }
+h1 { font-size: 20pt; border-bottom: 3px solid #2c6ecb; padding-bottom: 6px; margin: 4px 0 14px; }
+h2 { font-size: 15pt; border-left: 5px solid #2c6ecb; padding-left: 9px; margin: 20px 0 10px; page-break-after: avoid; }
+h3 { font-size: 12.5pt; margin: 15px 0 7px; color: #23406e; page-break-after: avoid; }
+h4,h5,h6 { font-size: 11pt; margin: 12px 0 6px; page-break-after: avoid; }
+p { margin: 7px 0; }
+ul,ol { margin: 7px 0 7px 4px; padding-left: 22px; }
+li { margin: 3px 0; }
+a { color: #2c6ecb; text-decoration: none; word-break: break-all; }
+code { font-family: "Consolas","Menlo",monospace; background: #eef1f5; padding: 1px 5px; border-radius: 3px; font-size: 9pt; }
+pre { background: #1e2430; color: #e6e6e6; padding: 11px 13px; border-radius: 6px; overflow-x: auto; page-break-inside: avoid; }
+pre code { background: none; color: #e6e6e6; padding: 0; font-size: 8.7pt; line-height: 1.5; }
+blockquote { border-left: 4px solid #c9d4e5; background: #f5f8fc; margin: 9px 0; padding: 6px 14px; color: #445; }
+table { border-collapse: collapse; width: 100%; margin: 11px 0; font-size: 9.3pt; page-break-inside: avoid; }
+th,td { border: 1px solid #c2cbd6; padding: 5px 9px; text-align: left; vertical-align: top; }
+th { background: #2c6ecb; color: #fff; font-weight: 600; }
+tbody tr:nth-child(even) { background: #f2f5fa; }
+hr { border: none; border-top: 1px solid #d3dae3; margin: 16px 0; }
+</style></head><body><h1>系统架构图与数据使用说明</h1>
+<h2>一、总体架构图</h2>
+<blockquote><p>系统按因果链组织：<strong>气象来源 → 风险转换 → 智能体交互 → 调度指导</strong>。下方分层与之逐层对应：①②层为应用与执行末端，③层为智能体交互，④层为风险转换，⑤层为气象与根数据，并贯穿一套可核验机制；公路为主线、水运为互备创新点。整体因果链配图见《08-系统架构图》。</p></blockquote>
+<pre><code class="lang-mermaid">flowchart TB
+    subgraph A["① 应用与交互层　Vue 3 + Leaflet 1.9.4；移动端 Capacitor (Android)"]
+        A1["调度大屏：跨境路网态势 / 熔断可视化 / 决策沙盘 / 六维方案对比 / 分级叫应看板 / 决策日志回溯"]
+        A2["司机端 driver.html·APK：任务接收 / 中越双语 TTS 播报 / ETA 动态修正 / 换线预览与确认"]
+        A3["公众模式：风险提示 / 口岸拥堵"]
+    end
+    subgraph S["② 服务与接入层　Spring Boot"]
+        S1["REST 控制器层 /api/**"]
+        S2["SSE 实时推送 /api/agent/events"]
+        S3["TiandituTileProxyController：同源瓦片代理，密钥不出后端"]
+        S4["PublicDemoGuardFilter：公网演示护栏（危险接口屏蔽 + 写接口 per-IP 限流）"]
+    end
+    subgraph G["③ 智能体层　只生成文字，不生成数字"]
+        G1["RiskAgent → SolutionAgent → TouchAgent（DecisionOrchestrator / MultiAgentService 编排）"]
+        G2["KnowledgeBaseService：标题·关键词·正文加权匹配（非向量检索）"]
+        G3["兜底链：OllamaService(本地) → 公司内网网关 → DeepseekService(在线) → 规则模板，通道如实回报"]
+    end
+    subgraph E["④ 图计算与风险引擎层　全部对外数字在此产生"]
+        E1["RouteService：邻接表 + 优先队列 Dijkstra + 阶跃惩罚硬熔断"]
+        E2["OsmDataLoader / GraphHopperRouteService / CNRoadGeom：路网装载与口岸断边修复"]
+        E3["CostCalculator / CustomsEfficiencyService / TripSignalService：全要素代价 + 行驶进度闸门 + ETA"]
+        E4["WaterRiskEngine / IntermodalService / TributaryRiskService：公—水双向互备评估【创新点】"]
+    end
+    subgraph D["⑤ 数据层"]
+        D1["路网 vietnam-road-network.json / 知识库 knowledge-base.json / 通关时效"]
+        D2["气象：ContestWeatherProvider(官方 CRA40) / OpenMeteoWeatherProvider / SimulatedWeatherProvider"]
+        D3["WeatherSourceService + WeatherWatchdogService：缓存 + 60s 最小回源 + 连续失败熔断"]
+        D4["天地图瓦片两级缓存 + decision-cache 预生成结论"]
+    end
+    V["贯穿全链·可核验：人在回路确认 / AI 与气象来源标签 / 频度合规统计端点 / 前端零密钥 / 决策日志留痕"]
+
+    A1 &lt;--&gt; S1
+    A2 &lt;--&gt; S1
+    A3 &lt;--&gt; S1
+    A1 &lt;--&gt; S2
+    A1 --&gt; S3
+    S1 --&gt; G1
+    G1 --&gt; G2
+    G1 --&gt; G3
+    S1 --&gt; E1
+    E1 --&gt; E2
+    E1 --&gt; E3
+    E1 --&gt; E4
+    E4 -. 公路熔断 ⇄ 水运禁航 双向触发 .- E1
+    E1 --&gt; D1
+    D2 --&gt; E1
+    D2 --&gt; D3
+    G2 --&gt; D1
+    A1 -.-&gt; D4
+    E1 -.-&gt; V
+    G3 -.-&gt; V
+    D3 -.-&gt; V</code></pre>
+<h2>二、核心决策链路（时序）</h2>
+<pre><code class="lang-mermaid">sequenceDiagram
+    participant W as 气象数据(CRA40)
+    participant RS as RouteService(图计算)
+    participant AG as 三智能体(Ollama)
+    participant SD as 调度大屏
+    participant DRV as 司机/船长/百姓端
+    W-&gt;&gt;RS: 注入降雨/能见度/流速/浪高
+    RS-&gt;&gt;RS: 阶跃惩罚改边权(≥100 硬熔断)
+    RS-&gt;&gt;RS: Dijkstra 毫秒级重算 + 全线熔断降级兜底
+    RS-&gt;&gt;AG: 熔断清单 + 决策边界
+    AG-&gt;&gt;AG: RiskAgent→SolutionAgent→TouchAgent
+    AG-&gt;&gt;SD: 六维方案对比(耗时/风险/货损/油耗/费用/碳排)
+    SD-&gt;&gt;SD: 调度员人工确认最终方案
+    SD-&gt;&gt;DRV: SSE 下发差异化指令
+    DRV--&gt;&gt;SD: 确认回执(未确认自动升级渠道)</code></pre>
+<h2>三、公—水动态边权共生模型示意</h2>
+<pre><code class="lang-mermaid">flowchart LR
+    NN["南宁"] --&gt; PY["凭祥/友谊关 E4"]
+    NN --&gt; BJ["百林/东兴 E9(芒街)"]
+    NN --&gt; HJ["合浦/运河 E36(河口)"]
+    PY --&gt; HN["河内"]
+    BJ --&gt; HN
+    subgraph 航道["平陆运河水运边"]
+        NN2["南宁六景港"] --&gt; HP["海防港"]
+    end
+    PY -. 12h累计降雨&gt;80mm penalty=100 熔断 .-x PY
+    NN2 -. 能见度&lt;1000m 禁航 .-x HP</code></pre>
+<blockquote><p>同一张有向图内，公路边与水运边共享边权内核；公路熔断时引擎自动评估水运边，水运禁航时反向评估公路边，实现双向共生备份。</p></blockquote>
+<hr>
+<h2>四、数据使用说明</h2>
+<table><thead><tr><th>数据集</th><th>来源</th><th>授权/合规</th><th>在系统中的作用</th><th>是否含个人/敏感数据</th></tr></thead><tbody><tr><td>中越跨境路网（<code>vietnam-road-network.json</code>）</td><td>OpenStreetMap 开源数据，团队自主清洗 + 口岸虚拟边修复</td><td>ODbL 开源许可，需署名</td><td>图计算拓扑基础、路径规划载体</td><td>否</td></tr><tr><td>气象网格数据</td><td>大赛官方 CRA40 实况/预报接口（备源 Open-Meteo 公开气象）</td><td>官方接口授权 / CC-BY 4.0</td><td>驱动动态边权熔断、风险研判输入</td><td>否</td></tr><tr><td>通关时效数据</td><td>政府公开公报、口岸运行公告整理</td><td>公开信息</td><td>方案耗时测算、拥堵评估</td><td>否</td></tr><tr><td>行业知识库（<code>knowledge-base.json</code>）</td><td>《平陆运河通航安全管理规定》、跨境物流规范、企业规则</td><td>公开法规/自整理</td><td>AI 决策解释依据、RAG 检索源</td><td>否</td></tr><tr><td>地图底图瓦片</td><td>天地图（同源代理）/ OSM / 本地矢量瓦片</td><td>天地图密钥授权、OSM 开源</td><td>大屏与司机端可视化</td><td>否</td></tr><tr><td>演示用货运数据</td><td>团队构造的模拟任务（司机、货物、船期）</td><td>虚构样本</td><td>案例演示、任务下发闭环</td><td>否（全部虚构，不含真实个人信息）</td></tr></tbody></table>
+<p><strong>数据合规声明：</strong></p>
+<ol><li>全部敏感密钥（气象 Token、天地图密钥池、云端大模型 Key）仅存后端环境变量，前端与构建产物零密钥。</li><li>核心 AI 推理与路径计算优先在本地 Ollama 完成；本地可用时业务数据不出硬件设备，符合《数据出境安全评估办法》。仅本地推理不可用且处于联网状态时，按降级链调用云端作为兜底。</li><li>演示与测试数据均为团队构造，不涉及真实个人隐私与商业秘密。</li><li>OSM 派生数据遵循 ODbL 署名要求。</li></ol></body></html>

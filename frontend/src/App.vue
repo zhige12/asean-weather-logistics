@@ -161,6 +161,7 @@
           :destinationId="destinationId"
           :canalLiveBlock="canalBlockLive ? canalBlockLive.blocked : undefined"
           :canalLiveReason="canalBlockLive && canalBlockLive.blocked ? canalBlockLive.reason : ''"
+          :taskAccepted="!!(taskStatus && taskStatus.task && taskStatus.task.status === 'ACCEPTED')"
           @dispatched="onDispatched"
           @dispatch-task="onDispatchTask"
           @preview-candidate="onPreviewCandidate"
@@ -1290,10 +1291,17 @@ export default {
       } else {
         this.pushTimeline('SSE 告警', `${reason}${advice ? `：${advice}` : ''}`, 'danger');
       }
-      // 灾害推送（官方气象/后端守护重算）且确实产生风险或绕行 → 立即触发多智能体「灾害触发·熔断重算」分析（版本二）
-      if (data.error || rerouted || (data.risks && data.risks.length)) {
+      // 灾害状态翻转都要触发多智能体重算（版本二），不能只认「有灾害」这一半：
+      // ① 出现风险/绕行 → 「灾害触发·熔断重算」；
+      // ② 风险解除（本条线不再绕行 rerouted=false、全网无风险 risks=[]、也无 error）
+      //    同样必须重算——否则 AI 面板会冻结在旧的绕行/联运推荐上，调度端看不到「已恢复常态」，
+      //    这正是「风险解除后六维分析不触发」的成因。用上一次的有效灾害态做跳变判定，
+      //    常态下的无风险心跳（从未有过灾害）不会误触发。
+      const riskActive = !!(data.error || rerouted || (data.risks && data.risks.length));
+      if (riskActive || this._lastRouteRiskActive) {
         if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.notifyRiskChanged();
       }
+      this._lastRouteRiskActive = riskActive;
       clearTimeout(this._agentNoticeTimer);
       this._agentNoticeTimer = setTimeout(() => { this.agentNotice = null; }, 8000);
     },

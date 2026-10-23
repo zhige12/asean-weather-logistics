@@ -86,7 +86,7 @@ public class SolutionAgent {
                                    double progressRatio) {
         List<Map<String, Object>> plans = buildPlans(originId, destinationId, progressRatio);
         String recommendedId = recommend(plans);
-        String mode = resolveMode(plans);
+        String mode = resolveMode(plans, progressRatio);
 
         // 大模型推荐语（升级方案 §3.2）：数字喂给它，只让它说"为什么推荐"。
         // 常态与改道一视同仁——每次都现调模型（本地优先、≤1s 切在线、再落缓存池），
@@ -126,7 +126,7 @@ public class SolutionAgent {
                 aiChannel = DeepseekService.CHANNEL_CACHED;
             } else {
                 // 池里也没有该情境的历史文案：才落确定性规则模板
-                recommendation = "normal".equals(mode) ? normalRecommendation() : templateRecommendation(recommendedId, plans);
+                recommendation = "normal".equals(mode) ? normalRecommendation(plans) : templateRecommendation(recommendedId, plans);
             }
         }
         // 口岸确实熔断了、但断的不是司机这条线：无论推荐语出自模型还是模板，
@@ -157,19 +157,29 @@ public class SolutionAgent {
             return null;
         }
         String cause = sandbox.fuseCause();
-        String causeText = cause == null ? "" : ("typhoon".equals(cause) ? "因台风" : "rain+typhoon".equals(cause) ? "因暴雨叠加台风" : "因暴雨");
+        String causeText = cause == null ? "" : "因" + DecisionSandboxService.causeWordZh(cause);
         return blocked + causeText + "熔断，但不在本程路线上，当前路线维持不变、无需绕行";
     }
 
     /**
      * 判定本次分析模式：本程路线真被灾害打到（重算过 / 公路已无路）或水运禁航 → reroute（展示增量）；
-     * 否则为 normal（车刚出发、走廊正常，展示整趟运输的绝对值，避免出现全 0 的对比）。
+     * 否则为 normal（展示整趟运输的绝对值，避免出现全 0 的对比）。
      * <p>
      * 原来这里用 {@code sandbox.anyPortFused()} 触发：给芒街注入台风、司机本来就走友谊关时
      * 也会翻成 reroute，大屏于是出一句「推荐绕行友谊关」——绕的还是当前这条线，绕了个寂寞。
      * 改道只对「灾害打到了司机正在走的这条线」有意义，判据必须是路线本身有没有被改。
+     * <p>
+     * 【未发车闸门】reroute 六维表是「相对既定原计划的增量」对比，只有车已在途
+     * （progressRatio >= 0，有既定路线被灾害打断）时这个对比才成立。刚开始导航 / 派单前
+     * （progressRatio < 0，还没选定路线、没有“原计划”可绕）即使走廊已有熔断，也不该出六维绕行图，
+     * 而应保持常态候选卡牌视图：逐条标好灾害概率（该红就红）+ AI 推荐最安全的一条。
+     * 故未发车一律 normal。
      */
-    private String resolveMode(List<Map<String, Object>> plans) {
+    private String resolveMode(List<Map<String, Object>> plans, double progressRatio) {
+        // 未发车（不在途）：没有“原计划”可绕，强制走常态候选卡牌视图
+        if (progressRatio < 0) {
+            return "normal";
+        }
         if (sandbox.waterBlocked()) {
             return "reroute";
         }
@@ -407,9 +417,13 @@ public class SolutionAgent {
         String blocked = sandbox.blockedPortNames();
         String blockedText = blocked == null ? "口岸受阻" : blocked + "熔断";
         String cause = sandbox.fuseCause();
-        String causeText = cause == null ? ""
-                : "typhoon".equals(cause) ? "（台风致中断）"
-                : "rain+typhoon".equals(cause) ? "（暴雨叠加台风）" : "";
+        String causeText = switch (cause == null ? "" : cause) {
+            case "typhoon" -> "（台风致中断）";
+            case "fog" -> "（浓雾封路）";
+            case "rain+typhoon" -> "（暴雨叠加台风）";
+            case "rain+fog" -> "（暴雨叠加浓雾）";
+            default -> "";
+        };
         if ("B".equals(recommendedId)) {
             return String.format(
                     "推荐方案B（陆水联运）：%s%s背景下，水运通道不受公路边坡滑坡风险影响；"
@@ -473,8 +487,13 @@ public class SolutionAgent {
         }
         String cause = sandbox.fuseCause();
         if (cause != null) {
-            p.append("- 熔断成因：").append("typhoon".equals(cause) ? "台风（强风，非降雨）"
-                            : "rain+typhoon".equals(cause) ? "暴雨叠加台风" : "暴雨")
+            p.append("- 熔断成因：").append(switch (cause) {
+                            case "typhoon" -> "台风（强风，非降雨）";
+                            case "fog" -> "浓雾（低能见度封路，非降雨）";
+                            case "rain+typhoon" -> "暴雨叠加台风";
+                            case "rain+fog" -> "暴雨叠加浓雾";
+                            default -> "暴雨";
+                        })
                     .append('\n');
             if (cause.startsWith("typhoon") || cause.contains("typhoon")) {
                 DecisionSandboxService.Section mc = sandbox.mc();
@@ -533,15 +552,24 @@ public class SolutionAgent {
         Map<String, Object> planB = planById(plans, "B");
         DemoConfigService.CargoType cargo = config.cargo();
         String blocked = sandbox.blockedPortNames();
+        // 发车前即便走廊有熔断也走常态（见 resolveMode 未发车闸门），此时熔断可能正打在本程候选线上；
+        // 必须据 routeAffected 区分“断在别处”与“断在本程走廊”，不能一律说“不在本程路线上”（那是假话）。
+        boolean routeAffected = planA != null && Boolean.TRUE.equals(planA.get("routeAffected"));
         StringBuilder p = new StringBuilder();
         p.append("你是多式联运方案生成专家。");
         if (blocked == null) {
             p.append("当前南宁→河内走廊无熔断、无禁航，属常态。已知：\n");
-        } else {
+        } else if (!routeAffected) {
             p.append("当前有口岸熔断（").append(blocked).append("），但不在本程路线上，"
                     + "本程维持「").append(planA == null ? "公路" : planA.get("name"))
                     .append("」，属常态通行。已知：\n")
                     .append("- 禁止建议绕行、改道、等待：需要绕开的口岸根本不在这条线上\n");
+        } else {
+            p.append("当前是发车前的路线选择阶段（尚无既定路线被绕开），口岸 ").append(blocked)
+                    .append(" 已熔断且波及本程走廊。已知：\n")
+                    .append("- 这是从多条候选路线里挑一条发车，不是中途改道；禁止使用"
+                            + "「相对原计划多花X小时」这类绕行增量口吻\n")
+                    .append("- 系统已在候选列表按灾害概率逐条标注，请推荐其中灾害概率最低、可安全通行的公路线\n");
         }
         p.append("- 方案A 全程公路：约 ").append(fmtHours(planA)).append(" 小时，时效最优\n");
         if (planB != null && !Boolean.TRUE.equals(planB.get("notApplicable"))) {
@@ -552,10 +580,14 @@ public class SolutionAgent {
         if (blocked == null) {
             p.append("\n请用不超过80字说明：两条路线都是正常可选项（不是备选兜底）——")
                     .append("赶时效选全程公路，不急、想省成本/低碳甚至可不带货全程坐船出境则选平陆运河联运。\n");
-        } else {
+        } else if (!routeAffected) {
             p.append("\n请用不超过80字说明：受影响的只是").append(blocked)
                     .append("，本程不受影响，维持当前公路路线即可（不提绕行/改道/等待）；")
                     .append("若不想只跑公路，平陆运河陆水联运同样是正常选项。\n");
+        } else {
+            p.append("\n请用不超过80字说明：").append(blocked)
+                    .append(" 熔断已波及本程走廊，AI 已按灾害概率在候选中标注，"
+                            + "推荐灾害概率最低、可安全通行的一条发车（不提'相对原计划'的绕行增量）。\n");
         }
         p.append("只输出 JSON：{\"recommendation\":\"...\"}");
         return p.toString();
@@ -578,7 +610,14 @@ public class SolutionAgent {
      * 常态兜底的最后一句固定话术（仅当模型不可用且缓存池也无对应情境时才用）。
      * 保留旧措辞，保证离线首次、无任何历史时仍与“常态双选项都合法”的事实一致。
      */
-    private String normalRecommendation() {
+    private String normalRecommendation(List<Map<String, Object>> plans) {
+        Map<String, Object> planA = planById(plans, "A");
+        // 发车前走廊熔断波及本程：离线兜底也不能只讲“公路/水运都可选”而无视风险，
+        // 如实说明 AI 已按灾害概率标注候选、推荐最安全可通行的一条发车。
+        if (planA != null && Boolean.TRUE.equals(planA.get("routeAffected"))) {
+            return "发车前走廊已有口岸熔断：AI 按灾害概率逐条标注了候选路线，"
+                    + "推荐其中灾害概率最低、可安全通行的一条发车；不赶时间也可考虑平陆运河陆水联运。";
+        }
         return "去河内不必只有公路：本走廊常态下即可走平陆运河陆水联运（方案B），车辆滚装上船、随船经运河转海运到海防，"
                 + "不赶时间甚至不带货也能全程坐船出境；追求时效则直走全程公路（方案A）最快。两条都是正常可选项，不是备选兜底。";
     }
@@ -598,9 +637,13 @@ public class SolutionAgent {
         String blocked = sandbox.blockedPortNames();
         String detour = detourPorts(blocked);
         String cause = sandbox.fuseCause();
-        String causeText = cause == null ? ""
-                : "typhoon".equals(cause) ? "（台风致中断，非降雨）"
-                : "rain+typhoon".equals(cause) ? "（暴雨叠加台风）" : "";
+        String causeText = switch (cause == null ? "" : cause) {
+            case "typhoon" -> "（台风致中断，非降雨）";
+            case "fog" -> "（浓雾封路，非降雨）";
+            case "rain+typhoon" -> "（暴雨叠加台风）";
+            case "rain+fog" -> "（暴雨叠加浓雾）";
+            default -> "";
+        };
         if (detour == null) {
             return "两个口岸均不可用" + causeText + "，公路走廊无可用通道";
         }
@@ -670,8 +713,7 @@ public class SolutionAgent {
         String blocked = sandbox.blockedPortNames();
         String detour = detourPorts(blocked);
         String cause = sandbox.fuseCause();
-        String causeText = cause == null ? ""
-                : "typhoon".equals(cause) ? "台风" : "rain+typhoon".equals(cause) ? "暴雨叠加台风" : "暴雨";
+        String causeText = DecisionSandboxService.causeWordZh(cause);
         String head = (blocked == null ? "有口岸受限" : blocked + "因" + causeText + "熔断");
         if (detour == null) {
             return head + "，另一侧口岸同样不可用，公路走廊无可用通道";

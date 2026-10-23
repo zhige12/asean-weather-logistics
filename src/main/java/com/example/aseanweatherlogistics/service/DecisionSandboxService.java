@@ -196,7 +196,7 @@ public class DecisionSandboxService {
     }
 
     /** 退出模拟模式：回到真实数据（重新拉取 GOWFS，拉不到则保持原值并说明原因） */
-    public synchronized Map<String, Object> exitSimMode() {
+    public Map<String, Object> exitSimMode() {
         this.mode = MODE_LIVE;
         Map<String, Object> st = pushLiveForecast();
         decisionLog.log("WEATHER", "退出模拟模式", "气象参数恢复为 GOWFS 真实数据（只读）");
@@ -262,6 +262,40 @@ public class DecisionSandboxService {
     private static double dbl(Map<String, Double> elements, String key, double fallback) {
         Double v = elements == null ? null : elements.get(key);
         return v == null ? fallback : v;
+    }
+
+    /**
+     * 沙盘「模拟模式」下的气象叠加（供路线级灾害概率预测识别沙盘灾害）：
+     * 把两断面当前可调全要素翻译成 predictRouteRisk 逐灾种判据所识别的气象点形状
+     * （键名与实时气象一致：precipitationMm/windKph/visibilityM/temperatureC），按 edgeId 归组。
+     * <p>
+     * 仅在模拟模式且已推送时返回非空：真实模式的数据本就来自实时气象，不重复叠加。
+     * 降雨按沙盘「未来6h累计」口径直接作为降水强度输入，使滑块推高即被卡牌如实反映——
+     * 这是调度员的 what-if 推演（sandboxSim=true 标注），不是官方实测。
+     */
+    public Map<String, Map<String, Object>> simWeatherOverlay() {
+        Map<String, Map<String, Object>> out = new LinkedHashMap<>();
+        if (!pushed || !MODE_SIM.equals(mode)) {
+            return out;
+        }
+        putSectionOverlay(out, ygg);
+        putSectionOverlay(out, mc);
+        return out;
+    }
+
+    /** 把某断面当前解析后的全要素（模拟口径）翻译成一个气象点形状。 */
+    private void putSectionOverlay(Map<String, Map<String, Object>> out, Section s) {
+        SectionSim el = resolvedElements(s);
+        Map<String, Object> w = new LinkedHashMap<>();
+        w.put("nodeId", s.id);
+        w.put("nodeName", s.name);
+        w.put("edgeId", s.edgeId);
+        w.put("precipitationMm", el.rainMm());
+        w.put("windKph", el.windKph());
+        w.put("visibilityM", el.visibilityM());
+        w.put("temperatureC", el.tempC());
+        w.put("sandboxSim", true);
+        out.put(s.edgeId, w);
     }
 
     /** 把模拟参数落到断面：降雨直接赋值，气压/风速统一走 TyphoonRiskRule 判定 */
@@ -370,11 +404,19 @@ public class DecisionSandboxService {
      * 取数失败（未配置/节流/熔断/上游异常）时<b>保持沙盘原值不变</b>并把失败原因返回前端，
      * 避免把"没拉到"错报成"无降雨"——这与支流实况联动的降级策略一致。
      */
-    public synchronized Map<String, Object> pushLiveForecast() {
+    public Map<String, Object> pushLiveForecast() {
+        // 关键：GOWFS 网络取数放到沙盘锁【外】做。取数慢/超时（出口到上游抖动时可达数十秒）
+        // 时不再占住 this 监视器，也就不会连带卡死拖滑块的 setSimParams——这正是
+        // “拖了滑块页面没反应、像卡住”的根因。取完数再进锁落值（纯内存、毫秒级）。
         List<ContestForecastService.ForecastPoint> points = List.of(
                 new ContestForecastService.ForecastPoint(ygg.id, ygg.name, ygg.lat, ygg.lon),
                 new ContestForecastService.ForecastPoint(mc.id, mc.name, mc.lat, mc.lon));
         ContestForecastService.ForecastResult r = forecastService.fetchRain6h(points);
+        return applyLiveForecast(r);
+    }
+
+    /** 把 GOWFS 取数结果落到沙盘：取数已在锁外完成，这里只在沙盘锁内做纯内存判定与下发。 */
+    private synchronized Map<String, Object> applyLiveForecast(ContestForecastService.ForecastResult r) {
         if (r == null || !r.dataAvailable()) {
             String msg = r == null ? "预报服务不可用" : r.message();
             decisionLog.log("WEATHER", "GOWFS 预报拉取失败",
@@ -542,8 +584,14 @@ public class DecisionSandboxService {
      * 气象拉取失败（无任何支流口数据）时不注入：保留干流当前联动状态，
      * 避免把“没网”错报成“无降雨→解除顶托”。
      */
-    public synchronized Map<String, Object> syncTributaryRiskLive() {
+    public Map<String, Object> syncTributaryRiskLive() {
+        // 实况气象取数同样移出沙盘锁，避免慢/超时的气象请求占住监视器卡死拖滑块（与 pushLiveForecast 一致）
         Map<String, Object> live = tributaryRiskService.liveAssessment();
+        return applyTributaryLive(live);
+    }
+
+    /** 把支流实况取数结果落到沙盘：取数已在锁外完成，这里只在沙盘锁内做纯内存联动与下发。 */
+    private synchronized Map<String, Object> applyTributaryLive(Map<String, Object> live) {
         if (!Boolean.TRUE.equals(live.get("dataAvailable"))) {
             decisionLog.log("WEATHER", "支流实况联动失败",
                     "当前气象源（" + live.get("sourceLabel") + "）未返回任何支流口降雨数据，保持原联动状态不变");
@@ -654,7 +702,12 @@ public class DecisionSandboxService {
         TyphoonRiskRule.Verdict typhoon = s.typhoonActive
                 ? TyphoonRiskRule.evaluate(s.typhoonPressureHpa, s.typhoonWindKph)
                 : new TyphoonRiskRule.Verdict(0, null);
-        boolean nowFused = rainFused || typhoon.blocking();
+        // 浓雾封路：与降雨 / 台风并列的第三个硬判据。取该断面当前全要素（模拟取滑杆、真实取 GOWFS），
+        // 由 FogRiskRule 按 能见度+湿度+云量+风速 联动判定，与真实气象同一口径，缺要素不误熔断
+        SectionSim el = resolvedElements(s);
+        FogRiskRule.Verdict fog = FogRiskRule.evaluate(
+                el.visibilityM(), el.humidityPct(), el.cloudPct(), el.windKph());
+        boolean nowFused = rainFused || typhoon.blocking() || fog.blocking();
         if (nowFused == s.fused) {
             return;
         }
@@ -663,6 +716,8 @@ public class DecisionSandboxService {
             String reason;
             if (typhoon.blocking()) {
                 reason = String.format("沙盘熔断:%s%s（%s）", s.name, typhoon.reason(), trigger);
+            } else if (fog.blocking()) {
+                reason = String.format("沙盘熔断:%s%s（%s）", s.name, fog.reason(), trigger);
             } else {
                 reason = String.format("沙盘熔断:%s未来6h累计降雨量%.0fmm > %.0fmm熔断阈值（%s）",
                         s.name, s.forecastMm, thresholdMm, trigger);
@@ -671,13 +726,15 @@ public class DecisionSandboxService {
             decisionLog.log("FUSE", s.name + "熔断",
                     (typhoon.blocking()
                             ? String.format("%s，penalty=100（%s）", typhoon.reason(), trigger)
-                            : String.format("未来6h累计降雨量 %.0fmm > %.0fmm 阈值，penalty=100（%s）",
-                                    s.forecastMm, thresholdMm, trigger)));
+                            : fog.blocking()
+                                    ? String.format("%s，penalty=100（%s）", fog.reason(), trigger)
+                                    : String.format("未来6h累计降雨量 %.0fmm > %.0fmm 阈值，penalty=100（%s）",
+                                            s.forecastMm, thresholdMm, trigger)));
         } else {
             s.fused = false;
             weatherSimulator.clearRisk(s.edgeId);
             decisionLog.log("UNFUSE", s.name + "恢复通行",
-                    String.format("降雨 %.0fmm 低于 %.0fmm 恢复线且无台风判据（%s）",
+                    String.format("降雨 %.0fmm 低于 %.0fmm 恢复线、无台风与浓雾判据（%s）",
                             s.forecastMm, thresholdMm - HYSTERESIS_MM, trigger));
         }
     }
@@ -829,21 +886,55 @@ public class DecisionSandboxService {
         return names.isEmpty() ? null : String.join("、", names);
     }
 
-    /** 熔断成因：typhoon / rain / rain+typhoon；未熔断返回 null */
+    /** 熔断成因：typhoon / rain / rain+typhoon / fog / rain+fog；未熔断返回 null */
     public String fuseCause() {
         TyphoonRiskRule.Verdict ty = mc.typhoonActive
                 ? TyphoonRiskRule.evaluate(mc.typhoonPressureHpa, mc.typhoonWindKph) : null;
         TyphoonRiskRule.Verdict yy = ygg.typhoonActive
                 ? TyphoonRiskRule.evaluate(ygg.typhoonPressureHpa, ygg.typhoonWindKph) : null;
         boolean typhoon = (ty != null && ty.blocking()) || (yy != null && yy.blocking());
+        // 浓雾封路：与降雨 / 台风并列的第三个成因。此前不认雾，导致雾熔断时成因返回 null，
+        // 下游推荐语 / 触达话术 / 研判文案只能沿用「暴雨」模板，出现「降雨0mm却因暴雨熔断」的矛盾。
+        boolean fog = fogBlockingOf(ygg) || fogBlockingOf(mc);
         boolean rain = ygg.forecastMm > 0 || mc.forecastMm > 0;
+        // 成因优先级：台风 > 浓雾 > 降雨；有降雨叠加时组合表述
         if (typhoon && rain) {
             return "rain+typhoon";
         }
         if (typhoon) {
             return "typhoon";
         }
+        if (fog && rain) {
+            return "rain+fog";
+        }
+        if (fog) {
+            return "fog";
+        }
         return rain ? "rain" : null;
+    }
+
+    /** 某断面当前是否达浓雾封路级（与 {@link #applySection} 同一 {@link FogRiskRule} 口径）。 */
+    public boolean fogBlockingOf(Section s) {
+        SectionSim el = resolvedElements(s);
+        return FogRiskRule.evaluate(
+                el.visibilityM(), el.humidityPct(), el.cloudPct(), el.windKph()).blocking();
+    }
+
+    /**
+     * 熔断成因 → 中文短词，供推荐语 / 触达话术 / 研判文案统一取词，避免雾被误说成暴雨。
+     * 未知/为空时回落「暴雨」（与旧口径一致，纯降雨场景文案不变）。
+     */
+    public static String causeWordZh(String cause) {
+        if (cause == null) {
+            return "";
+        }
+        return switch (cause) {
+            case "typhoon" -> "台风";
+            case "fog" -> "浓雾";
+            case "rain+fog" -> "暴雨叠加浓雾";
+            case "rain+typhoon" -> "暴雨叠加台风";
+            default -> "暴雨";
+        };
     }
 
     /** 某断面是否被灾害场景注入"等效熔断"（penalty≥100） */
@@ -969,6 +1060,11 @@ public class DecisionSandboxService {
         m.put("riskLevel", s.fused ? "高" : (s.forecastMm >= CAUTION_MM ? "中" : "低"));
         // 本断面解析后的全要素（模拟/真实统一形状），供前端滑杆回显与衍生引擎取值
         SectionSim el = resolvedElements(s);
+        // 浓雾封路状态（供界面显示"这次熔断/风险是否由雾造成"，与台风 tag 对称）
+        FogRiskRule.Verdict fv = FogRiskRule.evaluate(
+                el.visibilityM(), el.humidityPct(), el.cloudPct(), el.windKph());
+        m.put("fogVerdict", fv.triggered() ? fv.reason() : null);
+        m.put("fogBlocking", fv.blocking());
         Map<String, Object> res = new LinkedHashMap<>();
         res.put("rainMm", el.rainMm());
         res.put("pressureHpa", el.pressureHpa());

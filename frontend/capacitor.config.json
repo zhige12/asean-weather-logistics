@@ -3,7 +3,7 @@
   "appName": "ZLN-Map",
   "webDir": "dist",
   "server": {
-    "url": "http://192.168.200.140:8080/driver.html",
+    "url": "https://zhi-ning.cn:8443/driver.html",
     "cleartext": true
   },
   "android": {

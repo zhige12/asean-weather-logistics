@@ -2,282 +2,73 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>服务蓝图 · 气象驱动的跨境物流协同调度服务</title>
+<title>服务蓝图</title>
 <style>
-  /* 打印/截图向：白底、1560 定宽，交给 tools/_arch_shot.ps1 光栅化成 PNG 进 Word/PPT。 */
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { background: #fff; }
-  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: #17222e; }
-  #fig { width: 1560px; padding: 20px 26px 16px; }
+  body { background: #fff; font-family: "Microsoft YaHei", sans-serif; color: #1c2b3a; }
+  #fig { width: 1200px; padding: 34px 40px 30px; }
+  h1 { font-size: 26px; color: #17457c; text-align: center; }
+  .sub { font-size: 14px; color: #6b7a89; text-align: center; margin: 8px 0 26px; }
 
-  .cap { border-bottom: 2px solid #17457c; padding-bottom: 9px; margin-bottom: 11px;
-         display: flex; align-items: flex-end; justify-content: space-between; }
-  .cap h1 { font-size: 24px; color: #17457c; letter-spacing: .4px; }
-  .cap .sub { font-size: 12.6px; color: #4a5b6b; margin-top: 5px; line-height: 1.5; max-width: 1180px; }
-  .cap .no { font-size: 13px; color: #17457c; border: 1px solid #9db6cf; border-radius: 3px;
-             padding: 3px 9px; white-space: nowrap; }
-
-  /* 泳道网格：左列泳道名 + 5 个阶段列 */
-  .bp { display: grid; grid-template-columns: 132px repeat(5, 1fr); gap: 5px; align-items: stretch; }
-  .ph { background: #17457c; color: #fff; border-radius: 4px 4px 0 0; padding: 6px 8px; }
-  .ph b { font-size: 14px; }
-  .ph span { display: block; font-size: 10.6px; opacity: .9; margin-top: 2px; line-height: 1.35; }
-  .ph .step { display: inline-block; background: #fff; color: #17457c; font-size: 11px; font-weight: 700;
-              width: 18px; height: 18px; line-height: 18px; text-align: center; border-radius: 50%;
-              margin-right: 4px; }
-  .lane { background: #eef3f8; border: 1px solid #c6d2dd; border-radius: 4px; padding: 7px 8px;
-          display: flex; flex-direction: column; justify-content: center; }
-  .lane b { font-size: 13px; color: #17457c; }
-  .lane span { font-size: 10.4px; color: #55687a; margin-top: 3px; line-height: 1.4; }
-
-  .c { border: 1px solid #d2dce5; border-radius: 3px; background: #fff; padding: 6px 8px; }
-  .c ul { list-style: none; }
-  .c li { font-size: 11px; line-height: 1.5; color: #3c4c5c; padding-left: 9px; position: relative; }
-  .c li + li { margin-top: 3px; }
-  .c li::before { content: ""; position: absolute; left: 0; top: 7px; width: 4px; height: 4px;
-                  border-radius: 50%; background: #9db6cf; }
-  .c b { color: #17222e; }
-  .c code { font-family: Consolas, monospace; font-size: 10.2px; color: #17457c; background: #eef3f8;
-            padding: 0 3px; border-radius: 2px; }
-  .act { background: #eaf6fd; border-color: #b9dbee; }
-  .front { background: #f2fbf5; border-color: #b7dcc4; }
-  .back { background: #fdf1e7; border-color: #ecc8ab; }
-  .sup { background: #f3effa; border-color: #d3c7e8; }
-
-  /* 粉线（互动线）与绿线（可视分离线） */
-  .line { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; margin: 3px 0 1px; }
-  .line .ln { flex: 1 1 auto; border-top: 2px dashed #d6336c; }
-  .line.green .ln { border-top-color: #2f9e44; }
-  .line .tag { font-size: 11.4px; color: #d6336c; white-space: nowrap; font-weight: 700; }
-  .line.green .tag { color: #2f9e44; }
-  .line .why { font-size: 10.8px; color: #6b7c8c; white-space: nowrap; }
-
-  /* 分级叫应表 */
-  .lv { margin-top: 12px; display: grid; grid-template-columns: 132px repeat(4, 1fr); gap: 5px; }
-  .lv .h { background: #17457c; color: #fff; font-size: 12px; border-radius: 3px; padding: 5px 8px; text-align: center; }
-  .lv .k { background: #eef3f8; border: 1px solid #c6d2dd; border-radius: 3px; padding: 5px 8px;
-           font-size: 11.4px; color: #17457c; font-weight: 700; display: flex; align-items: center; }
-  .lv .v { border: 1px solid #d2dce5; border-radius: 3px; padding: 5px 8px; font-size: 11px; color: #3c4c5c; line-height: 1.45; }
-  .lv .v b { color: #17222e; }
-  .y { background: #fff8e1; border-color: #f0d264 !important; }
-  .o { background: #ffeedd; border-color: #f3b479 !important; }
-  .r { background: #fdecec; border-color: #f0a3a3 !important; }
-
-  /* 真实界面证据条 */
-  .evs { margin-top: 12px; display: flex; gap: 8px; }
-  .ev { flex: 1 1 0; border: 1px solid #c6d2dd; border-radius: 4px; overflow: hidden; background: #fff; }
-  .ev .pic { height: 322px; overflow: hidden; background: #f6f8fa; }
-  .ev img { width: 100%; display: block; object-fit: cover; object-position: top left; }
-  /* 司机端截图上半部全是地图，取底部才能拍到订单弹层 */
-  .ev.bot img { object-position: left bottom; }
-  .ev .t { padding: 5px 8px 7px; border-top: 1px solid #e0e8ef; }
-  .ev .t b { font-size: 11.8px; color: #17457c; }
-  .ev .t p { font-size: 10.6px; color: #55687a; line-height: 1.45; margin-top: 2px; }
-
-  .foot { margin-top: 10px; border-top: 1px solid #c6d2dd; padding-top: 7px; font-size: 11px;
-          color: #55687a; line-height: 1.55; }
-  .foot b { color: #17222e; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  th, td { border: 1px solid #c9d6e2; padding: 12px 8px; text-align: center; vertical-align: middle; }
+  thead th { background: #17457c; color: #fff; font-size: 15px; padding: 10px 8px; }
+  thead th:first-child { background: #0f3460; width: 130px; }
+  tbody th { background: #eaf1f8; color: #17457c; font-size: 14.5px; }
+  td { background: #fff; font-size: 13px; color: #33475b; line-height: 1.65; }
+  td b { color: #17457c; font-size: 13.5px; }
+  td.dim { color: #9aa8b5; background: #f7fafc; }
+  tr.user td { background: #f5f9fc; }
+  tr.front td b { color: #1f6f45; }
+  .line td { border-top: 2.5px dashed #b35215; }
+  .tag { display: inline-block; font-size: 11px; color: #b35215; border: 1px solid #d9a173;
+         border-radius: 3px; padding: 0 6px; margin-bottom: 4px; }
 </style>
 </head>
 <body spellcheck="false">
 <div id="fig">
+  <h1>服务蓝图</h1>
+  <div class="sub">按「用户活动 — 前台触点 — 后台过程 — 支持系统」四条泳道 · 五个服务阶段</div>
 
-  <div class="cap">
-    <div>
-      <h1>服务蓝图（Service Blueprint）· 一次突发气象从感知到闭环的全程服务设计</h1>
-      <div class="sub">
-        五阶段横向推进，四条泳道纵向分层：<b>用户做什么 → 界面给什么 → 系统在背后算什么 → 靠什么数据撑住</b>。
-        粉线（互动线）以上是人能看见、能点的接触点；粉线与绿线之间是"看得见结果、看不见算法"的后台支持；
-        绿线以下是纯内部支撑系统。底部四张为实机界面截图。
-      </div>
-    </div>
-    <div class="no">图 3　服务蓝图与分级叫应</div>
-  </div>
-
-  <div class="bp">
-    <!-- 阶段表头 -->
-    <div></div>
-    <div class="ph"><span class="step">1</span><b>风险感知</b><span>常态取数 → 逐边判险 → 熔断</span></div>
-    <div class="ph"><span class="step">2</span><b>方案生成</b><span>多路线候选 + 六维代价 + AI 解释</span></div>
-    <div class="ph"><span class="step">3</span><b>人工决策</b><span>沙盘复算 / 企业模板 / 选定派单</span></div>
-    <div class="ph"><span class="step">4</span><b>分级触达</b><span>五类角色 · 中越双语 · 权益保障</span></div>
-    <div class="ph"><span class="step">5</span><b>闭环确认</b><span>接单/拒单 · 回执 · 升级 · 留痕</span></div>
-
-    <!-- 泳道一：用户动作 -->
-    <div class="lane"><b>用户动作</b><span>调度员 / 司机 / 越方司机 / 船东船员 / 沿岸百姓</span></div>
-    <div class="c act"><ul>
-      <li>调度员<b>无需操作</b>：大屏常态显示沿线实况与断面风险</li>
-      <li>发现口岸段转红 → 点开<b>决策沙盘</b>核对雨量</li>
-      <li>司机端顶部状态条由"全线通畅"变风险级</li>
-    </ul></div>
-    <div class="c act"><ul>
-      <li>点<b>「AI 气象分析并规划路线」</b>触发出车前分析</li>
-      <li>读三智能体研判与逐口岸解释</li>
-      <li>在候选卡之间比较时长 / 里程 / 灾害概率</li>
-    </ul></div>
-    <div class="c act"><ul>
-      <li>拖<b>降雨等 7 个滑块</b>或切「真实降雨 / 手动剧本」做假设复算</li>
-      <li>套企业模板（风险容忍度 / 货物 / 触达角色）</li>
-      <li>选一条路线点<b>「确认选择此路线并派单给司机」</b></li>
-    </ul></div>
-    <div class="c act"><ul>
-      <li>司机、越方接力司机各自收到<b>执行指令</b></li>
-      <li>船东/船员收到装船 / 取消装船 / 锚泊待命指令</li>
-      <li>沿岸百姓收到公众预警并<b>点击确认</b></li>
-    </ul></div>
-    <div class="c act"><ul>
-      <li>司机<b>确认接单</b>或<b>拒绝此单</b>（退回普通导航）</li>
-      <li>未确认者被语音外呼二次叫应</li>
-      <li>调度员在触达面板与决策日志看到回执齐不齐</li>
-    </ul></div>
-
-    <!-- 粉线 -->
-    <div class="line"><span class="tag">粉线 · 互动线 Line of Interaction</span><span class="ln"></span>
-      <span class="why">线以上=用户可直接看见并操作的接触点；线以下=用户不参与的内部过程</span></div>
-
-    <!-- 泳道二：前台界面 -->
-    <div class="lane"><b>前台界面</b><span>可见证据（实机截图见下方）</span></div>
-    <div class="c front"><ul>
-      <li>大屏<b>实时气象（CRA40）</b>卡：源下拉「CRA40 / Open-Meteo / 离线模拟」+「拉取实时气象」+ 来源与新鲜度标注</li>
-      <li>地图按边着色：安全绿（白箭头=行进方向）/ 风险橙 / 熔断红 / 基准灰虚线；<b>底图1~4</b> 切换</li>
-      <li>沙盘断面卡：友谊关 <code>120mm 已熔断</code>、芒街 <code>0mm 通行正常</code>，含<b>路面风险 0·低</b>徽标与 7 要素滑块</li>
-    </ul></div>
-    <div class="c front"><ul>
-      <li><b>「AI 决策分析 · 多智能体协同」</b>卡：风险研判 → 方案生成 → 触达 三灯与各自耗时</li>
-      <li><b>风险研判·决策解释</b>：逐口岸绿卡 + 橙色阈值说明（友谊关恢复线 75mm、芒街触发线 70mm）+ 紫色模型研判</li>
-      <li><b>开始导航派单</b>候选卡：推荐路线（全线通畅）7.03h · 376.39km · 灾害概率 15%；备选路线 A/B…</li>
-      <li>通道标签原文只有<b>本地 / 在线 / 缓存 / 模板</b></li>
-    </ul></div>
-    <div class="c front"><ul>
-      <li>决策沙盘：<b>拉取 GOWFS 数据 / 退出模拟 / 重置沙盘 / 快速模拟灾害注入</b>，降雨源标明「GOWFS 预报（真实）」或「模拟参数（可调）」</li>
-      <li><b>开放平台 · 智能体配置器（千企千面）</b>：三套模板 + 阈值 + 货物 + 触达范围</li>
-      <li>路线状态卡：预计到达 / 基准路线 / 实时影响 / <b>是否绕行</b>；任务简报一键生成</li>
-    </ul></div>
-    <div class="c front"><ul>
-      <li>司机端<b>任务变更通知</b>卡：中越双语 + 5 条权益保障 + 「请确认接收 / 联系调度」</li>
-      <li>大屏<b>「多角色触达 · 分级叫应」</b>：五角色状态灯（已送达 / 已确认 / <b>外呼中</b>）+ 黄橙红等级横幅（通道·确认方式·升级策略）</li>
-      <li>预警页：<b>AI 双语预警</b>「生成预警」+ 灾害类型 chips + <b>当前风险清单</b>计数</li>
-    </ul></div>
-    <div class="c front"><ul>
-      <li>司机端<b>订单信息</b>弹层：「已接单 · TASK-3」+ 货物/时限/调度下发路线/路线摘要/AI 灾害概率 + 出车前 AI 气象分析</li>
-      <li>任务页「任务变更通知」与「AI 方案建议 · 查看方案」</li>
-      <li>大屏触达计数 已确认 n/n、<b>决策日志</b>时间线（含叫应上报条目）</li>
-    </ul></div>
-
-    <!-- 绿线 -->
-    <div class="line green"><span class="tag">绿线 · 可视分离线 Line of Visibility</span><span class="ln"></span>
-      <span class="why">线以下用户不可见：只呈现结果与来源标注，不暴露算法过程；决策权始终留在人这一侧</span></div>
-
-    <!-- 泳道三：后台支持 -->
-    <div class="lane"><b>后台支持</b><span>系统内部动作</span></div>
-    <div class="c back"><ul>
-      <li>取数编排守闸：实况缓存 <b>10 min</b>、每源 <b>60 s</b>、跨源 <b>5 s</b>、连败 <b>3</b> 次静默 <b>300 s</b>；预报独立 <b>30 min</b>（失败静默 600 s）；守护线程 <b>60 s</b> 巡检</li>
-      <li>逐边惩罚：雨强 ≥50mm/h→<b>100</b>、≥20→20、能见度&lt;100m→50、台风 990hPa+60km/h→100；<b>≥100 即等效道路中断</b></li>
-      <li>熔断边跳过重算；全走廊搜不出才降级软惩罚兜底并标 <code>corridorAllFused</code></li>
-    </ul></div>
-    <div class="c back"><ul>
-      <li><code>GET /api/agents/analysis</code> 编排三智能体顺序接力，<b>引擎给边界、模型给文字</b>，模型数字一律不采信</li>
-      <li>知识库按标题/关键词/正文加权匹配注入上下文</li>
-      <li>通道逐级兜底：Ollama → DeepSeek → 缓存池 → 规则模板；<b>只影响文字，不改数值与推荐</b>；司机在途强制真实推理</li>
-    </ul></div>
-    <div class="c back"><ul>
-      <li>沙盘改档即全链路重估；恢复带 <b>5 mm 滞后</b>，降雨 50mm 只"关注"<b>不注入软惩罚</b>（惩罚是乘数会放大通关时间）</li>
-      <li>企业画像驱动阈值取档（保守 80 / 平衡 100 / 激进 120mm）与触达角色集</li>
-      <li>派单 <code>/api/task/dispatch</code> → SSE <code>task-assigned</code>；全域受阻时下发 advisory（暂缓发车 / 折返 / 停靠等待）并<b>停止自动派单与自动换线</b></li>
-    </ul></div>
-    <div class="c back"><ul>
-      <li><code>OutreachService.dispatch(A|B|C)</code> 按方案与切换方向（<code>road_to_water</code> / <code>water_to_road</code> / <code>dual_risk</code> / normal）生成各角色专属文案，装船时刻跟<b>真实时钟</b>不写死</li>
-      <li>叫应等级由风险状态研判，非人工指定</li>
-      <li>状态变化经 <code>outreach-update</code> 推大屏，后端 <b>300 ms</b> 防抖合并</li>
-    </ul></div>
-    <div class="c back"><ul>
-      <li><code>/api/outreach/confirm</code> 记回执；<b>4 s</b> 首批确认 → <b>+4 s</b> 未确认升级语音外呼 → <b>+3 s</b> 升级后确认</li>
-      <li>红色级 <b>+3 s</b> 仍未确认的关键角色 → 自动上报调度端人工介入</li>
-      <li>接单/拒单 <code>/api/task/accept</code>·<code>/reject</code>；路线重算后在途任务同步更新，司机端 ETA 按在途进度修正</li>
-    </ul></div>
-
-    <!-- 支撑系统 -->
-    <div class="lane"><b>支撑系统</b><span>数据与底座</span></div>
-    <div class="c sup"><ul>
-      <li>大赛官方 <b>CRA40 实况</b> <code>/api/v1/observations</code> + <b>GOWFS 预报</b> <code>/api/v1/forecasts/3h</code>（令牌只存后端）</li>
-      <li>自主清洗路网 <b>8.6 万节点 / 9.8 万边</b> + 口岸断边</li>
-      <li>天地图同源瓦片代理 + 四级底图降级链</li>
-    </ul></div>
-    <div class="c sup"><ul>
-      <li>行业知识库（通航安全 / 跨境规范 / 作业规则）</li>
-      <li>全要素代价：里程·耗时·延误·油耗·通行费·通关·货损·碳排</li>
-      <li>本地 Ollama qwen2.5 / 公网 DeepSeek / 包内推荐语缓存池</li>
-    </ul></div>
-    <div class="c sup"><ul>
-      <li>通关时效库参与总耗时与排序；水运通航观测<b>双数据源</b>（15 min 轮询）</li>
-      <li>货损模型：冷链火龙果超 4h 起 2.4%/h、电子元件超 2h 起 1.8%/h；货损风险指数环境满格对应 <b>30%</b> 货值</li>
-      <li>企业画像与智能体模板配置</li>
-    </ul></div>
-    <div class="c sup"><ul>
-      <li>中越双语文案底稿（越南语为人工撰写，<b>标注待母语者校验</b>）</li>
-      <li>TTS 归一化后播报；公众模式承载百姓预警</li>
-      <li>公网护栏：写操作按 IP 限流（严格 20/min、普通 180/min，超限 429）</li>
-    </ul></div>
-    <div class="c sup"><ul>
-      <li>决策日志 <b>DecisionLogService</b>：FUSE / UNFUSE / WEATHER / SANDBOX / AGENT / TASK / DISPATCH / CONFIRM / ESCALATE / CONFIG 逐条留痕，可回溯"当时雨量、阈值、走的哪条通道"</li>
-      <li>行程进度与在途状态供 ETA 修正与"已越过装货港不再推荐坐船"闸门</li>
-    </ul></div>
-  </div>
-
-  <!-- 分级叫应机制 -->
-  <div class="lv">
-    <div class="h" style="grid-column:1">分级叫应</div>
-    <div class="h">常规通知 NORMAL</div>
-    <div class="h y">黄色关注 YELLOW</div>
-    <div class="h o">橙色准备 ORANGE</div>
-    <div class="h r">红色立即行动 RED</div>
-
-    <div class="k">触发条件</div>
-    <div class="v">两断面预报降雨 / 各自熔断阈值 <b>r &lt; 0.5</b>，且公路水运均可行</div>
-    <div class="v"><b>r ≥ 0.5</b>（友谊关阈值随模板取 80/100/120mm，芒街 70mm）</div>
-    <div class="v"><b>r ≥ 0.8</b> 逼近熔断；<b>台风已激活但未达熔断级也至少给橙</b>（降雨可能仍是 0mm，只看雨会漏报）</div>
-    <div class="v"><b>任一断面熔断或运河禁航</b>：公路阻断、水运阻断、友谊关 fused、芒街 fused 任一成立</div>
-
-    <div class="k">触达通道</div>
-    <div class="v">App 推送</div>
-    <div class="v">App 推送</div>
-    <div class="v">App + 短信</div>
-    <div class="v">App + <b>语音外呼</b>（越方司机标注"（越语）"）</div>
-
-    <div class="k">确认方式</div>
-    <div class="v">点击确认</div>
-    <div class="v">点击确认</div>
-    <div class="v">回复确认</div>
-    <div class="v">语音确认</div>
-
-    <div class="k">未确认升级</div>
-    <div class="v">—</div>
-    <div class="v">App 二次提醒</div>
-    <div class="v">短信 + App 二次提醒</div>
-    <div class="v"><b>自动上报调度端</b>人工介入</div>
-  </div>
-
-  <!-- 真实界面证据 -->
-  <div class="evs">
-    <div class="ev"><div class="pic"><img src="_ui/big-04-决策沙盘口岸.jpg" alt="决策沙盘"></div>
-      <div class="t"><b>阶段 1｜风险感知</b><p>决策沙盘断面：友谊关 120mm 已熔断（需降至 75mm 才恢复）、边坡含水量 78%·风险高；芒街 0mm 通行正常。完整图见《11-界面原型图》</p></div></div>
-    <div class="ev"><div class="pic"><img src="_ui/big-06-AI三智能体.jpg" alt="AI 决策分析"></div>
-      <div class="t"><b>阶段 2｜方案生成</b><p>三智能体接力 + 逐口岸决策解释 + 阈值说明 + 候选路线卡（推荐/备选，含时长·里程·灾害概率）。数值全部来自确定性引擎</p></div></div>
-    <div class="ev"><div class="pic"><img src="_ui/big-03-公司派单.jpg" alt="公司派单"></div>
-      <div class="t"><b>阶段 3｜人工决策</b><p>公司派单卡：车牌/司机/货物/重量/起终点 →「AI 气象分析并规划路线」→ TASK-3 与已下发路线、灾害概率一并回显，决策权在人</p></div></div>
-    <div class="ev bot"><div class="pic"><img src="_ui/drv-06-订单详情.jpg" alt="司机端订单"></div>
-      <div class="t"><b>阶段 4·5｜触达与闭环</b><p>司机端订单信息：已接单 · TASK-3、调度下发路线、路线摘要 崇左→凭祥→友谊关→同登 7.03h·376.39km、AI 灾害概率 15% 与出车前分析</p></div></div>
-  </div>
-
-  <div class="foot">
-    <b>读图要点：</b>
-    ① 服务主线是"<b>突发气象 → 熔断 → 换线/改水运/等待 → 叫应 → 回执</b>"，五阶段每一段都有<b>可见证据 + 内部动作 + 数据支撑</b>三层对应；
-    ② 粉线之上用户只看到<b>结果与来源标注</b>（数据来自哪个源、是否缓存、走哪条推理通道），算法过程留在绿线之下；
-    ③ <b>决策权归属人</b>：系统只给候选与解释，派单、切方案、复驶由调度员点确认；
-    ④ <b>叫应必须闭环</b>：未确认自动升级渠道，红色级超时自动上报调度端。
-    配套：<b>图 1/2</b> 系统架构（《08》《09》）、<b>图 4</b> 界面原型（《11》）、<b>图 5</b> 业务流程（《12》）、<b>图 6</b> 数据使用说明（《13》）。
-  </div>
-
+  <table>
+    <thead>
+      <tr><th>泳道 ＼ 阶段</th><th>① 风险感知</th><th>② 方案比选</th><th>③ 派单确认</th><th>④ 途中执行</th><th>⑤ 异常闭环</th></tr>
+    </thead>
+    <tbody>
+      <tr class="user">
+        <th>用户活动</th>
+        <td>调度员查看<br><b>地图风险热力</b></td>
+        <td>对比三条路线<br><b>ETA·风险·成本</b></td>
+        <td>一键派单</td>
+        <td>司机接单导航<br><b>收听预警播报</b></td>
+        <td>司机回执改道<br><b>大屏同步可见</b></td>
+      </tr>
+      <tr class="front line">
+        <th>前台触点<span class="tag">可见线</span></th>
+        <td>大屏风险断面卡</td>
+        <td>AI 推荐方案卡片<br>决策沙盘推演</td>
+        <td>司机端任务卡<br>接单 / 拒单按钮</td>
+        <td>预警条 + 语音<br>一键换线按钮</td>
+        <td>异常反馈页<br>双语叫应回执</td>
+      </tr>
+      <tr class="line">
+        <th>后台过程<span class="tag">互动线</span></th>
+        <td>气象轮询<br>逐边风险评分</td>
+        <td>多路线生成<br>ETA 与货损推演</td>
+        <td>任务下发<br>SSE 实时推送</td>
+        <td>在途风险重算<br>绕行段规划</td>
+        <td>状态回流<br>决策日志留痕</td>
+      </tr>
+      <tr class="line">
+        <th>支持系统<span class="tag">内部交互线</span></th>
+        <td class="dim">CRA40 官方气象接口</td>
+        <td class="dim">规则引擎 + 行业知识库</td>
+        <td class="dim">公网护栏 · IP 限流</td>
+        <td class="dim">天地图四级降级链</td>
+        <td class="dim">离线缓存兜底</td>
+      </tr>
+    </tbody>
+  </table>
 </div>
 </body>
 </html>

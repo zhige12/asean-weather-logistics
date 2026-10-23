@@ -72,6 +72,16 @@ tools/_*
 !tools/_geo_e2e.mjs
 !tools/_wx_e2e.mjs
 !tools/_task_sync_e2e.mjs
+# 以下五个在 DEV_LOG / 交付文档里被点名为可复现入口，必须随仓库交出去
+!tools/_pkg_sync.ps1
+!tools/_pkg_rezip.ps1
+!tools/_pkg_unzip_verify.ps1
+!tools/_setup_live.ps1
+!tools/_voice_preempt_probe.mjs
 
 # ---------- 运行时缓存 ----------
 /decision-cache/
+
+# ---------- 生成物：静态路网直出（63MB / 11MB，只上服务器 nginx，不入库）----------
+tools/static/network.json
+tools/static/network.json.gz

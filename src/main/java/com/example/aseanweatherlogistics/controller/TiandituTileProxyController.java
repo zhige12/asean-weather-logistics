@@ -22,6 +22,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.example.aseanweatherlogistics.util.SecretCodec;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
@@ -153,6 +154,9 @@ public class TiandituTileProxyController {
                     }
                 });
         List<String> merged = new ArrayList<>();
+        // 外发包里密钥池整字段包一份 ENC()，先解密再拆池（明文值直通）
+        configuredTk = SecretCodec.resolve(configuredTk);
+        configuredKeys = SecretCodec.resolve(configuredKeys);
         if (configuredTk != null && !configuredTk.isBlank()) merged.add(configuredTk.trim());
         if (configuredKeys != null && !configuredKeys.isBlank()) {
             Arrays.stream(configuredKeys.split(",")).map(String::trim)

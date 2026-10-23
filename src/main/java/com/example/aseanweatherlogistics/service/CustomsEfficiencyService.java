@@ -69,6 +69,21 @@ public class CustomsEfficiencyService {
         adjustments.clear();
     }
 
+    /**
+     * 影响通关时长（进而影响边权与算路结果）的全部可变状态签名：
+     * 生效时段 + 货类 + 人工调整。供 RouteService 的候选路线缓存做失效判定——
+     * 签名一致时同一 O/D 的候选结果必然逐字段相同，可以直接复用。
+     */
+    public String stateSignature() {
+        StringBuilder sb = new StringBuilder(64);
+        sb.append(activePeriod).append('|').append(activeCargoType).append('|');
+        adjustments.keySet().stream().sorted().forEach(portId -> {
+            Adjustment a = adjustments.get(portId);
+            sb.append(portId).append('=').append(a.hours()).append(';');
+        });
+        return sb.toString();
+    }
+
     public void setActivePeriod(String period) {
         this.activePeriod = period == null ? "normal" : period;
     }

@@ -52,6 +52,14 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+// 资源目录 src/main/resources/data 里会遗留数据处理脚本生成的 *.bak 备份（如路网
+// vietnam-road-network.json.bak / .pre-corridor.bak，各约 36MB）。它们不参与运行、
+// 却会被 bootJar 打进包，使 jar 体积翻倍、启动读盘与内存占用随之上涨，小规格服务器上
+// 会明显拖慢。打包时排除一切 .bak，从根上避免这类死数据进包。
+tasks.named('processResources') {
+    exclude '**/*.bak'
+}
+
 // 本机 32GB 内存 + 低延迟交互：给足堆并用 ZGC，避免 GC 停顿影响演示。
 // 天地图瓦片内存缓存已放大到 10 万条（最坏约 3GB），-Xmx 需容纳「缓存 + 应用对象 + ZGC 开销」，故给到 6g。
 tasks.named('bootRun') {

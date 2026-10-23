@@ -2,207 +2,49 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>界面原型图 · 调度大屏与司机端（实机截图 + 组件标注）</title>
+<title>界面原型图</title>
 <style>
-  /* 打印/截图向：白底、1560 定宽，交给 tools/_arch_shot.ps1 光栅化。图片全部来自真实运行界面。 */
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { background: #fff; }
-  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: #17222e; }
-  #fig { width: 1560px; padding: 20px 26px 16px; }
+  body { background: #fff; font-family: "Microsoft YaHei", sans-serif; color: #1c2b3a; }
+  #fig { width: 1200px; padding: 34px 40px 30px; }
+  h1 { font-size: 26px; color: #17457c; text-align: center; }
+  .sub { font-size: 14px; color: #6b7a89; text-align: center; margin: 8px 0 24px; }
 
-  .cap { border-bottom: 2px solid #17457c; padding-bottom: 9px; margin-bottom: 11px;
-         display: flex; align-items: flex-end; justify-content: space-between; }
-  .cap h1 { font-size: 24px; color: #17457c; letter-spacing: .4px; }
-  .cap .sub { font-size: 12.6px; color: #4a5b6b; margin-top: 5px; line-height: 1.5; max-width: 1180px; }
-  .cap .no { font-size: 13px; color: #17457c; border: 1px solid #9db6cf; border-radius: 3px;
-             padding: 3px 9px; white-space: nowrap; }
-
-  h2.sec { font-size: 16px; color: #17457c; margin: 14px 0 7px; padding-left: 8px;
-           border-left: 4px solid #17457c; }
-  h2.sec span { font-size: 11.6px; color: #55687a; font-weight: 400; margin-left: 8px; }
-
-  /* 首屏总览 + 编号标注 */
-  .shot { position: relative; border: 1px solid #c6d2dd; border-radius: 4px; overflow: hidden; }
-  .shot img { width: 100%; display: block; }
-  .mk { position: absolute; width: 23px; height: 23px; border-radius: 50%; background: #d6336c; color: #fff;
-        font-size: 12.5px; font-weight: 700; line-height: 23px; text-align: center; transform: translate(-50%, -50%);
-        box-shadow: 0 0 0 2px #fff, 0 1px 5px rgba(0, 0, 0, .45); }
-  .mk.g { background: #128f8a; }
-  .mk.o { background: #b35215; }
-
-  .keys { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 12px; margin-top: 7px; }
-  .keys .k { display: flex; gap: 7px; font-size: 11.4px; color: #4a5b6b; line-height: 1.5; }
-  .keys .k i { flex: 0 0 19px; height: 19px; border-radius: 50%; background: #d6336c; color: #fff;
-               font-style: normal; font-size: 11.5px; font-weight: 700; line-height: 19px; text-align: center; }
-  .keys .k i.g { background: #128f8a; } .keys .k i.o { background: #b35215; }
-  .keys .k b { color: #17222e; }
-  .keys .k code { font-family: Consolas, monospace; font-size: 10.4px; color: #17457c; }
-
-  /* 卡片图墙：列宽 = 截图原生宽（372 css px @2x），等高截取卡片顶部，完整图见 _ui/ */
-  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; }
-  .cards figure { border: 1px solid #d2dce5; border-radius: 4px; overflow: hidden; background: #fff;
-                  align-self: start; }
-  .cards img { width: 100%; height: 296px; object-fit: cover; object-position: top left; display: block; }
-  .cards figcaption { padding: 5px 7px 7px; border-top: 1px solid #e0e8ef; }
-  .cards figcaption b { font-size: 12px; color: #17457c; display: block; }
-  .cards figcaption .cmp { font-family: Consolas, monospace; font-size: 9.8px; color: #128f8a; margin-top: 2px; display: block; }
-  .cards figcaption p { font-size: 10.4px; color: #55687a; line-height: 1.45; margin-top: 3px; }
-  .cards figcaption code { font-family: Consolas, monospace; font-size: 9.6px; color: #17457c; }
-
-  .phones { display: grid; grid-template-columns: repeat(6, 1fr); gap: 9px; }
-  .phones figure { border: 1px solid #d2dce5; border-radius: 8px; overflow: hidden; background: #fff; }
-  .phones img { width: 100%; height: 404px; object-fit: cover; object-position: top center; display: block; }
-  /* 订单弹层与任务/预警/知识库底栏都浮在页面下半部，等高截取时要取底部 */
-  .phones figure.bot img { object-position: center bottom; }
-  .phones figcaption { padding: 5px 7px 7px; border-top: 1px solid #e0e8ef; }
-  .phones figcaption b { font-size: 11.8px; color: #17457c; display: block; }
-  .phones figcaption p { font-size: 10.2px; color: #55687a; line-height: 1.45; margin-top: 3px; }
-
-  /* 组件—接口对照表 */
-  table.map { width: 100%; border-collapse: collapse; margin-top: 6px; }
-  table.map th { background: #17457c; color: #fff; font-size: 11.8px; padding: 5px 8px; text-align: left; font-weight: 600; }
-  table.map td { border: 1px solid #d2dce5; font-size: 11px; color: #3c4c5c; padding: 5px 8px; line-height: 1.5; vertical-align: top; }
-  table.map tr:nth-child(even) td { background: #f7fafc; }
-  table.map b { color: #17222e; }
-  table.map code { font-family: Consolas, monospace; font-size: 10.2px; color: #17457c; background: #eef3f8;
-                   padding: 0 3px; border-radius: 2px; }
-
-  .foot { margin-top: 11px; border-top: 1px solid #c6d2dd; padding-top: 7px; font-size: 11px;
-          color: #55687a; line-height: 1.55; }
-  .foot b { color: #17222e; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 22px; }
+  figure { border: 1px solid #c9d6e2; border-radius: 8px; overflow: hidden; background: #fff; }
+  figure img { width: 100%; height: 330px; object-fit: cover; object-position: top left; display: block; }
+  figure.phone img { height: 330px; object-fit: cover; object-position: top center;
+                     width: auto; margin: 0 auto; display: block; background: #f0f4f8; }
+  figcaption { padding: 10px 14px; border-top: 1px solid #e0e8ef; font-size: 13.5px; color: #33475b; }
+  figcaption b { color: #17457c; font-size: 15px; margin-right: 8px; }
+  .note { margin-top: 18px; font-size: 13px; color: #6b7a89; text-align: center; }
 </style>
 </head>
 <body spellcheck="false">
 <div id="fig">
+  <h1>界面原型图（真实系统截图）</h1>
+  <div class="sub">调度大屏与司机端实时联动 · 以下界面均可在在线 Demo 中实际操作</div>
 
-  <div class="cap">
-    <div>
-      <h1>界面原型图 · PC 调度大屏 + 移动端司机 App（实机截图，非设计稿）</h1>
-      <div class="sub">
-        全部截图由脚本驱动无头浏览器直连<b>后端托管的构建产物</b>（<code>http://127.0.0.1:8080/</code> 与 <code>/driver.html</code>）取得，
-        截图前按真实流程点过「确认选择并规划 → 拉取实时气象 → AI 气象分析并规划路线」，因此卡里显示的是<b>运行中的真数据与真文案</b>。
-        复现：<code>node tools/_ui_shots.mjs</code> → <code>node tools/_ui_pack.mjs</code>（20 张原图入 <code>交付材料/_ui/</code>）。
-        下方图墙与手机墙为<b>等高截取</b>（卡片取顶部、司机端取顶部或弹层所在底部），完整不裁剪图一律在 <code>_ui/</code> 目录。
-      </div>
-    </div>
-    <div class="no">图 4　界面原型与组件标注</div>
+  <div class="grid">
+    <figure>
+      <img src="_ui/big-01-总览.jpg" alt="调度大屏总览">
+      <figcaption><b>调度大屏 · 总览</b>地图风险着色、沿线气象气泡与航线实况一屏集中呈现</figcaption>
+    </figure>
+    <figure>
+      <img src="_ui/big-07-AI方案对比.jpg" alt="AI 方案对比">
+      <figcaption><b>调度大屏 · 方案比选</b>AI 给出多路线的 ETA、风险与成本对比，确认后一键派单</figcaption>
+    </figure>
+    <figure class="phone">
+      <img src="_ui/drv-02-任务.jpg" alt="司机端任务">
+      <figcaption><b>司机端 · 接单与导航</b>任务实时送达，接单后进入导航并按在途进度修正到达时间</figcaption>
+    </figure>
+    <figure class="phone">
+      <img src="_ui/drv-03-预警.jpg" alt="司机端预警">
+      <figcaption><b>司机端 · 途中预警</b>前方风险升级时语音播报预警条，提供一键换线与停驶待命</figcaption>
+    </figure>
   </div>
 
-  <h2 class="sec">一、调度大屏首屏<span>1600×1000 视口 · 顶栏 + 左栏卡片流 + 右侧地图（占屏约 3/4）</span></h2>
-  <div class="shot">
-    <img src="_ui/big-01-总览.jpg" alt="调度大屏首屏">
-    <span class="mk" style="left:1.4%;top:2.4%">1</span>
-    <span class="mk" style="left:73.2%;top:1.6%">2</span>
-    <span class="mk o" style="left:87.4%;top:1.6%">3</span>
-    <span class="mk g" style="left:12.5%;top:11%">4</span>
-    <span class="mk g" style="left:12.5%;top:29%">5</span>
-    <span class="mk g" style="left:12.5%;top:93%">6</span>
-    <span class="mk" style="left:62%;top:24%">7</span>
-    <span class="mk o" style="left:90.6%;top:8.5%">8</span>
-    <span class="mk o" style="left:97.1%;top:13.7%">9</span>
-    <span class="mk o" style="left:26.3%;top:9.5%">10</span>
-  </div>
-  <div class="keys">
-    <div class="k"><i>1</i><span><b>平台标题栏</b>：全名"面向东盟跨境物流的突发气象预警与多路线协同调度平台 · 调度大屏"，即服务定位</span></div>
-    <div class="k"><i>2</i><span><b>性能档与司机端入口</b>：「轻界面（自动）」按机器自动降档保帧；「司机端↗」新窗口打开 <code>driver.html</code>，两端同屏联动演示</span></div>
-    <div class="k"><i o>3</i><span><b>OSM 坐标算路状态</b>：「OSM 状态 / OSM 未加载」标出 GraphHopper 加载器开关，公网演示默认关闭（护栏直接封死该入口）</span></div>
-    <div class="k"><i g>4</i><span><b>左栏卡片流</b>（<code>App.vue</code> 单列滚动，实测内容高 6000~9500 px）：路径规划 → 派单 → 沙盘 → AI 分析 → 触达 → 时间线 → 气象 → 路线状态 → 简报/碳排/预警/知识库 → 配置器 → 日志 → 当前风险 → 原始返回</span></div>
-    <div class="k"><i g>5</i><span><b>公司派单卡</b>（<code>TaskDispatchPanel.vue</code>）：车牌/司机/货物/重量/起终点 +「AI 气象分析并规划路线」，派单状态与 TASK 编号回显</span></div>
-    <div class="k"><i g>6</i><span><b>卡片标题即结论</b>：标题后直接挂状态徽标（已接单 / 存在熔断 / 派单前·常态分析 / 模拟降级），不点开卡片也能读出系统当前判定</span></div>
-    <div class="k"><i>7</i><span><b>地图主区</b>（<code>MapView.vue</code>，Leaflet 1.9.4 + Canvas 渲染保护）：跨境路网、路线、风险边、口岸节点、灾害点、坐船走廊叠加</span></div>
-    <div class="k"><i o>8</i><span><b>图例「跨境路网」</b>：路网风险边 / 安全路段（白箭头=行进方向）/ 风险路段 / 备选路线（点击切换主线）/ 降级兜底（硬熔断降级）/ 基准原路线（红虚线=已避开的风险段）/ 灾害点 / 口岸节点 / 坐船走廊（运河·海运·越方公路）</span></div>
-    <div class="k"><i o>9</i><span><b>底图 1~4 切换</b>：天地图影像 → 天地图矢量 → OSM → 包内离线瓦片，四级降级链，断网仍有底图</span></div>
-    <div class="k"><i o>10</i><span><b>缩放控件</b>：Leaflet 原生 +/-；地图选点模式下点击地图即取坐标并吸附最近路网节点（5 km 外判为覆盖范围外）</span></div>
-  </div>
-
-  <h2 class="sec">二、左栏功能卡逐张拆解<span>调度员的操作路径，自上而下即服务流程顺序；图取卡片顶部 296 px</span></h2>
-  <div class="cards">
-    <figure><img src="_ui/big-02-路径规划.jpg" alt="跨境路径规划">
-      <figcaption><b>① 跨境路径规划</b><span class="cmp">App.vue + PlaceInput.vue</span>
-        <p>起终点输入支持<b>地名联想</b>（本地地名库 → 天地图 POI → Nominatim 兜底）与<b>地图选点</b>；「确认选择并规划 / 清空」两键完成一次算路。</p></figcaption></figure>
-    <figure><img src="_ui/big-03-公司派单.jpg" alt="公司派单">
-      <figcaption><b>② 公司派单</b><span class="cmp">TaskDispatchPanel.vue → /api/task/*</span>
-        <p>卡内自带<b>两步派单说明</b>；派单后回显 TASK-3、货物 18t 冷鲜 2~6°C、时限、已下发路线与灾害概率 15%，并提示「司机已接单 · 越方接力司机 阿雄」。</p></figcaption></figure>
-    <figure><img src="_ui/big-04-决策沙盘口岸.jpg" alt="决策沙盘·口岸断面">
-      <figcaption><b>③ 决策沙盘（公路断面）</b><span class="cmp">DecisionSandbox.vue → /api/sandbox/*</span>
-        <p>友谊关 <b>120mm 已熔断</b>（需降至 75mm 恢复）/ 芒街 <b>0mm 通行正常</b>（升至 70mm 熔断）；降雨·气压·风速·温度·湿度·云量·能见度 7 滑块，<b>判定规则与真实数据完全相同</b>。</p></figcaption></figure>
-    <figure><img src="_ui/big-05-决策沙盘水运.jpg" alt="决策沙盘·水运与货损">
-      <figcaption><b>③ 决策沙盘（水运与货损）</b><span class="cmp">DecisionSandbox.vue + TributaryPanel.vue</span>
-        <p>平陆运河<b>已禁航</b>状态、各支流独立风险输出、货物安全指数（冷链火龙果 货损风险 0·低 / 货物在途安全）；<b>手动剧本</b>与<b>真实降雨</b>两档可切并标明来源。</p></figcaption></figure>
-    <figure><img src="_ui/big-06-AI三智能体.jpg" alt="AI 三智能体">
-      <figcaption><b>④ AI 决策分析（三智能体）</b><span class="cmp">AgentPanel.vue → /api/agents/analysis</span>
-        <p>风险研判 → 方案生成 → 触达 三灯与各自耗时；<b>逐口岸决策解释</b>＋阈值说明（恢复线 75mm、触发线 70mm）＋模型研判；「智能体推理中… / 缓存模式」标出当前通道。</p></figcaption></figure>
-    <figure><img src="_ui/big-07-AI方案对比.jpg" alt="方案候选与派单">
-      <figcaption><b>④ 候选方案与派单</b><span class="cmp">AgentPanel.vue → /api/task/dispatch</span>
-        <p>「开始导航派单 · 从以下路线选一条派给司机」：候选路线逐条给时长 / 里程 / 灾害概率（推荐路线 7.03h·376.39km·15%，图中为紧随其后的备选 B~E）；上方紫色条另给<b>赶时效走公路 / 省成本走平陆运河联运 9 小时</b>的取舍建议。</p></figcaption></figure>
-    <figure><img src="_ui/big-08-分级叫应.jpg" alt="多角色触达分级叫应">
-      <figcaption><b>⑤ 多角色触达 · 分级叫应</b><span class="cmp">OutreachPanel.vue → /api/outreach/*</span>
-        <p>黄/橙/红<b>等级横幅</b>（通道 · 确认方式 · 升级策略）＋五类角色状态灯：已送达 / 已确认 / <b>外呼中</b>；未确认倒计时到点自动升级。</p></figcaption></figure>
-    <figure><img src="_ui/big-09-实时气象.jpg" alt="实时气象">
-      <figcaption><b>⑥ 实时气象（CRA40）</b><span class="cmp">App.vue → /api/weather/real·/source</span>
-        <p>数据源下拉「CRA40 / Open-Meteo / 离线模拟」＋「拉取实时气象」；标题徽标显示<b>实时 / 模拟降级</b>，所选源与实际服务源分开显示。</p></figcaption></figure>
-    <figure><img src="_ui/big-13-路线状态.jpg" alt="路线状态与ETA">
-      <figcaption><b>⑦ 路线状态 · ETA</b><span class="cmp">App.vue + ETAIndicator.vue</span>
-        <p>预计到达 6.5、基准路线 6.53h/330 节点、实时影响（无延误 / +2.11 小时）、<b>是否绕行：是（自动切换口岸）</b>——气象影响量化为两个可核对的数值。</p></figcaption></figure>
-    <figure><img src="_ui/big-14-简报小卡组.jpg" alt="简报小卡组">
-      <figcaption><b>⑧ 简报 / 碳排 / 双语预警 / 灾害预测 / 知识库</b><span class="cmp">BriefingPanel·CarbonCalc.vue + App.vue</span>
-        <p>一键生成任务简报；车型+燃料算碳排放；生成<b>中越双语预警</b>；AI 灾害预测并注入风险（可清除）；行业知识库 RAG 检索入口。</p></figcaption></figure>
-    <figure><img src="_ui/big-10-开放平台.jpg" alt="开放平台智能体配置器">
-      <figcaption><b>⑨ 开放平台 · 智能体配置器</b><span class="cmp">PlatformConfigurator.vue → /api/platform/*</span>
-        <p><b>千企千面</b>：三套模板（冷链火龙果·保守熔断 80mm·全角色触达 / 电子元件防潮·延误 2h 起算货损 / 大宗普货·激进放宽 120mm·仅调度员与司机）一键套用，下方参数与方案对比<b>实时联动</b>。</p></figcaption></figure>
-    <figure><img src="_ui/big-11-开放平台参数.jpg" alt="开放平台参数与成长路径">
-      <figcaption><b>⑨ 配置器参数区</b><span class="cmp">PlatformConfigurator.vue + GrowthPath.vue</span>
-        <p>风险容忍度、货物类型（货值/起算延误）、触达角色集与阈值滑块；尾段挂<b>众创三步走</b>成长路径，说明这套引擎怎么交给企业自己配。</p></figcaption></figure>
-    <figure><img src="_ui/big-12-日志与风险.jpg" alt="决策日志与当前风险">
-      <figcaption><b>⑩ 决策日志 · 当前风险</b><span class="cmp">DecisionLogTimeline.vue + RiskStrip.vue</span>
-        <p>逐条留痕 10 类（FUSE / UNFUSE / WEATHER / SANDBOX / AGENT / TASK / DISPATCH / CONFIRM / ESCALATE / CONFIG，实测 60 条）＋刷新键；当前风险等级条；<b>「原始返回」</b>可展开核对接口原文。</p></figcaption></figure>
-    <figure><img src="_ui/big-01-总览.jpg" alt="地图与图例">
-      <figcaption><b>⑪ 地图叠加层</b><span class="cmp">MapView.vue（Leaflet + Canvas guard）</span>
-        <p>路线绿段带<b>白箭头指示行进方向</b>，风险边橙、熔断红、基准原路线红虚线；口岸节点、灾害点、坐船走廊分色；点击备选路线可切主线。</p></figcaption></figure>
-    <figure><img src="_ui/drv-01-首页.jpg" alt="司机端首页">
-      <figcaption><b>⑫ 司机端首页</b><span class="cmp">DriverApp.vue → /api/task/current</span>
-        <p>顶部「物流任务模式 · 全线通畅 · 预览订单 · 已接单 · 退出」；搜索框「查找地点、规划路线」；五宫格 物流任务 / 风险预警 / AI 方案 / 知识库 / 我的车辆；底栏五 tab。</p></figcaption></figure>
-  </div>
-
-  <h2 class="sec">三、司机端 App（Capacitor 瘦客户端）<span>430×932 · 从派单叫应到回执的完整动线</span></h2>
-  <div class="phones">
-    <figure><img src="_ui/drv-01-首页.jpg" alt="司机端首页">
-      <figcaption><b>1 首页 · 导航态</b><p>地图 + 状态条；「物流任务模式」由调度端派单驱动，普通导航与任务导航一键切换。</p></figcaption></figure>
-    <figure class="bot"><img src="_ui/drv-06-订单详情.jpg" alt="订单信息弹层">
-      <figcaption><b>2 订单信息（叫应弹层）</b><p>已接单 · TASK-3、冷链火龙果 18t 冷鲜 2~6°C、起运南宁→目的河内、承运司机/车牌、送达时限、<b>调度下发路线</b>与路线摘要、AI 灾害概率、出车前 AI 气象分析。</p></figcaption></figure>
-    <figure class="bot"><img src="_ui/drv-02-任务.jpg" alt="任务页">
-      <figcaption><b>3 任务页</b><p>「任务变更通知」承接 SSE 下发的换线指令；「AI 方案建议 · 查看方案」直达调度端三方案对比——司机看得到为什么改，但不越权选方案。</p></figcaption></figure>
-    <figure class="bot"><img src="_ui/drv-03-预警.jpg" alt="预警页">
-      <figcaption><b>4 预警页</b><p>AI 双语预警「生成预警」＋灾害类型 chips（暴雨/台风/大雾/高温/泥石流/冷链）；<b>当前风险清单</b>计数与明细。</p></figcaption></figure>
-    <figure class="bot"><img src="_ui/drv-04-知识库.jpg" alt="知识库页">
-      <figcaption><b>5 知识库页</b><p>沿途作业规则与避险知识，供司机随时查阅；与大屏共用同一套 RAG 检索接口。</p></figcaption></figure>
-    <figure><img src="_ui/drv-05-我的.jpg" alt="我的车辆页">
-      <figcaption><b>6 我的 / 车辆</b><p>车辆与驾驶员信息（车型、载重、冷链机组）＋「保存信息」，参与货损与耗时估算的输入项。</p></figcaption></figure>
-  </div>
-
-  <h2 class="sec">四、界面 ↔ 组件 ↔ 接口对照<span>可按此表逐条落到代码与请求上核验</span></h2>
-  <table class="map">
-    <tr><th style="width:170px">界面块</th><th style="width:250px">前端组件</th><th style="width:330px">后端接口</th><th>可见证据 / 说明</th></tr>
-    <tr><td>跨境路径规划</td><td><code>App.vue</code> + <code>PlaceInput.vue</code></td><td><code>/api/geocode/suggest</code>·<code>/snap</code>、<code>/api/routes/plan*</code></td><td>起终点联想三级降级；坐标吸附 5 km 内取最近路网节点，超出即提示不在覆盖范围</td></td></tr>
-    <tr><td>公司派单 / 接单闭环</td><td><code>TaskDispatchPanel.vue</code>、<code>DriverApp.vue</code></td><td><code>/api/task/dispatch</code>·<code>/current</code>·<code>/accept</code>·<code>/reject</code>·<code>/reset</code></td><td>派单经 SSE <code>task-assigned</code> 到司机端；接单/拒单连同原因回流大屏</td></tr>
-    <tr><td>决策沙盘（公路/水运/货损）</td><td><code>DecisionSandbox.vue</code> + <code>TributaryPanel.vue</code></td><td><code>/api/sandbox/*</code>、<code>/api/canal/*</code>、<code>/api/weather/real</code></td><td>真实降雨（GOWFS 预报）与模拟参数（可调）两档并标明来源；改档即全链路重估</td></tr>
-    <tr><td>AI 决策分析 · 三智能体</td><td><code>AgentPanel.vue</code></td><td><code>/api/agents/analysis</code>、<code>/api/agent/events</code>(SSE)</td><td>通道标签只有「本地 / 在线 / 缓存 / 模板」四种原文；数值一律由确定性引擎产出</td></tr>
-    <tr><td>多角色触达 · 分级叫应</td><td><code>OutreachPanel.vue</code>、<code>DriverApp.vue</code></td><td><code>/api/outreach/dispatch</code>·<code>/confirm</code>·<code>/status</code>·<code>/message</code>·<code>/log</code></td><td>五类角色、黄橙红三级、未确认自动升级外呼，红色超时上报调度端</td></tr>
-    <tr><td>实时气象与来源核验</td><td><code>App.vue</code>（气象卡 + 源下拉）</td><td><code>/api/weather/source*</code>、<code>/real</code>·<code>/real/refresh</code>、<code>/api/weather/rate-stats</code>、<code>/api/v1/*</code></td><td><code>selectedSource</code> 与 <code>servedSource</code>、<code>servedFresh</code> 分开回显；节流与熔断计数可查</td></tr>
-    <tr><td>路线状态 / 当前风险 / 日志</td><td><code>ETAIndicator.vue</code>、<code>RiskStrip.vue</code>、<code>DecisionLogTimeline.vue</code></td><td><code>/api/routes/status</code>、<code>/api/outreach/log</code>、<code>/api/trip/progress</code></td><td>基准 vs 实时两值对比；每次结论可回溯到当时的雨量、阈值与推理通道</td></tr>
-    <tr><td>简报 / 碳排 / 双语预警 / 知识库</td><td><code>BriefingPanel.vue</code>、<code>CarbonCalc.vue</code>、<code>App.vue</code></td><td><code>/api/briefing/generate</code>、<code>/api/ai/warning-bilingual</code>·<code>/predict-hazards</code>、<code>/api/knowledge/search</code></td><td>中越双语预警与 RAG 检索直接可在界面复现</td></tr>
-    <tr><td>开放平台 · 智能体配置器</td><td><code>PlatformConfigurator.vue</code> + <code>GrowthPath.vue</code></td><td><code>/api/platform/config</code>(GET/PUT)、<code>/api/platform/template</code></td><td>企业画像（阈值档 / 货物 / 触达角色）改档后沙盘、方案、叫应同步重算</td></tr>
-    <tr><td>地图与底图</td><td><code>MapView.vue</code>（Leaflet 1.9.4）+ <code>utils/tileSources.js</code></td><td><code>/api/tianditu/{layer}/{z}/{x}/{y}.png</code>、<code>/api/route/network</code></td><td>密钥池轮转 + per-key 熔断 + 内存/磁盘两级缓存；底图四级降级链，断网可演示</td></tr>
-  </table>
-
-  <div class="foot">
-    <b>界面设计上的三条取舍：</b>
-    ① <b>结论写在标题上</b>——每张卡的标题后缀就是系统当次判断（已接单 / 存在熔断 / 模拟降级 / 千企千面），扫一遍左栏卡片标题即可读完整个服务；
-    ② <b>来源与通道不藏</b>——数据来自哪个气象源、是缓存还是本次取的、AI 走本地还是在线，全部以徽标或标签原文呈现，降级状态直接标注；
-    ③ <b>司机端只给指令不给选项</b>——换线、改水运、等待是调度端权限，司机端拿到的是执行指令 + 权益保障 + 确认入口，避免把风险决策下放给最没有信息的人。
-    配套：<b>图 3</b> 服务蓝图（《10》）看这些界面如何串成服务；<b>图 5</b> 业务流程（《12》）看界面背后的判定链。
-  </div>
-
+  <div class="note">大屏 https://8.138.229.14:8443/ 　·　司机端 https://8.138.229.14:8443/driver.html（手机可安装为应用）</div>
 </div>
 </body>
 </html>

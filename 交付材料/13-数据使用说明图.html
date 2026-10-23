@@ -2,214 +2,73 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>数据使用说明图 · 数据资产、流向、溯源与密钥边界</title>
+<title>数据使用说明图</title>
 <style>
-  /* 打印/截图向：白底、1560 定宽，交给 tools/_arch_shot.ps1 光栅化为同名 PNG。 */
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { background: #fff; }
-  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: #17222e; }
-  #fig { width: 1560px; padding: 20px 26px 16px; }
+  body { background: #fff; font-family: "Microsoft YaHei", sans-serif; color: #1c2b3a; }
+  #fig { width: 1200px; padding: 34px 40px 30px; }
+  h1 { font-size: 26px; color: #17457c; text-align: center; }
+  .sub { font-size: 14px; color: #6b7a89; text-align: center; margin: 8px 0 26px; }
 
-  .cap { border-bottom: 2px solid #17457c; padding-bottom: 9px; margin-bottom: 11px;
-         display: flex; align-items: flex-end; justify-content: space-between; }
-  .cap h1 { font-size: 24px; color: #17457c; letter-spacing: .4px; }
-  .cap .sub { font-size: 12.6px; color: #4a5b6b; margin-top: 5px; line-height: 1.5; max-width: 1180px; }
-  .cap .no { font-size: 13px; color: #17457c; border: 1px solid #9db6cf; border-radius: 3px;
-             padding: 3px 9px; white-space: nowrap; }
-
-  h2.sec { font-size: 16px; color: #17457c; margin: 14px 0 7px; padding-left: 8px;
-           border-left: 4px solid #17457c; }
-  h2.sec span { font-size: 11.6px; color: #55687a; font-weight: 400; margin-left: 8px; }
-
-  code { font-family: Consolas, monospace; font-size: 10.2px; color: #17457c; background: #eef3f8;
-         padding: 0 3px; border-radius: 2px; }
-  b { color: #17222e; }
-
-  /* 数据流向链 */
-  .chain { display: grid; grid-template-columns: repeat(6, 1fr); gap: 22px; }
-  .chain .c { position: relative; border: 1px solid #c6d2dd; border-left: 3px solid #17457c; border-radius: 3px;
-              background: #fbfdff; padding: 6px 8px 7px; }
-  .chain .c:nth-child(-n+5)::after { content: "▶"; position: absolute; right: -17px; top: 42%; color: #17457c; font-size: 12px; }
-  .chain .c b { font-size: 11.8px; color: #17457c; display: block; }
-  .chain .c p { font-size: 10.4px; color: #4a5b6b; line-height: 1.45; margin-top: 3px; }
-  .chain .c.key { border-left-color: #c92a2a; background: #fff7f7; }
-  .chain .c.key b { color: #c92a2a; }
-  .back { margin-top: 7px; font-size: 11px; color: #b35215; text-align: right; }
-
-  /* 资产清单表 */
-  table.ds { width: 100%; border-collapse: collapse; }
-  table.ds th { background: #17457c; color: #fff; font-size: 11.6px; padding: 5px 7px; text-align: left; font-weight: 600; }
-  table.ds td { border: 1px solid #d2dce5; font-size: 10.6px; color: #3c4c5c; padding: 4px 7px; line-height: 1.45; vertical-align: top; }
-  table.ds tr:nth-child(even) td { background: #f7fafc; }
-  table.ds td.nm { color: #17222e; font-weight: 700; }
-  .grp td { background: #eef3f8 !important; color: #17457c; font-size: 11.4px; font-weight: 700; letter-spacing: .3px; }
-  .ok { color: #2f9e44; font-weight: 700; }
-  .warn { color: #b35215; font-weight: 700; }
-  .bad { color: #c92a2a; font-weight: 700; }
-
-  /* 溯源四卡 + 密钥边界卡 */
-  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; }
-  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
-  .card { border: 1px solid #d2dce5; border-radius: 4px; background: #fbfdff; padding: 7px 9px 8px; }
-  .card h5 { font-size: 12.4px; color: #17457c; margin-bottom: 4px; }
-  .card h5 i { font-style: normal; display: inline-block; width: 18px; height: 18px; line-height: 18px; text-align: center;
-               border-radius: 50%; background: #128f8a; color: #fff; font-size: 11px; margin-right: 5px; }
-  .card ul { list-style: none; }
-  .card li { font-size: 10.6px; color: #4a5b6b; line-height: 1.5; padding-left: 9px; position: relative; }
-  .card li + li { margin-top: 3px; }
-  .card li::before { content: "·"; position: absolute; left: 1px; color: #9db6cf; font-weight: 700; }
-  .card.red { border-color: #f0a3a3; background: #fff7f7; }
-  .card.red h5 { color: #c92a2a; }
-  .card.red h5 i { background: #c92a2a; }
-
-  .foot { margin-top: 11px; border-top: 1px solid #c6d2dd; padding-top: 7px; font-size: 11px;
-          color: #55687a; line-height: 1.55; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 22px; }
+  .card { border: 1.5px solid #c9d6e2; border-radius: 8px; overflow: hidden; }
+  .card h3 { font-size: 16px; color: #fff; background: #17457c; padding: 9px 16px; }
+  .card.c2 h3 { background: #128f8a; } .card.c3 h3 { background: #2a6293; } .card.c4 h3 { background: #5b3f8c; }
+  .card ul { list-style: none; padding: 12px 16px; }
+  .card li { font-size: 13.5px; color: #33475b; line-height: 1.7; padding: 5px 0;
+             border-bottom: 1px dashed #e0e8ef; display: flex; gap: 10px; }
+  .card li:last-child { border-bottom: none; }
+  .card li b { flex: 0 0 96px; color: #17457c; }
+  .card li span { flex: 1; color: #55687a; }
+  .tag { display: inline-block; font-size: 11px; border-radius: 3px; padding: 0 6px; margin-left: 6px; vertical-align: 1px; }
+  .real { color: #1f6f45; border: 1px solid #86c79f; background: #f0f9f3; }
+  .sim  { color: #b35215; border: 1px solid #d9a173; background: #fdf4ec; }
+  .foot { margin-top: 20px; padding-top: 12px; border-top: 1px solid #d8e2ea; font-size: 13px;
+          color: #6b7a89; text-align: center; }
+  .foot b { color: #17457c; }
 </style>
 </head>
 <body spellcheck="false">
 <div id="fig">
+  <h1>数据使用说明图</h1>
+  <div class="sub">官方数据优先 · 模拟数据明示 · 凭证加密存放</div>
 
-  <div class="cap">
-    <div>
-      <h1>数据使用说明图 · 数据资产清单、流向、溯源核验与密钥边界</h1>
-      <div class="sub">
-        逐条交代：<b>数据从哪来、授权是什么、用在哪一步、敏感的东西出不出本机</b>。
-        每一行都对应 <code>application.properties</code>、<code>src/main/resources/data/</code> 或某个 <code>Service</code> 的真实配置与文件，
-        未落地的部分（如官方水运接口）明确标注为"预留链路"，不混进"已用数据"里。
-      </div>
+  <div class="grid">
+    <div class="card">
+      <h3>气象数据</h3>
+      <ul>
+        <li><b>主源</b><span>CRA40 官方接口（实况 + 3h 预报）<i class="tag real">真实</i></span></li>
+        <li><b>备源</b><span>Open-Meteo 公网实况，交叉比对<i class="tag real">真实</i></span></li>
+        <li><b>兜底</b><span>包内格点缓存，断网可演示<i class="tag sim">离线</i></span></li>
+      </ul>
     </div>
-    <div class="no">图 6　数据使用说明与密钥边界</div>
+    <div class="card c2">
+      <h3>地图数据</h3>
+      <ul>
+        <li><b>底图</b><span>天地图影像/矢量/注记四层瓦片<i class="tag real">真实</i></span></li>
+        <li><b>降级</b><span>天地图 → OSM → 包内离线瓦片四级链</span></li>
+        <li><b>编码</b><span>天地图地理编码 + 本地地名库优先</span></li>
+      </ul>
+    </div>
+    <div class="card c3">
+      <h3>业务数据</h3>
+      <ul>
+        <li><b>路网水网</b><span>公开航道资料自主清洗再生成<i class="tag real">真实</i></span></li>
+        <li><b>通关时效</b><span>公开口岸公报整理<i class="tag real">真实</i></span></li>
+        <li><b>运单车次</b><span>演示用模拟数据，界面明确标注<i class="tag sim">模拟</i></span></li>
+      </ul>
+    </div>
+    <div class="card c4">
+      <h3>凭证与合规</h3>
+      <ul>
+        <li><b>密钥</b><span>仅存服务端环境变量，不进仓库前端</span></li>
+        <li><b>代理</b><span>外部调用走后端同源代理 + 两级缓存</span></li>
+        <li><b>频度</b><span>节流闸门防暴力访问，回源次数可核验</span></li>
+      </ul>
+    </div>
   </div>
 
-  <h2 class="sec">一、数据流向<span>密钥只在后端一处，前端与 APK 构建产物零密钥</span></h2>
-  <div class="chain">
-    <div class="c"><b>① 上游数据源</b><p>赛事官方 CRA40 实况 / GOWFS 3h 预报接口、Open-Meteo 公网气象、OSM 开源路网与瓦片、天地图瓦片服务、公开法规与口岸公报</p></div>
-    <div class="c key"><b>② 后端唯一持密处</b><p>Token / 密钥池 / 大模型 Key 只从 <code>.env.local</code>（已 gitignore）与环境变量读入；节流、熔断、缓存、审计计数全在这一层</p></div>
-    <div class="c"><b>③ 引擎计算</b><p>逐边惩罚 → 硬熔断 → A* 重算 → 三方案六维指标；<b>所有对外数字在此产生</b>，与模型无关</p></div>
-    <div class="c"><b>④ AI 只写文字</b><p>本地 Ollama 优先（数据不出境）→ 在线 DeepSeek → 历史文案池 → 规则模板，命中通道随文案标注</p></div>
-    <div class="c"><b>⑤ 界面呈现</b><p>REST + 一条 SSE 流喂大屏与司机端；瓦片走同源 <code>/api/tianditu/…</code>，密钥不进浏览器包</p></div>
-    <div class="c"><b>⑥ 回流与留痕</b><p>接单/拒单/叫应回执回流后端 → <code>DecisionLogService</code> 逐条落时间线，「原始返回」可核对接口原文</p></div>
-  </div>
-  <div class="back">↺ ⑥ 的回执与在途进度（司机端约 30s 上报）重新进入 ③，形成"数据 → 决策 → 执行 → 新数据"的闭环</div>
-
-  <h2 class="sec">二、数据资产清单<span>14 项，按"来源 → 授权 → 用途 → 敏感性"逐条交代</span></h2>
-  <table class="ds">
-    <tr><th style="width:186px">数据集 / 文件</th><th style="width:300px">来源与获取方式</th><th style="width:228px">授权 / 署名</th><th style="width:340px">在系统中的作用</th><th>敏感性与落盘</th></tr>
-
-    <tr class="grp"><td colspan="5">A · 气象（驱动全部风险判定）</td></tr>
-    <tr><td class="nm">CRA40 官方实况<br><code>weather.real.*</code></td>
-      <td>赛事官方接口 <code>/api/v1/observations</code>，11 个要素（TMP/PRE/TMAX/TMIN/PRS/RH/TCC/LCC/VIS/WIN_U/WIN_V），单次最多取 3 个</td>
-      <td>赛事方发放 Token，仅限本项目演示调用；<b>Token 只允许后端持有</b></td>
-      <td>逐边实时判险（降水≥50mm/h→100、能见度&lt;100m→50、高温≥35°C→8 等）与"实时气象"卡数据</td>
-      <td><span class="ok">无个人信息</span>；仅内存缓存 10 min，<b>不落库、不二次分发原始格点</b></td></tr>
-    <tr><td class="nm">GOWFS 3h 预报<br><code>/api/v1/forecasts/3h</code></td>
-      <td>与实况共用 base-url/token，独立节流 30 min；<code>run_time</code> 仅 08:00 / 20:00，取时效 3+6 累加为未来 6h 累计降雨</td>
-      <td>同上（赛事授权）</td>
-      <td>决策沙盘「真实降雨」档与口岸断面全要素（风/温/湿/云/能见度）</td>
-      <td><span class="warn">量级说明</span>：真实 6h 累计多为个位数~十余 mm，远低于 80mm 熔断阈值 → <b>熔断演示由剧本值驱动，真实取数用于验证来源与链路</b></td></tr>
-    <tr><td class="nm">Open-Meteo 备源</td><td>公网免费接口，免 Token，按 20 点批量取</td><td>公开气象数据，需按 CC-BY 署名</td>
-      <td>官方接口不可用/未配 Token 时的真实备源；源下拉可手动切</td><td><span class="ok">无</span>；同一节流与熔断口径</td></tr>
-    <tr><td class="nm">离线模拟气象<br><code>SimulatedWeatherProvider</code></td>
-      <td>团队自造：按节点 ID 生成<b>确定性温和天气</b></td><td>自有</td>
-      <td>断网时保证卡片有数据，且不触发风险惩罚、不与灾害注入混淆</td>
-      <td><span class="ok">无</span>；界面标「模拟降级」</td></tr>
-
-    <tr class="grp"><td colspan="5">B · 地理与路网（算路唯一载体）</td></tr>
-    <tr><td class="nm">中越跨境路网<br><code>vietnam-road-network.json</code>（36 MB）</td>
-      <td>OpenStreetMap 开源数据，团队自主清洗 + 口岸虚拟边修复（<code>tools/convert_vietnam_pbf.py</code>、<code>build_cn_road_geom.py</code>），约 8.6 万节点 / 9.8 万边</td>
-      <td><b>ODbL</b>，界面署名 <code>© OpenStreetMap contributors</code></td>
-      <td>A* 算路、风险边着色、折返里程、口岸/走廊归属判定的唯一底图数据</td>
-      <td><span class="ok">无</span>；随 jar 打包，进程内只读</td></tr>
-    <tr><td class="nm">本地地名库<br><code>place-names.json</code></td>
-      <td>团队整理（南宁港六景作业区等港口/口岸/城市代表点）</td><td>自有</td>
-      <td>起终点联想第一级；沙盘断面代表点与地图标注<b>同源</b>，避免"图上一点、算路另一点"</td>
-      <td><span class="ok">无</span></td></tr>
-    <tr><td class="nm">天地图瓦片<br><code>img_w/cia_w/vec_w/cva_w</code></td>
-      <td>国家地理信息公共服务平台，后端同源代理回源，密钥池轮转 + per-key 熔断</td>
-      <td>天地图密钥授权 + 域名（Referer）授权，界面署名 <code>© 天地图</code></td>
-      <td>底图 1（影像+注记）与底图 2（矢量+注记）</td>
-      <td><span class="warn">密钥不外发</span>；回源落盘 <code>data/tile-cache</code>，离线演示包含约 <b>2.9 万张 / 247 MB</b> 缓存瓦片，仅作本机演示用途</td></tr>
-    <tr><td class="nm">EOX OSM 4326 离线瓦片<br>（底图 4）</td>
-      <td>第三方开源瓦片集，后端 <code>/tiles/**</code> 静态托管（z7~13 中越走廊）</td>
-      <td>OSM 生态开源瓦片，署名同 OSM</td>
-      <td>完全离线底图，断网仍有地图</td>
-      <td><span class="ok">无</span>；位于仓库之外的本机目录，不随 git 分发</td></tr>
-
-    <tr class="grp"><td colspan="5">C · 行业规则与业务样本（决策解释与量化）</td></tr>
-    <tr><td class="nm">平陆运河通航规则</td>
-      <td>《平陆运河通航安全管理规定》公开条文；观测值经「广西水运江河海一体化调度平台」接入<b>预留</b>（<code>waterway.source=mock/official</code>，15 min 轮询与水文站上报同频）</td>
-      <td>公开法规；官方平台<b>无自助 API 申请入口</b>，凭证须走合作协议</td>
-      <td>四条禁航红线（能见度&lt;1000m / 流速&gt;2.0m/s / 浪高&gt;2.0m / 7 级风）与支流顶托流速</td>
-      <td><span class="warn">当前为 mock 源</span>：手动推送验证同一链路；切 official 不改禁航判定与 <code>canal-block</code> 触达代码</td></tr>
-    <tr><td class="nm">通关时效<br><code>customs-efficiency.json</code></td>
-      <td>政府公开公报、口岸运行公告整理（友谊关 baseHours 2.5h，normal/peak/holiday 系数 1.0/1.4/1.8）</td>
-      <td>公开信息</td><td>方案耗时与成本测算、口岸拥堵评估</td><td><span class="ok">无</span></td></tr>
-    <tr><td class="nm">行业知识库<br><code>knowledge-base.json</code></td>
-      <td>公开法规 + 跨境物流规范 + 企业作业规则，团队整理</td><td>公开法规 / 自整理</td>
-      <td>AI 决策解释依据与 RAG 检索源（标题·关键词·正文<b>加权匹配，非向量检索</b>）</td><td><span class="ok">无</span></td></tr>
-    <tr><td class="nm">演示货运与人员数据</td>
-      <td>团队虚构剧本：阿明 / 越方接力司机阿雄 / 桂A·D12345 / 18 t 冷鲜火龙果 / 南宁→河内</td>
-      <td>自有虚构样本</td>
-      <td>派单 → 接单/拒单 → 分级叫应 → 回执闭环的演示主体</td>
-      <td><span class="ok">全部虚构，不含真实个人隐私与商业秘密</span>；任务态为内存态，进程重启即清空</td></tr>
-
-    <tr class="grp"><td colspan="5">D · 模型与缓存（模型只写文字，缓存只作兜底）</td></tr>
-    <tr><td class="nm">大模型通道</td>
-      <td>本地 Ollama <code>qwen2.5:14b</code>（优先）→ 在线 DeepSeek（<code>deepseek-chat</code>）→ 历史文案池 → 规则模板</td>
-      <td>模型与 API 各自的服务条款；Key 仅环境变量</td>
-      <td>只生成推荐语/研判文字，<b>不参与任何数值计算</b></td>
-      <td><span class="bad">在线通道会把路线、货值、口岸状态送出本机</span> → 界面必须标「在线 API · 非本地」；本地命中则数据不出硬件</td></tr>
-    <tr><td class="nm">预生成决策缓存<br><code>decision-cache/</code></td>
-      <td>演示前用脚本按 scenarioId 跑好三组场景存 JSON（2 秒出结果，防模型冷启动与断网）</td>
-      <td>自有（内容全部由本项目引擎生成）</td>
-      <td>演示加速兜底；<b>在途行程不读缓存</b>（缓存中的推荐不包含车辆当前位置）</td>
-      <td><span class="warn">不入库</span>（<code>.gitignore</code>），随交付包 <code>asean-demo/</code> 分发；旧缓存里无法核实的"本地大模型"字样一律降为「预生成文案（生成时未记录真实通道）」</td></tr>
-  </table>
-
-  <h2 class="sec">三、溯源与可核验机制<span>每条结论都能查到来源、频度与原文</span></h2>
-  <div class="grid4">
-    <div class="card"><h5><i>1</i>来源与新鲜度分开标</h5><ul>
-      <li>气象：界面所选源 <code>selectedSource</code> 与真正服务源 <code>servedSource</code> / <code>servedFresh</code>（是否本次取的）分开回显</li>
-      <li>沙盘降雨：<code>GOWFS 预报（真实）</code> 或 <code>模拟参数（可调）</code> 原文标注</li>
-      <li>AI：通道标签只有 本地 / 在线 / 缓存 / 模板 四种原文，三智能体取"最远程"的通道汇总标注</li></ul></div>
-    <div class="card"><h5><i>2</i>频度合规可查</h5><ul>
-      <li><code>/api/weather/rate-stats</code> 与 <code>/api/v1/rate-stats</code> 输出四个审计计数：真实回源 / 缓存命中 / 节流拦下 / 熔断打开</li>
-      <li>节流参数成文：实况 10 min 缓存、每源 60 s、跨源 5 s、连败 3 次静默 300 s；预报 30 min（静默 600 s）</li>
-      <li>401 Token 失效<b>立即熔断</b>，静默期内一律 429，严禁重试轰炸上游</li></ul></div>
-    <div class="card"><h5><i>3</i>结论可回溯</h5><ul>
-      <li><code>DecisionLogService</code> 逐条留痕 10 类（FUSE / UNFUSE / WEATHER / SANDBOX / AGENT / TASK / DISPATCH / CONFIRM / ESCALATE / CONFIG），界面「决策日志」时间线经 <code>GET /api/outreach/log</code> 可查</li>
-      <li>熔断日志带当时的雨量、阈值与触发源（「友谊关熔断 · <b>未来6h累计降雨量 120mm &gt; 80mm 阈值，penalty=100（调度调整沙盘气象参数）</b>」），同一口径的判险理由也写进被熔断边的风险逐段说明</li>
-      <li>大屏「原始返回」可展开接口原文，与卡片数字逐格核对</li></ul></div>
-    <div class="card"><h5><i>4</i>可复现取证</h5><ul>
-      <li>界面证据：<code>node tools/_ui_shots.mjs</code> → <code>node tools/_ui_pack.mjs</code>（本套图的截图即由此产出）</li>
-      <li>端到端：<code>tools/_e2e_test.ps1</code>、<code>_geo_e2e.mjs</code>、<code>_wx_e2e.mjs</code>、<code>_task_sync_e2e.mjs</code> 等脚本</li>
-      <li>缓存预生成：<code>tools/pregen_agent_cache.ps1</code></li></ul></div>
-  </div>
-
-  <h2 class="sec">四、密钥与数据边界<span>四类凭证、三道闸门、一条底线</span></h2>
-  <div class="grid3">
-    <div class="card red"><h5><i>钥</i>四类凭证，全部只在后端</h5><ul>
-      <li><code>WEATHER_REAL_TOKEN</code>（赛事气象）、<code>TIANDITU_TK / TIANDITU_KEYS</code>（密钥池）、<code>DEEPSEEK_FALLBACK_KEY</code>、预留 <code>WATERWAY_OFFICIAL_TOKEN</code></li>
-      <li>写法：<code>application.properties</code> 只留 <code>${VAR:}</code> 占位，真值写本机 <code>.env.local</code>（已 <code>.gitignore</code>）</li>
-      <li>未配置即视为"该通道未启用"并自动降级；自检接口 <code>status()</code> 只输出计数与守护状态，不含密钥/Token</li></ul></div>
-    <div class="card red"><h5><i>闸</i>公网演示三道闸门</h5><ul>
-      <li><b>护栏过滤器</b>：只拦 <code>/api/</code> 下的非 GET（GET 与 SSE 全放行，节流 GET 等于节流演示）；改全局状态的写接口 20 次/分/IP，其余写接口 180 次/分，超限 429</li>
-      <li><b>封死重负载入口</b>：<code>POST /api/routes/osm/start</code> 会加载 311 MB OSM PBF，公网形态直接 403</li>
-      <li><b>CORS 白名单</b>：仅 localhost / 127.0.0.1 / 内网段 / <code>capacitor://localhost</code>，禁止第三方站点借本服务转发上游请求</li></ul></div>
-    <div class="card red"><h5><i>底</i>一条底线：数据出境可控</h5><ul>
-      <li>核心推理与算路优先在<b>本机</b>完成：路网、地名、知识库、瓦片缓存全部本地，断网可完整演示</li>
-      <li>唯一会把业务内容送出本机的是在线大模型，且<b>只在本地通道失败时</b>才走，界面同步标「非本地」</li>
-      <li>前端与 APK 构建产物<b>零密钥</b>：浏览器只请求同源 <code>/api/tianditu/…</code> 与 <code>/api/v1/…</code>（后者还要求携带与后端一致的 Bearer，第三方借不到额度）</li></ul></div>
-  </div>
-
-  <div class="foot">
-    <b>三点说明：</b>
-    ① <b>真实预报与熔断阈值不同量级</b>——CRA40/GOWFS 的真实 6h 累计降雨多为个位数至十余 mm，80mm 熔断演示由剧本值驱动，真实取数用于验证来源与链路，界面与本文口径一致；
-    ② <b>越语文案为人工撰写底稿（待母语者校验）</b>；
-    ③ <b>官方水运调度平台尚未实际接入</b>，当前以 mock 源验证同一接入链路，切换 <code>official</code> 不需要改动禁航判定与触达核心代码。
-    配套：<b>图 1/2</b> 系统架构（《08》《09》）看模块归属，<b>图 5</b> 业务流程（《12》）看这些数据在哪一步被消费。
-  </div>
-
+  <div class="foot"><b>真实 / 模拟</b>在系统界面与本文档中均如实标注，不冒充真实企业数据；数据来源可通过开放接口 <b>/api/weather/real</b> 现场核验。</div>
 </div>
 </body>
 </html>

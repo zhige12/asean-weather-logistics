@@ -35,6 +35,10 @@ BBOX = {"lat_min": 15.5, "lat_max": 23.5, "lon_min": 102.5, "lon_max": 110.0}
 
 # 保留的道路等级（"精确到二级公路"）
 LEVELS = {"motorway", "trunk", "primary", "secondary"}
+# 中国广西侧额外纳入市区支路级：解决南宁等城区只收录二级以上导致的
+# 「城市孤岛 + 长直桥边斜穿街区」——补进三级/未分类/住宅路，让真实街路进网。
+# 越南侧不加（住宅路 166 万条，会让路网膨胀 18 倍不可用），维持二级以上。
+LEVELS_CN = LEVELS | {"tertiary", "unclassified", "residential"}
 
 # highway -> (speedKmh, roadType)
 SPEED = {
@@ -42,6 +46,9 @@ SPEED = {
     "trunk": (90, "trunk"),
     "primary": (80, "primary"),
     "secondary": (60, "secondary"),
+    "tertiary": (50, "tertiary"),
+    "unclassified": (40, "unclassified"),
+    "residential": (30, "residential"),
 }
 
 # 锚点城市（原手写路网 ID -> (中文名, lat, lon)）。PBF 只有越南，中国侧节点不在此列。
@@ -511,9 +518,10 @@ def simplify_geom(points, tol=0.0001):
 class NetworkHandler(osmium.SimpleHandler):
     """流式读取 PBF：收集 bbox 内节点坐标 + 符合条件的道路 way。"""
 
-    def __init__(self, bbox):
+    def __init__(self, bbox, levels=LEVELS):
         super().__init__()
         self.bbox = bbox
+        self.levels = levels        # 本来源保留的 highway 等级集合
         self.coords = {}          # osm node id -> (lat, lon)
         self.ways = []            # (osm way id, [node ids], tags)
         self._in_bbox = set()     # node 在 bbox 内的标记（避免重复存储）
@@ -528,17 +536,17 @@ class NetworkHandler(osmium.SimpleHandler):
 
     def way(self, w):
         h = w.tags.get("highway")
-        if h is None or h.split("_")[0] not in LEVELS:
+        if h is None or h.split("_")[0] not in self.levels:
             return
         node_ids = [n.ref for n in w.nodes]
         self.ways.append((w.id, node_ids, dict(w.tags)))
 
 
-def generate_source(pbf_paths, bbox, anchor_cities, snap_km, label):
+def generate_source(pbf_paths, bbox, anchor_cities, snap_km, label, levels=LEVELS):
     """独立读取若干 PBF 并抽稀为该来源路网。分来源处理，规避不同国家 extract 之间
     OSM 节点 ID 冲突 / 坐标相互覆盖所导致的路网断裂。
     返回 (nodes, edges, anchor_match, degree, coords, ways, key_nodes)。"""
-    handler = NetworkHandler(bbox)
+    handler = NetworkHandler(bbox, levels)
     for p in pbf_paths:
         handler.apply_file(p, locations=False)
     coords, ways = handler.coords, handler.ways
@@ -690,7 +698,7 @@ def main():
     cn_nodes, cn_edges, cn_am = [], [], {}
     if os.path.exists(PBF_CN):
         cn_nodes, cn_edges, cn_am, _, _, _, _ = generate_source(
-            [PBF_CN], bbox, CN_ANCHOR_CITIES, 20.0, "中国广西")
+            [PBF_CN], bbox, CN_ANCHOR_CITIES, 20.0, "中国广西", levels=LEVELS_CN)
     else:
         print(f"[提示] 未找到中国侧 PBF ({PBF_CN})，中国侧仅保留手写节点")
 
@@ -718,6 +726,13 @@ def main():
     for e in edges:
         if e.get("c") is None and e["id"] in CN_ROAD_GEOM:
             e["c"] = CN_ROAD_GEOM[e["id"]]
+
+    # 手写走廊边贴路化精修 + 里程自洽校正（与单独跑 refine_cn_corridors.py 同一函数，
+    # 保证「重生路网」与「就地修 JSON」两条路径产出一致；详见该模块头部注释）
+    sys.path.insert(0, _HERE)
+    from refine_cn_corridors import refine_corridors
+    for line in refine_corridors(nodes, edges):
+        print(f"[走廊精修] {line}")
 
     # 跨境走廊连通性自检：南宁 -> 河内（经友谊关/同登）
     adj = {}

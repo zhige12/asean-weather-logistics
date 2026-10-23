@@ -204,6 +204,10 @@
         <div v-if="isSimMode && typhoonHint(s)" class="typhoon-hint" :class="{ armed: typhoonArmed(s) }">
           {{ typhoonHint(s) }}
         </div>
+        <!-- 浓雾封路引导：能见度 + 湿度/云量 + 静稳 四要素联动，说清还差哪个条件 -->
+        <div v-if="isSimMode && fogHint(s)" class="typhoon-hint" :class="{ armed: fogArmed(s) }">
+          {{ fogHint(s) }}
+        </div>
 
         <div class="section-info">
           <div class="info-line" :class="{ danger: s.fused }">
@@ -227,6 +231,11 @@
             {{ s.typhoonVerdict || "台风模拟中" }}（{{ s.typhoonPressureHpa }}hPa / {{ s.typhoonWindKph }}km/h）
             <span v-if="!s.typhoonBlocking" class="muted">· 未达熔断级</span>
           </div>
+          <!-- 浓雾判据命中时标出，说明这次熔断/风险是雾而非降雨/台风造成 -->
+          <div v-if="s.fogVerdict" class="info-sub typhoon-tag" :class="{ blocking: s.fogBlocking }">
+            {{ s.fogVerdict }}
+            <span v-if="!s.fogBlocking" class="muted">· 未达熔断级</span>
+          </div>
           <!-- 官方预报返回的全部气象要素（仅"拉取 GOWFS 真实预报"后出现） -->
           <div v-if="elementList(s.elements).length" class="element-grid">
             <div v-for="el in elementList(s.elements, s.windDirectionText)" :key="el.key" class="element-item">
@@ -238,8 +247,7 @@
       </div>
     </div>
     <div v-else class="muted empty-hint">
-      点击上方「拉取 GOWFS 数据」获取真实气象，或收到推送后拖动滑块观察决策边界。<br />
-      不是黑箱，是可交互的决策边界。
+      点击上方「拉取 GOWFS 数据」获取真实气象，或收到推送后拖动滑块观察决策边界。
     </div>
 
     <!-- 货物安全指数（冷链货损）：温度+湿度+延误→货损风险与金额估计 -->
@@ -328,7 +336,7 @@
 
     <!-- 参数双向映射（4.2）：公路版参数 ⇄ 运河版参数 -->
     <div v-if="pushed" class="mapping-line">
-      参数双向映射：降雨量 &gt;<b>{{ state.fuseThresholdMm }}mm/h → 熔断</b> ⇄
+      参数双向映射：降雨量 &gt;<b>{{ state.fuseThresholdMm }}mm/h</b> 或 <b>浓雾(能见度&lt;200m·高湿/低云·静风)</b> → 熔断 ⇄
       能见度 &lt;1000m / 流速 &gt;2m/s / 浪高 &gt;2m → <b>禁航预警</b><br />
       决策输出：公路断切水运，水运禁航切公路
     </div>
@@ -433,6 +441,34 @@ function typhoonArmed(s) {
   const prs = simParam(s.id, "pressureHpa");
   const wind = simParam(s.id, "windKph");
   return prs <= 990 && wind >= 60;
+}
+
+/** 浓雾封路引导：与后端 FogRiskRule 同口径（能见度<50 无条件，或 <200 且 高湿/低云 且 风≤35） */
+function fogArmed(s) {
+  const vis = simParam(s.id, "visibilityM");
+  const hum = simParam(s.id, "humidityPct");
+  const cloud = simParam(s.id, "cloudPct");
+  const wind = simParam(s.id, "windKph");
+  const foggy = hum >= 90 || cloud >= 80;
+  const calm = wind <= 35;
+  return vis < 50 || (vis < 200 && foggy && calm);
+}
+function fogHint(s) {
+  const vis = simParam(s.id, "visibilityM");
+  const hum = simParam(s.id, "humidityPct");
+  const cloud = simParam(s.id, "cloudPct");
+  const wind = simParam(s.id, "windKph");
+  const foggy = hum >= 90 || cloud >= 80;
+  const calm = wind <= 35;
+  if (vis < 50) return "特强浓雾：能见度<50m，该口岸将熔断";
+  if (vis < 200 && foggy && calm) return "已达浓雾封路判据：该口岸将熔断";
+  if (vis < 200 && !foggy)
+    return `能见度已过封路线，但需湿度≥90% 或云量≥80% 才判定为雾（湿度${Math.round(hum)}%·云量${Math.round(cloud)}%）`;
+  if (vis < 200 && foggy && !calm)
+    return `湿度/云量已达标，但风≥35km/h 会吹散雾（当前风 ${Math.round(wind)}km/h）`;
+  if (vis >= 200 && vis < 1000 && foggy)
+    return `当前浓雾/大雾：高风险限速，能见度降至 <200m 才封路熔断`;
+  return null;
 }
 
 /** 气压滑杆配色：越接近 990 越红 */

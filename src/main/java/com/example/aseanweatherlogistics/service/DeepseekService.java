@@ -1,5 +1,6 @@
 package com.example.aseanweatherlogistics.service;
 
+import com.example.aseanweatherlogistics.util.SecretCodec;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -105,7 +106,7 @@ public class DeepseekService {
             log.info("未配置在线 DeepSeek 令牌（deepseek.fallback.key 为空或占位符），降级到规则模板");
             return new AiReply(null, null, null);
         }
-        String online = chatRemote(fallbackUrl, fallbackModel, fallbackKey,
+        String online = chatRemote(fallbackUrl, fallbackModel, SecretCodec.resolve(fallbackKey),
                 systemPrompt, userPrompt, maxTokens, ONLINE_TIMEOUT_SECONDS);
         // 只有真拿到内容才算命中在线通道，否则通道为 null（降级到规则模板）
         return new AiReply(online, online != null ? CHANNEL_ONLINE : null, fallbackModel);

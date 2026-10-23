@@ -1,0 +1,66 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>README-交付清单</title><style>
+@page { size: A4; margin: 16mm 14mm; }
+* { box-sizing: border-box; }
+body { font-family: "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;
+  font-size: 10.5pt; line-height: 1.7; color: #1a1a1a; margin: 0; }
+h1 { font-size: 20pt; border-bottom: 3px solid #2c6ecb; padding-bottom: 6px; margin: 4px 0 14px; }
+h2 { font-size: 15pt; border-left: 5px solid #2c6ecb; padding-left: 9px; margin: 20px 0 10px; page-break-after: avoid; }
+h3 { font-size: 12.5pt; margin: 15px 0 7px; color: #23406e; page-break-after: avoid; }
+h4,h5,h6 { font-size: 11pt; margin: 12px 0 6px; page-break-after: avoid; }
+p { margin: 7px 0; }
+ul,ol { margin: 7px 0 7px 4px; padding-left: 22px; }
+li { margin: 3px 0; }
+a { color: #2c6ecb; text-decoration: none; word-break: break-all; }
+code { font-family: "Consolas","Menlo",monospace; background: #eef1f5; padding: 1px 5px; border-radius: 3px; font-size: 9pt; }
+pre { background: #1e2430; color: #e6e6e6; padding: 11px 13px; border-radius: 6px; overflow-x: auto; page-break-inside: avoid; }
+pre code { background: none; color: #e6e6e6; padding: 0; font-size: 8.7pt; line-height: 1.5; }
+blockquote { border-left: 4px solid #c9d4e5; background: #f5f8fc; margin: 9px 0; padding: 6px 14px; color: #445; }
+table { border-collapse: collapse; width: 100%; margin: 11px 0; font-size: 9.3pt; page-break-inside: avoid; }
+th,td { border: 1px solid #c2cbd6; padding: 5px 9px; text-align: left; vertical-align: top; }
+th { background: #2c6ecb; color: #fff; font-weight: 600; }
+tbody tr:nth-child(even) { background: #f2f5fa; }
+hr { border: none; border-top: 1px solid #d3dae3; margin: 16px 0; }
+</style></head><body><h1>交付材料总清单（智能应用类）</h1>
+<blockquote><p>本目录汇总所有可交付文档。<strong>✅=已生成可直接用｜🟡=已给模板/脚本需你补充｜⛔=必须你线下完成，我无法代生成</strong></p></blockquote>
+<table><thead><tr><th>#</th><th>大赛要求的材料</th><th>状态</th><th>位置 / 说明</th></tr></thead><tbody><tr><td>1</td><td>承诺书（附件2）</td><td>🟡⛔</td><td><code>06-承诺书草稿.md</code> 为通用草稿；<strong>官方附件2 模板须下载原件填写签字盖章</strong></td></tr><tr><td>2</td><td>系统原型 / 可运行 Demo</td><td>🟡</td><td><code>05-…Demo交付.md</code> 给了 3 种交付方式（在线链接/局域网/APK）与评委运行步骤；<strong>需你实际部署或提供可访问入口/APK 文件</strong></td></tr><tr><td>3</td><td>演示视频（≤5 分钟）</td><td>🟡</td><td><code>05-…Demo交付.md</code> 给了逐段分镜脚本；<strong>视频需你按脚本录制</strong></td></tr><tr><td>4</td><td>源代码及技术文档</td><td>✅</td><td>源码 = 本仓库；技术文档 <code>01-技术文档.md</code> 按提交要求四段对齐：环境配置说明（二/四/十）、依赖列表（三/10.1）、部署步骤（五/11.1）、API 接口清单（六 19 控制器 96 端点）；关键配置已脱敏且给出可复现路径（10.3 脱敏对照、11.1 无凭证跑通、11.2 已知坑）；仓库根目录附 <code>.env.example</code> 脱敏模板</td></tr><tr><td>5</td><td>服务设计可视化材料</td><td>✅</td><td><code>02-系统架构与数据使用说明.md</code>、<code>03-服务蓝图与交互流程.md</code>（含 mermaid 架构图/流程图/服务蓝图/界面线框/数据使用说明）；成图另见 <code>08</code>～<code>13</code>（架构四段因果链、架构分层泳道、服务蓝图、界面原型、业务流程、数据使用说明），每张图同目录保留 HTML 源，改完重跑 <code>tools/_arch_shot.ps1</code> 即可重导 PNG</td></tr><tr><td>6</td><td>知识产权等佐证材料</td><td>⛔</td><td>软著/专利/查重报告/开源许可清单等<strong>需你向机构申请或导出</strong>（见下方建议）</td></tr><tr><td>7</td><td>路演 PPT</td><td>✅</td><td><code>04-路演PPT文案.md</code> 14 页文案 + 讲稿 + 现场演示脚本；<strong>套用到 PPT 模板即可</strong></td></tr><tr><td>—</td><td>项目计划书（技术修订版）</td><td>✅</td><td>见仓库根目录 <code>项目计划书（修订版）.md</code>（已按真实代码更正技术表述）</td></tr></tbody></table>
+<h2>目录结构</h2>
+<pre><code class="lang-text">交付材料/
+├── README-交付清单.md          ← 本文件
+├── 01-技术文档.md              ✅ 环境+依赖+部署+API 清单
+├── 02-系统架构与数据使用说明.md  ✅ 六层架构图/时序/共生模型/数据合规
+├── 03-服务蓝图与交互流程.md      ✅ 服务蓝图/界面线框/业务流程图
+├── 04-路演PPT文案.md            ✅ 14 页文案+演示脚本
+├── 05-演示视频脚本与Demo交付.md  🟡 分镜脚本+Demo 交付方式
+├── 06-承诺书草稿.md             🟡 通用草稿（官方附件2需原件）
+├── 07-评委启动说明.txt          ✅ 评委机上一键启动说明（与离线交付包 README 同源）
+├── 08-系统架构图.html / .png     ✅ 四段因果链：①气象从哪来→②有什么用→③怎么与AI交互→④指导了什么
+├── 09-系统架构图-分层版.html/.png ✅ 分层泳道版（PPT P5 主图），同样带 ①→④ 主线与右侧“可核验”竖带
+├── 10-服务蓝图.html / .png       ✅ 五阶段四泳道 + 粉线绿线 + 分级叫应表 + 实机界面证据
+├── 11-界面原型图.html / .png     ✅ 大屏与司机端实机截图、组件标注与界面↔组件↔接口对照
+├── 12-业务流程示意图.html / .png ✅ 主链 12 步、四条分支、SSE 实时链路与降级链路
+├── 13-数据使用说明图.html / .png ✅ 数据流向、14 项数据资产、溯源核验与密钥边界
+└── _ui/                          ✅ 实机截图原图（供《10》《11》《12》引用）</code></pre>
+<blockquote><p>六张图纸的 <code>.png</code> 由 <code>tools/_arch_shot.ps1</code> 无头浏览器导出（改完 HTML 重跑即可，尺寸与仓库中一致）： <code>powershell -File tools/_arch_shot.ps1 -Pattern '09-*.html' -H 1440</code>。图内容均按代码实际阈值书写（实时雨强与预报累计量是两条链路），改阈值请同步改图。</p></blockquote>
+<h2>提交前必做（直接影响“可复现”判定）</h2>
+<ol><li><strong>补齐未入库的源码文件</strong>（缺任何一个，评委 clone 后编译不过）：</li></ol>
+<p>   <code>src/main/java/.../service/CorridorAdvisoryService.java</code>、<code>src/main/java/.../service/RecommendationPool.java</code>、    <code>frontend/src/utils/corridorAdvisory.js</code>、<code>src/test/java/.../service/SolutionAgentDetourTriggerTest.java</code>。</p>
+<ol><li><strong>入库本目录的成图与截图</strong>：<code>10</code>～<code>13</code> 的 html/png 与 <code>_ui/</code> 目前仍为未跟踪状态，需一并 <code>git add</code>。</li><li><strong>仓库只提交 <code>.env.example</code></strong>：根目录 <code>.env.local</code> 已被 <code>.gitignore</code> 排除，以 Git 仓库地址提交时凭证不会跟着出去。</li></ol>
+<p>   注意与 Demo 包的区隔：可运行 Demo 包内的 <code>asean-demo/.env.local</code> <strong>为让评委开箱核验而内含申请人本人三份凭证</strong>，    该目录不入库，且包只定向交付评审人员——不得上传公开网盘、群发链接或传到仓库。</p>
+<ol><li><strong>展示结束后立即作废并轮换三份凭证</strong>（天地图 / DeepSeek / 气象 Token）：它们已随 Demo 包外发，</li></ol>
+<p>   应视为已扩散；新值只写本机 <code>.env.local</code>，不写进任何文档与交付包。</p>
+<ol><li><strong>提交前自检</strong>（三条都应为空或成功）：</li></ol>
+<p>   ``<code>bash    git grep -n -E "(TOKEN|_KEY|KEYS|_TK)[=:][0-9a-zA-Z]{8}"   # 仓库内无凭证    git status --short                                          # 无 ?? 状态的源码与交付物    gradlew.bat build &amp;&amp; cd frontend &amp;&amp; npm ci &amp;&amp; npm run build # 后端与前端均可构建    </code>``</p>
+<h2>你仍需线下完成的 4 件事（⛔/🟡）</h2>
+<ol><li><strong>官方承诺书附件2</strong>：向主办方下载原始模板 → 填写 → 签字盖章 → 扫描 PDF。</li><li><strong>可运行 Demo 入口</strong>：按 <code>05</code> 文档部署（公网或局域网）并提供链接，或上传 <code>app-debug.apk</code> + 后端运行说明。</li><li><strong>5 分钟演示视频</strong>：按 <code>05</code> 分镜脚本，用大屏+手机实录导出 MP4。</li><li><strong>知识产权佐证</strong>：建议准备——</li></ol>
+<ul><li>软件著作权登记证书（或受理通知书）；</li><li>代码查重/AIGC 检测报告（若赛事要求）；</li><li>开源许可清单：Spring Boot(Apache-2.0)、Vue(MIT)、Leaflet(BSD-2)、Capacitor(MIT)、GraphHopper(Apache-2.0)、JGraphT(EPL/LGPL)、Ollama(MIT)、Qwen(通义千问协议)、OSM 数据(ODbL 署名)；</li><li>若已申请发明专利/实用新型，附受理或授权文件。</li></ul>
+<h2>提交前打包建议</h2>
+<pre><code class="lang-text">提交包.zip
+├── 承诺书.pdf               （官方附件2签字盖章）
+├── 项目计划书.pdf
+├── 技术文档.pdf             （01）
+├── 服务设计与架构.pdf        （02+03 合并渲染）
+├── 路演PPT.pptx             （04）
+├── 演示视频.mp4             （≤5 分钟）
+├── Demo入口.txt / app-debug.apk
+├── 源码/（或 Git 仓库地址）
+└── 知识产权佐证/</code></pre></body></html>

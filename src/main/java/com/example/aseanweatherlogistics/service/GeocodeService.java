@@ -1,5 +1,6 @@
 package com.example.aseanweatherlogistics.service;
 
+import com.example.aseanweatherlogistics.util.SecretCodec;
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -117,9 +118,10 @@ public class GeocodeService {
                           @Value("${geocode.nominatim.timeout-seconds:8}") int nominatimTimeoutSeconds,
                           @Value("${geocode.nominatim.proxy:}") String nominatimProxy) {
         this.routeService = routeService;
-        this.keys = keyPool == null || keyPool.isBlank()
+        String resolvedKeyPool = SecretCodec.resolve(keyPool);
+        this.keys = resolvedKeyPool.isBlank()
                 ? List.of()
-                : List.of(keyPool.split(","));
+                : List.of(resolvedKeyPool.split(","));
         this.tiandituReferer = tiandituReferer;
         this.tiandituUserAgent = tiandituUserAgent;
         this.regionBias = regionBias;

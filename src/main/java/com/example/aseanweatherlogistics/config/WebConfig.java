@@ -28,6 +28,12 @@ public class WebConfig implements WebMvcConfigurer {
     // 合规要求：赛事 Token 只允许后端持有，且禁止任何第三方站点借用本服务转发上游请求
     // （服务本身同源托管前端，跨域仅在本机开发 / 局域网手机访问 / 打包 WebView 场景下需要）。
     // 若演示时需要放开更多来源，在此追加即可。
+    //
+    // 公网演示来源必须显式列入：前端与 API 同源部署在 https://8.138.229.14:8443，但浏览器对
+    // 同源 POST 也会带 Origin 头，而经 nginx 反代后后端把 scheme/端口看丢了（Host 用 $host 不含端口、
+    // 又没转发 X-Forwarded-Proto），Spring 便把这请求当成跨域走 CORS 校验；此源不在白名单时
+    // 直接 403「Invalid CORS request」——表现为评委用 IP 链接打开时所有写操作（拉取GOWFS/拖滑块/
+    // 接单算路/支流…）全挂，只有只读 GET 能用。放行本部署自身的公网 IP 与域名即可根治。
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/api/**")
@@ -38,7 +44,13 @@ public class WebConfig implements WebMvcConfigurer {
                         "http://172.*.*.*:*",
                         "http://10.*.*.*:*",
                         "https://localhost",
-                        "capacitor://localhost")
+                        "capacitor://localhost",
+                        // 公网演示：裸 IP（含/不含端口、http/https 都放行，兼容 :8080 直连与 :8443 反代）
+                        "https://8.138.229.14:*",
+                        "http://8.138.229.14:*",
+                        // 域名（ICP 备案生效后走 443 标准端口时无端口 Origin，一并放行）
+                        "https://zhi-ning.cn",
+                        "https://www.zhi-ning.cn")
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                 .allowedHeaders("*");
     }

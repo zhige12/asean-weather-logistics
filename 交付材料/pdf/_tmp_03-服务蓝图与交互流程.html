@@ -1,0 +1,78 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>03-服务蓝图与交互流程</title><style>
+@page { size: A4; margin: 16mm 14mm; }
+* { box-sizing: border-box; }
+body { font-family: "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;
+  font-size: 10.5pt; line-height: 1.7; color: #1a1a1a; margin: 0; }
+h1 { font-size: 20pt; border-bottom: 3px solid #2c6ecb; padding-bottom: 6px; margin: 4px 0 14px; }
+h2 { font-size: 15pt; border-left: 5px solid #2c6ecb; padding-left: 9px; margin: 20px 0 10px; page-break-after: avoid; }
+h3 { font-size: 12.5pt; margin: 15px 0 7px; color: #23406e; page-break-after: avoid; }
+h4,h5,h6 { font-size: 11pt; margin: 12px 0 6px; page-break-after: avoid; }
+p { margin: 7px 0; }
+ul,ol { margin: 7px 0 7px 4px; padding-left: 22px; }
+li { margin: 3px 0; }
+a { color: #2c6ecb; text-decoration: none; word-break: break-all; }
+code { font-family: "Consolas","Menlo",monospace; background: #eef1f5; padding: 1px 5px; border-radius: 3px; font-size: 9pt; }
+pre { background: #1e2430; color: #e6e6e6; padding: 11px 13px; border-radius: 6px; overflow-x: auto; page-break-inside: avoid; }
+pre code { background: none; color: #e6e6e6; padding: 0; font-size: 8.7pt; line-height: 1.5; }
+blockquote { border-left: 4px solid #c9d4e5; background: #f5f8fc; margin: 9px 0; padding: 6px 14px; color: #445; }
+table { border-collapse: collapse; width: 100%; margin: 11px 0; font-size: 9.3pt; page-break-inside: avoid; }
+th,td { border: 1px solid #c2cbd6; padding: 5px 9px; text-align: left; vertical-align: top; }
+th { background: #2c6ecb; color: #fff; font-weight: 600; }
+tbody tr:nth-child(even) { background: #f2f5fa; }
+hr { border: none; border-top: 1px solid #d3dae3; margin: 16px 0; }
+</style></head><body><p> # 服务设计可视化材料（服务蓝图 / 界面原型 / 流程示意）</p>
+<h2>一、服务蓝图（Service Blueprint）</h2>
+<table><thead><tr><th>层次</th><th>阶段1 风险感知</th><th>阶段2 方案生成</th><th>阶段3 人工决策</th><th>阶段4 分级触达</th><th>阶段5 闭环确认</th></tr></thead><tbody><tr><td><strong>用户动作</strong>（调度员/司机/船长/百姓）</td><td>收到风险预警提示</td><td>查看六维方案对比</td><td>调度员点选最终方案</td><td>各角色接收专属指令</td><td>点击"确认/Xác nhận"回执</td></tr><tr><td><strong>前台界面</strong></td><td>大屏红色熔断弹窗 / App 推送</td><td>AI 多维分析面板</td><td>决策沙盘滑块 + 选择按钮</td><td>司机端任务变更卡片 / 语音播报</td><td>确认回执状态灯</td></tr><tr><td><strong>后台支持</strong></td><td>WeatherSimulator 注入 + RouteService 阶跃熔断</td><td>RiskAgent→SolutionAgent→TouchAgent（Ollama）</td><td>DecisionSandboxService 实时重估</td><td>SSE /api/agent/events 广播</td><td>TaskController /accept 记录回执</td></tr><tr><td><strong>支撑系统</strong></td><td>CRA40 官方气象接口 / 本地缓存</td><td>知识库 RAG + 路网图</td><td>口岸时效 + 船期数据</td><td>天地图瓦片代理 + TTS</td><td>决策日志 DecisionLogService</td></tr><tr><td><strong>粉线（互动线）</strong></td><td>预警推送即互动</td><td>方案展示</td><td>人机协同确认</td><td>指令下发</td><td>回执闭环</td></tr><tr><td><strong>绿线（可视分离线）</strong></td><td>熔断计算对司机不可见，仅显结果</td><td>AI 分析对百姓端不暴露</td><td>决策权归属人</td><td>分级渠道选择</td><td>未确认自动升级</td></tr></tbody></table>
+<h3>分级叫应机制（三级）</h3>
+<pre><code class="lang-text">黄色关注   → App 推送          → 需点击确认
+橙色准备   → App + 短信         → 需回复确认
+红色立即行动 → App + 语音外呼     → 未确认自动上报调度端并升级渠道</code></pre>
+<h2>二、界面原型（文字线框）</h2>
+<h3>2.1 PC 调度大屏</h3>
+<pre><code class="lang-text">┌───────────────────────────────────────────────────────────┐
+│  顶部：全局态势条  [友谊关 85mm 熔断] [芒街 62mm 正常] [运河能见度 800m 禁航] │
+├──────────────────────────────┬────────────────────────────┤
+│                              │  AI 六维方案对比            │
+│   地图区（Leaflet 1.9.4）     │  ┌────┬─────┬─────┬────┐   │
+│   · 跨境路网骨骼图            │  │维度│芒街 │运河 │等待│   │
+│   · 风险边(橙) 口岸虚拟边(红)  │  │耗时│1.5h │0.5h │6h  │   │
+│   · 通畅绿/绕行红/基准灰虚线   │  │货损│4.8% │1.2% │8.5%│   │
+│   · 决策沙盘滑块(调降雨量)     │  │... │     │     │    │   │
+│                              │  └────┴─────┴─────┴────┘   │
+│                              │  [选择陆水联运] [绕行芒街]   │
+├──────────────────────────────┼────────────────────────────┤
+│  三智能体状态灯 ●●●           │  决策日志时间线 / 叫应回执   │
+└──────────────────────────────┴────────────────────────────┘</code></pre>
+<p>组件对应：<code>MapView.vue</code>(地图) <code>DecisionSandbox.vue</code>(沙盘) <code>AgentPanel.vue</code>(智能体) <code>RiskStrip.vue</code>(风险条) <code>CarbonCalc.vue</code>(碳排) <code>TaskDispatchPanel.vue</code>(派单) <code>PlatformConfigurator.vue</code>(配置器)。</p>
+<h3>2.2 司机端 App（DriverApp.vue）</h3>
+<pre><code class="lang-text">┌───────────────┐
+│  ZLN-Map 顶部  │
+│  ┌─────────┐  │
+│  │  地 图   │  │  任务变更卡片：
+│  │ 导航路线 │  │  "原路线友谊关熔断，已切陆水联运，
+│  │ 风险段红  │  │   请15:30前抵达六景港…"
+│  └─────────┘  │  权益保障：随船补贴/专项险/返程交通
+│ [卫星][矢量]   │  ▶ 越南语语音播报
+│  ◉ 确认接收    │  ◉ Xác nhận（越南司机）
+└───────────────┘</code></pre>
+<h2>三、核心业务流程图</h2>
+<h3>3.1 公路熔断 → 切陆水联运</h3>
+<pre><code class="lang-mermaid">flowchart TD
+    A[气象注入 友谊关降雨&gt;80mm/h] --&gt; B[RouteService 边权 penalty=100 硬熔断]
+    B --&gt; C[Dijkstra 重算：公路不可达]
+    C --&gt; D[评估水运边：运河可行]
+    D --&gt; E[SolutionAgent 生成六维对比]
+    E --&gt; F{调度员人工确认}
+    F --&gt;|选陆水联运| G[SSE 推送：司机去港/船长备装/港口泊位]
+    G --&gt; H[各角色确认回执；未确认升级渠道]</code></pre>
+<h3>3.2 水运禁航 → 反向切回公路</h3>
+<pre><code class="lang-mermaid">flowchart TD
+    A[运河马道枢纽 能见度&lt;1000m] --&gt; B[WaterRiskEngine 航道边禁航]
+    B --&gt; C[反向评估公路：绕行芒街可行]
+    C --&gt; D[调度员确认公路方案]
+    D --&gt; E[SSE 推送：船长取消装船/司机改走公路/口岸通关预约]</code></pre>
+<h3>3.3 拔网线离线演示</h3>
+<pre><code class="lang-text">本地 Ollama 推理 + CRA40 数据预缓存 + 本地算路 + 天地图磁盘瓦片缓存
+→ 断网后重复全部流程，功能正常，数据不出境</code></pre>
+<h2>四、产品形态矩阵</h2>
+<table><thead><tr><th>形态</th><th>技术</th><th>用户</th><th>核心功能</th></tr></thead><tbody><tr><td>PC 调度大屏</td><td>Vue3 + Leaflet 1.9.4（Canvas 渲染）</td><td>调度管理人员</td><td>全局监控/熔断可视化/六维对比/沙盘/人工决策</td></tr><tr><td>移动端 App</td><td>Vue3 + Capacitor + Leaflet 1.9.4</td><td>司机/船东船员</td><td>执行指令/任务变更/双语语音播报/叫应确认</td></tr><tr><td>公众模式</td><td>同上（App 内）</td><td>个体司机/沿岸百姓</td><td>基础导航+风险提示+避险预警（C端引流）</td></tr><tr><td>开放配置平台</td><td>Web</td><td>物流企业</td><td>智能体模板/阈值配置/规则自定义（千企千面）</td></tr></tbody></table></body></html>

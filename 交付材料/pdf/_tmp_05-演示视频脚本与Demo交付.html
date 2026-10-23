@@ -1,0 +1,38 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>05-演示视频脚本与Demo交付</title><style>
+@page { size: A4; margin: 16mm 14mm; }
+* { box-sizing: border-box; }
+body { font-family: "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;
+  font-size: 10.5pt; line-height: 1.7; color: #1a1a1a; margin: 0; }
+h1 { font-size: 20pt; border-bottom: 3px solid #2c6ecb; padding-bottom: 6px; margin: 4px 0 14px; }
+h2 { font-size: 15pt; border-left: 5px solid #2c6ecb; padding-left: 9px; margin: 20px 0 10px; page-break-after: avoid; }
+h3 { font-size: 12.5pt; margin: 15px 0 7px; color: #23406e; page-break-after: avoid; }
+h4,h5,h6 { font-size: 11pt; margin: 12px 0 6px; page-break-after: avoid; }
+p { margin: 7px 0; }
+ul,ol { margin: 7px 0 7px 4px; padding-left: 22px; }
+li { margin: 3px 0; }
+a { color: #2c6ecb; text-decoration: none; word-break: break-all; }
+code { font-family: "Consolas","Menlo",monospace; background: #eef1f5; padding: 1px 5px; border-radius: 3px; font-size: 9pt; }
+pre { background: #1e2430; color: #e6e6e6; padding: 11px 13px; border-radius: 6px; overflow-x: auto; page-break-inside: avoid; }
+pre code { background: none; color: #e6e6e6; padding: 0; font-size: 8.7pt; line-height: 1.5; }
+blockquote { border-left: 4px solid #c9d4e5; background: #f5f8fc; margin: 9px 0; padding: 6px 14px; color: #445; }
+table { border-collapse: collapse; width: 100%; margin: 11px 0; font-size: 9.3pt; page-break-inside: avoid; }
+th,td { border: 1px solid #c2cbd6; padding: 5px 9px; text-align: left; vertical-align: top; }
+th { background: #2c6ecb; color: #fff; font-weight: 600; }
+tbody tr:nth-child(even) { background: #f2f5fa; }
+hr { border: none; border-top: 1px solid #d3dae3; margin: 16px 0; }
+</style></head><body><h1>演示视频脚本（5 分钟以内）与 Demo 交付说明</h1>
+<h2>一、5 分钟演示视频分镜脚本</h2>
+<table><thead><tr><th>时间</th><th>画面</th><th>旁白要点</th></tr></thead><tbody><tr><td>0:00–0:20</td><td>片头 + 定位语</td><td>"面向东盟跨境物流的突发气象预警与多路线协同调度平台——平陆运河时代陆水联运双向决策引擎"</td></tr><tr><td>0:20–0:50</td><td>痛点动画/调研照片</td><td>预警≠方案；陆水孤岛；跨境壁垒；数据合规</td></tr><tr><td>0:50–1:20</td><td>大屏全局态势</td><td>跨境路网 + 气象驱动风险边可视化</td></tr><tr><td>1:20–2:10</td><td><strong>案例一现场操作</strong></td><td>注入友谊关暴雨&gt;80mm→熔断→AI 六维对比→调度员选陆水联运→SSE 推送司机/船长/港口→司机确认</td></tr><tr><td>2:10–2:50</td><td>手机司机端特写</td><td>任务变更卡片 + 中越双语语音播报 + Xác nhận 回执</td></tr><tr><td>2:50–3:30</td><td><strong>案例二反向切换</strong></td><td>运河能见度&lt;1000m 禁航→AI 反向评估公路→绕行芒街→批量下发</td></tr><tr><td>3:30–4:00</td><td>开放配置平台</td><td>滑块调风险容忍度/货物类型，方案实时联动（千企千面）</td></tr><tr><td>4:00–4:30</td><td><strong>拔网线演示</strong></td><td>断网重复核心流程，功能正常——本地推理·数据不出境</td></tr><tr><td>4:30–5:00</td><td>价值/商业模式/收尾</td><td>三步走路线 + 团队</td></tr></tbody></table>
+<p><strong>录制建议</strong>：1080p；大屏 + 手机同屏录（画中画）；关键操作打标注释；导出 MP4，控制在 5 分钟内、体量适合上传。</p>
+<h2>二、可运行 Demo 交付方式（任选其一/组合）</h2>
+<ol><li><strong>在线链接</strong>：把后端部署在可公网访问的机器（<code>server.address=0.0.0.0</code>，端口 8080），提供大屏 <code>http://&lt;IP&gt;:8080/</code> 与司机端 <code>http://&lt;IP&gt;:8080/driver.html</code>。⚠️ 公网部署需自行加访问控制/去掉演示注入接口，或仅评审时段开放。</li><li><strong>局域网演示</strong>：手机与演示电脑连同一 WiFi，<code>capacitor.config.json</code> 的 <code>server.url</code> 改为演示机 IP，提供 APK 安装包。</li><li><strong>安装包</strong>：<code>android/app/build/outputs/apk/debug/app-debug.apk</code>（约 10MB，Android）。随包附《5.3 部署步骤》说明如何起后端。</li><li><strong>源码 + 技术文档</strong>：见 <code>01-技术文档.md</code>，评委可本地复现。</li></ol>
+<h2>三、Demo 运行最小步骤（给评委）</h2>
+<pre><code class="lang-bash"># 1) 本地大模型（离线必需）
+ollama pull qwen2.5:14b &amp;&amp; ollama serve
+# 2) 配置环境变量：复制根目录 .env.example 为 .env.local，按需填入气象 Token（留空则自动降级，不影响主流程）
+# 3) 起后端
+gradlew.bat bootRun           # 监听 :8080，GET /ping 返回 OK
+# 4) 前端（已随 dist 托管则跳过；或开发模式）
+cd frontend &amp;&amp; npm install &amp;&amp; npm run build
+# 浏览器打开 http://localhost:8080/</code></pre>
+<blockquote><p>无网络环境下：设 <code>WEATHER_SOURCE=simulated</code>，系统读取预生成决策缓存与磁盘瓦片，可完整演示核心流程。</p></blockquote></body></html>
