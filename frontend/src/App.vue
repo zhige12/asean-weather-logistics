@@ -63,6 +63,13 @@
           </div>
         </section>
 
+        <!-- 自然语言调度舱：一句话驱动查风险/规划/决策分析与沙盘注入（写操作先预览后确认） -->
+        <CopilotPanel
+          :origin-id="originId"
+          :destination-id="destinationId"
+          @executed="onCopilotExecuted"
+        />
+
         <!-- 第四幕：公司派单（司机端收到后自动切物流任务模式） -->
         <TaskDispatchPanel ref="taskPanelRef" :task-status="taskStatus" @refresh="refreshTask" @analyze="onPreDispatchAnalysis" />
 
@@ -414,6 +421,7 @@ import CarbonCalc from './components/CarbonCalc.vue';
 import DecisionSandbox from './components/DecisionSandbox.vue';
 import TaskDispatchPanel from './components/TaskDispatchPanel.vue';
 import AgentPanel from './components/AgentPanel.vue';
+import CopilotPanel from './components/CopilotPanel.vue';
 import OutreachPanel from './components/OutreachPanel.vue';
 import PlatformConfigurator from './components/PlatformConfigurator.vue';
 import DecisionLogTimeline from './components/DecisionLogTimeline.vue';
@@ -453,7 +461,7 @@ export default {
   components: {
     MapView, RiskStrip, ETAIndicator, BriefingPanel, CarbonCalc,
     DecisionSandbox, TaskDispatchPanel, AgentPanel, OutreachPanel,
-    PlatformConfigurator, DecisionLogTimeline, PlaceInput
+    PlatformConfigurator, DecisionLogTimeline, PlaceInput, CopilotPanel
   },
   data() {
     return {
@@ -1340,6 +1348,17 @@ export default {
       // 配置器改动（阈值/货物/触达对象）：沙盘按新阈值重估过，刷新沙盘显示
       if (this.$refs.sandboxRef) this.$refs.sandboxRef.refresh();
       this.refreshDecisionLog();
+    },
+    /**
+     * 调度舱写操作落地成功：与沙盘手动注入同一联动路径——刷新风险条、沙盘显示与决策日志，
+     * 并记一笔时间线（指令来源是对话舱，日志里要看得见）。
+     */
+    onCopilotExecuted(payload) {
+      const tool = (payload && payload.tool) || '';
+      this.refreshRisks();
+      if (this.$refs.sandboxRef) this.$refs.sandboxRef.refresh();
+      this.refreshDecisionLog();
+      this.pushTimeline('调度舱指令执行', `自然语言调度舱落地：${tool}`, 'info');
     },
     onDispatched(status) {
       this.outreachStatus = status;
