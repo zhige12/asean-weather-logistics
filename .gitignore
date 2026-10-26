@@ -85,3 +85,12 @@ tools/_*
 # ---------- 生成物：静态路网直出（63MB / 11MB，只上服务器 nginx，不入库）----------
 tools/static/network.json
 tools/static/network.json.gz
+
+# ---------- 知识产权材料（交底书写明欲保护点，且仓库是 public，禁止入库）----------
+# 需要提交给代理所时直接取本地文件，不要 git add。
+/知识产权/
+# 决赛重提材料：计划书含团队/公司信息与市场数据口径，public 仓库禁止入库，提交时直接取本地文件。
+/决赛材料/
+# 两个取证/材料生成器把阈值体系与拆分口径写在了标签里，申请日前同样不 push。
+tools/ip_softcopy.mjs
+tools/ip_figures.mjs

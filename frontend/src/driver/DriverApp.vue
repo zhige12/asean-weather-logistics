@@ -1025,6 +1025,8 @@ export default {
       _visRaf: null,
       _visPos: null,
       _visEl: null,
+      // 上一 tick 到达时刻：实测相邻 tick 真实间隔，给插值段定时长（见 _setVisSegment）
+      _visTickAt: null,
       // 车标旋转层 DOM 缓存（60fps 每帧改 transform，不再 querySelector）
       _carRotEl: null,
       // 多路线候选（司机自选）
@@ -3708,7 +3710,16 @@ export default {
       if (!pos) return
       const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()
       const from = this._visPos || pos
-      this._visSeg = { a: [from[0], from[1]], b: [pos[0], pos[1]], t0: now, dur: SIM_TICK_MS }
+      // 段时长用**相邻 tick 的真实到达间隔**（限幅 50~500ms，并与上一段间隔取均值平滑）：
+      // SIM_TICK_MS=100 只是 setInterval 的名义值——主线程被瓦片绘制/轮询/修剪挤占时，
+      // 两次 tick 实际隔 200ms+ 很常见（探针实测 tickGapMax=212ms）。若段长写死 100ms：
+      // 车标跑完本段就停在 b 等下一 tick（顿挫十几帧），接着下一段又要用 100ms 补跑
+      // 两段的路（瞬时速度≈3× 中位，猛地窜一截）——这就是「车标顿挫」的真凶。
+      // 按实测间隔给段定时长后，段到期时刻恰好贴住下一 tick：车标永远在动、速度恒定。
+      const gap = this._visTickAt == null ? SIM_TICK_MS : Math.min(500, Math.max(50, now - this._visTickAt))
+      this._visTickAt = now
+      const dur = this._visSeg && this._visSeg.dur > 0 ? Math.round((this._visSeg.dur + gap) / 2) : gap
+      this._visSeg = { a: [from[0], from[1]], b: [pos[0], pos[1]], t0: now, dur }
       this._startVisLoop()
     },
     _startVisLoop() {
@@ -3725,6 +3736,7 @@ export default {
       if (this._visRaf) { cancelAnimationFrame(this._visRaf); this._visRaf = null }
       this._visSeg = null
       this._visPos = null
+      this._visTickAt = null   // 下一段从零标定，不得继承旧行程的 tick 节奏
       // 恢复 CSS 过渡：真实 GPS 那种稀疏更新重新交给 .car-smooth 补间
       if (this._visEl) {
         try { this._visEl.style.transition = '' } catch (e) { /* 忽略 */ }
@@ -7957,12 +7969,11 @@ export default {
 .risk-blink { animation: risk-blink 0.8s ease-in-out infinite; }
 .port-tip { background: rgba(0,0,0,0.8) !important; border: none !important; color: #fff !important; font-size: 12px !important; font-weight: 700 !important; padding: 4px 8px !important; border-radius: 4px !important; }
 .nav-tri-marker { background: none !important; border: none !important; }
-/* 车标位置平滑：模拟行驶 tick 每 100ms（SIM_TICK_MS）才 setLatLng 一次，z19 下每步≈十几像素，
-   而相机已由 Leaflet 缓动连续平移——箭头相对顺滑的路面就是「一帧一帧」地蹦。
-   给承载 translate3d 的图标元素加一条与 tick 节奏匹配的线性过渡，浏览器把这 10 个离散点
-   补成连续滑动（纯合成层，几乎零成本）；时长略大于 tick（120>100ms）以吸收 setInterval 抖动，
-   新目标在当前插值位上重定向、运动不中断。相机平移走 Leaflet 的 pane transform、不改本元素
-   transform，故不拖影、不跟手抖动；旋转在独立子层 .nav-car-rot 上，也不受影响。 */
+/* 车标位置平滑（真实 GPS 稀疏更新专用）：模拟行驶已由 rAF 逐帧插值接管（_paintVehicle 会置
+   transition:none，段长按相邻 tick 实测间隔自适应）；真实 GPS 定位仍是几百毫秒一更，
+   给承载 translate3d 的图标元素保留一条 120ms 线性过渡，由浏览器补成连续滑动（纯合成层）。
+   相机平移走 Leaflet 的 pane transform、不改本元素 transform，故不拖影、不跟手抖动；
+   旋转在独立子层 .nav-car-rot 上，也不受影响。 */
 .nav-tri-marker.car-smooth { transition: transform 120ms linear; will-change: transform; }
 /* 融合式导航车标（参照高德）：罗盘双圈+方位字 + 行进方向扇形光带 + 白底蓝箭头；
    整体 130px 以车标为锚点居中，rot 层由 JS 按方位角实时旋转 */

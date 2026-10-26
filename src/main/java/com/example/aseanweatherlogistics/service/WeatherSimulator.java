@@ -2,9 +2,11 @@ package com.example.aseanweatherlogistics.service;
 
 import com.example.aseanweatherlogistics.model.dto.RiskSegment;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.stereotype.Service;
@@ -132,6 +134,70 @@ public class WeatherSimulator {
     public void clearRealRisks() {
         riskByEdge.keySet().removeIf(k -> !manualEdges.contains(k));
         fireChange();
+    }
+
+    /**
+     * 实时气象同步专用入口：一次性写入本轮全部实时风险，**只有风险集合真的变了才通知 agent**。
+     *
+     * <p>为什么要它：原来的同步路径是 {@code clearRealRisks()} + 逐条 {@code applyRealRisk()}，
+     * 二者各自无条件 {@code fireChange()}。后台气象守护每 60 秒跑一轮，于是即便上游返回的数据
+     * 与上一轮逐字相同（实况时次固定时就是这样），系统仍会每分钟被唤醒一次：
+     * 全量重算所有关注路线（每条一轮 Dijkstra）＋ 向所有 SSE 订阅者广播完整路线载荷。
+     * 演示机是 2 核小机器时，这记空转正好落在车标动画的帧间隙上，表现为周期性顿挫。</p>
+     *
+     * <p>语义与旧路径逐条等价：手动注入的边优先级更高、实时同步既不覆盖也不删除；
+     * 差别只在于「写了相同内容」不再算一次变化。判定按 reason/severity/penalty 三字段比对，
+     * 内容不同（如降雨从 20mm 涨到 50mm）照旧触发重算与广播。</p>
+     *
+     * @param next 本轮实时风险全集（不含手动注入的边）
+     * @return 是否真的发生了变化（true = 已通知 agent 重算）
+     */
+    public synchronized boolean syncRealRisks(List<RiskSegment> next) {
+        Map<String, RiskSegment> wanted = new LinkedHashMap<>();
+        if (next != null) {
+            for (RiskSegment r : next) {
+                if (r == null || r.getEdgeId() == null || r.getEdgeId().isBlank()) {
+                    continue;
+                }
+                if (r.getSeverity() == null || r.getSeverity().isBlank()) {
+                    r.setSeverity("MEDIUM");
+                }
+                wanted.put(r.getEdgeId(), r);
+            }
+        }
+        boolean changed = false;
+        // 1) 本轮不再成立的实时风险先摘掉（手动注入的边不动，与 clearRealRisks 同一判据）
+        for (Iterator<String> it = riskByEdge.keySet().iterator(); it.hasNext(); ) {
+            String eid = it.next();
+            if (manualEdges.contains(eid) || wanted.containsKey(eid)) {
+                continue;
+            }
+            it.remove();
+            changed = true;
+        }
+        // 2) 新增或内容变化的才写入；内容完全相同的跳过，不记为变化
+        for (Map.Entry<String, RiskSegment> e : wanted.entrySet()) {
+            if (manualEdges.contains(e.getKey())) {
+                continue;
+            }
+            RiskSegment cur = riskByEdge.get(e.getKey());
+            if (cur != null && sameRisk(cur, e.getValue())) {
+                continue;
+            }
+            riskByEdge.put(e.getKey(), e.getValue());
+            changed = true;
+        }
+        if (changed) {
+            fireChange();
+        }
+        return changed;
+    }
+
+    /** 两条实时风险是否内容一致（agent 是否值得为这次同步重算一次的判据） */
+    private static boolean sameRisk(RiskSegment a, RiskSegment b) {
+        return Objects.equals(a.getReason(), b.getReason())
+                && Objects.equals(a.getSeverity(), b.getSeverity())
+                && Objects.equals(a.getPenaltyMultiplier(), b.getPenaltyMultiplier());
     }
 
     public void clearRisk(String edgeId) {

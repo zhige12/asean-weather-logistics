@@ -7,6 +7,7 @@ import com.example.aseanweatherlogistics.model.entity.RoadEdge;
 import com.example.aseanweatherlogistics.model.entity.RoadNode;
 import com.example.aseanweatherlogistics.repository.RouteRepository;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -84,6 +85,28 @@ public class RouteService {
 
     private static final long REAL_SYNC_TTL_MS = 5 * 60_000L;
     private volatile long lastRealSyncAt = 0;
+    /**
+     * 实时气象拉取共用线程：以前每次 {@link #syncRealWeather} 都 new 一个单线程池再用完 shutdown，
+     * 后台守护 60s 一轮＝一天 1440 个线程池的创建与回收；改成常驻单线程（daemon），
+     * 超时仍由 future.cancel(true) 中断任务，不再销毁线程。
+     */
+    private final ExecutorService realPullExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "real-weather-pull");
+        t.setDaemon(true);
+        return t;
+    });
+    /** 拉取并发闸：上一轮还没回来就不再排第二个（上游慢时守护不会把队列越堆越长） */
+    private final java.util.concurrent.atomic.AtomicBoolean realPullInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    /**
+     * 走廊基线沿线节点并集缓存：{@link #syncRealWeatherForCorridors} 里的 Dijkstra 跑的是
+     * 无风险的基线路径（penalties 为空 Map），只随路网站点变化，与气象风险无关；
+     * 守护每 60s 一轮却每轮重算 2~3 条走廊，纯浪费。走廊集合不变且未过 TTL 时直接复用。
+     */
+    private static final long CORRIDOR_UNION_TTL_MS = 10 * 60_000L;
+    private volatile String corridorUnionKey;
+    private volatile List<String> corridorUnionValue;
+    private volatile long corridorUnionAtMs;
 
     /**
      * 候选路线结果缓存：键 = 起终点 + 口岸状态签名（时段/货类/人工调整），
@@ -1398,15 +1421,19 @@ public class RouteService {
             // 按路径节点过滤缓存，使不同路线有不同的天气剖面
             return realWeatherView(pathNodeIds);
         }
+        // 上一轮拉取还在跑（上游慢、已走到 45s 超时边界）：直接给缓存视图，不再排队第二个任务
+        if (!realPullInFlight.compareAndSet(false, true)) {
+            return realWeatherView(pathNodeIds);
+        }
         // 真实天气拉取放独立线程并设总超时：网络慢/离线时绝不阻塞路径规划（保证"毫秒级重算"卖点）
-        ExecutorService executor = Executors.newSingleThreadExecutor();
+        // 线程池常驻复用，不再每调一次建一个（见 realPullExecutor 字段注释）
         try {
             List<String> path = pathNodeIds == null || pathNodeIds.isEmpty() ? null : pathNodeIds;
             Future<?> future;
             if (path == null) {
-                future = executor.submit((Runnable) this::pullRealWeather);
+                future = realPullExecutor.submit((Runnable) this::pullRealWeather);
             } else {
-                future = executor.submit((Runnable) () -> pullRealWeatherForPath(path));
+                future = realPullExecutor.submit((Runnable) () -> pullRealWeatherForPath(path));
             }
             try {
                 future.get(force ? 45 : 2, TimeUnit.SECONDS);
@@ -1415,10 +1442,16 @@ public class RouteService {
             } catch (Exception ignored) {
             }
         } finally {
-            executor.shutdownNow();
+            realPullInFlight.set(false);
         }
         lastRealSyncAt = now;
         return realWeatherView(pathNodeIds);
+    }
+
+    /** 进程关闭时释放常驻拉取线程（daemon 本不阻止退出，显式收干净便于测试与热重启） */
+    @PreDestroy
+    public void shutdownRealPullExecutor() {
+        realPullExecutor.shutdownNow();
     }
 
     /**
@@ -1456,6 +1489,28 @@ public class RouteService {
      * 一条都解析不出来时退回全量有名节点拉取作兜底。</p>
      */
     public List<Map<String, Object>> syncRealWeatherForCorridors(boolean force, List<String[]> odPairs) {
+        List<String> union = corridorUnion(odPairs);
+        if (union.isEmpty()) {
+            return syncRealWeather(force);
+        }
+        return syncRealWeather(force, union);
+    }
+
+    /**
+     * 关注走廊的基线沿线节点并集（带缓存）。
+     *
+     * <p>缓存条件：走廊集合逐项相同且未过 {@code CORRIDOR_UNION_TTL_MS}。基线路径不含风险
+     * 惩罚，路网未重载时同一 O/D 必然得到同一串节点，故复用与 correctness 无冲突；
+     * 一条都解析不出来时不写缓存，下轮重试（避免走廊暂不可解析时把兜底状态钉住十分钟）。</p>
+     */
+    private List<String> corridorUnion(List<String[]> odPairs) {
+        String key = corridorKey(odPairs);
+        long now = System.currentTimeMillis();
+        List<String> cached = corridorUnionValue;
+        if (cached != null && !cached.isEmpty() && key.equals(corridorUnionKey)
+                && now - corridorUnionAtMs < CORRIDOR_UNION_TTL_MS) {
+            return cached;
+        }
         LinkedHashSet<String> union = new LinkedHashSet<>();
         if (odPairs != null) {
             for (String[] od : odPairs) {
@@ -1475,9 +1530,28 @@ public class RouteService {
             }
         }
         if (union.isEmpty()) {
-            return syncRealWeather(force);
+            return List.of();
         }
-        return syncRealWeather(force, new ArrayList<>(union));
+        List<String> out = new ArrayList<>(union);
+        corridorUnionValue = out;
+        corridorUnionKey = key;
+        corridorUnionAtMs = now;
+        return out;
+    }
+
+    /** 走廊集合签名：排序后拼接，使关注顺序变化（ConcurrentHashMap 遍历序不稳定）不会误判成“走廊变了” */
+    private static String corridorKey(List<String[]> odPairs) {
+        if (odPairs == null || odPairs.isEmpty()) {
+            return "";
+        }
+        Set<String> norm = new java.util.TreeSet<>();
+        for (String[] od : odPairs) {
+            if (od == null || od.length < 2 || od[0] == null || od[1] == null) {
+                continue;
+            }
+            norm.add(od[0] + ">" + od[1]);
+        }
+        return String.join("|", norm);
     }
 
     /** 全量有名字节点（页面首载、未规划路径时的兜底） */
@@ -1516,15 +1590,18 @@ public class RouteService {
         }
         Map<String, RealWeatherService.WeatherPoint> byNode = points.stream()
                 .collect(Collectors.toMap(RealWeatherService.WeatherPoint::nodeId, p -> p));
-        weatherSimulator.clearRealRisks();
+        List<RiskSegment> risks = new ArrayList<>();
         for (RoadEdge edge : edges) {
             RealWeatherService.WeatherPoint w1 = byNode.get(edge.getFromNodeId());
             RealWeatherService.WeatherPoint w2 = byNode.get(edge.getToNodeId());
             RiskSegment risk = buildRealRisk(edge, w1, w2);
             if (risk != null) {
-                weatherSimulator.applyRealRisk(risk);
+                risks.add(risk);
             }
         }
+        // 差异写入：本轮与上轮内容逐边相同时不通知 agent（守护 60s 一轮，
+        // 旧的 clearRealRisks + 逐条 applyRealRisk 会每分钟无条件重算＋SSE 广播一整套路线）
+        weatherSimulator.syncRealRisks(risks);
     }
 
     /** 当前缓存的节点天气视图 */
@@ -1557,43 +1634,50 @@ public class RouteService {
             return null;
         }
         double penalty = 0;
-        List<String> reasons = new ArrayList<>();
+        // reasons 懒分配：本方法对全网 18.5 万条边逐条调用，绝大多数边无任何风险，
+        // 以前每条边都先 new 一个 ArrayList，守护每轮白分配 18.5 万个对象
+        StringBuilder reasons = null;
         if (w.precipitationMm() >= 50) {
             penalty = Math.max(penalty, 100);
-            reasons.add("暴雨(降水" + w.precipitationMm() + "mm/h)");
+            reasons = appendReason(reasons, "暴雨(降水" + w.precipitationMm() + "mm/h)");
         } else if (w.precipitationMm() >= 20) {
             penalty = Math.max(penalty, 20);
-            reasons.add("大雨(降水" + w.precipitationMm() + "mm/h)");
+            reasons = appendReason(reasons, "大雨(降水" + w.precipitationMm() + "mm/h)");
         }
         if (w.windKph() >= 60) {
             penalty = Math.max(penalty, 50);
-            reasons.add("大风(" + w.windKph() + "km/h)");
+            reasons = appendReason(reasons, "大风(" + w.windKph() + "km/h)");
         } else if (w.windKph() >= 40) {
             penalty = Math.max(penalty, 15);
-            reasons.add("阵风(" + w.windKph() + "km/h)");
+            reasons = appendReason(reasons, "阵风(" + w.windKph() + "km/h)");
         }
         if (w.visibilityM() < 100) {
             penalty = Math.max(penalty, 50);
-            reasons.add("大雾(能见度<100m)");
+            reasons = appendReason(reasons, "大雾(能见度<100m)");
         } else if (w.visibilityM() < 500) {
             penalty = Math.max(penalty, 20);
-            reasons.add("轻雾(能见度<500m)");
+            reasons = appendReason(reasons, "轻雾(能见度<500m)");
         }
         if (w.temperatureC() >= 35) {
             penalty = Math.max(penalty, 8);
-            reasons.add("高温(" + w.temperatureC() + "°C，冷链货损风险)");
+            reasons = appendReason(reasons, "高温(" + w.temperatureC() + "°C，冷链货损风险)");
         }
         // 台风/强对流：低气压 + 大风同时成立才算（判据集中在 TyphoonRiskRule，与沙盘模拟共用）
         TyphoonRiskRule.Verdict typhoon = TyphoonRiskRule.evaluate(w.pressureHpa(), w.windKph());
         if (typhoon.triggered()) {
             penalty = Math.max(penalty, typhoon.penalty());
-            reasons.add(typhoon.reason());
+            reasons = appendReason(reasons, typhoon.reason());
         }
         if (penalty <= 0) {
             return null;
         }
         String severity = penalty >= 100 ? "CRITICAL" : (penalty >= 30 ? "HIGH" : "MEDIUM");
-        return new RiskSegment(edge.getId(), "实时气象:" + String.join(";", reasons), severity, penalty);
+        return new RiskSegment(edge.getId(), "实时气象:" + reasons, severity, penalty);
+    }
+
+    /** 风险原因累加（分号分隔，与旧 String.join(";", reasons) 逐字同格式） */
+    private static StringBuilder appendReason(StringBuilder sb, String reason) {
+        return sb == null ? new StringBuilder(reason) : sb.append(';').append(reason);
     }
 
     private RealWeatherService.WeatherPoint worse(RealWeatherService.WeatherPoint a,

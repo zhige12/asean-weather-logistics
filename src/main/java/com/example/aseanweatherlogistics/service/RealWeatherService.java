@@ -36,6 +36,17 @@ public class RealWeatherService {
      */
     @Value("${weather.real.min-source-switch-gap-seconds:5}")
     private long minSourceSwitchGapSeconds;
+    /**
+     * 内容未变时的退避上限（秒）：上游返回与上一轮逐字相同时，下一次回源等待时长按
+     * 60s → 120s → 240s … 翻倍，封顶到本值（且始终不超 TTL，见 {@code effectiveIntervalMs}）。
+     * <p>
+     * 为什么需要：实况接口按 {@code weather.real.observation-time} 取的是一个**固定时次**，
+     * 后台守护每 60s 发一次请求，拿回来的字节完全一样——实测 21 小时 1247 次回源全部是白打。
+     * 比赛规则明确禁止暴力访问，这种「每分钟准时刷新同一批陈旧数据」的形态既浪费额度又像刷接口。
+     * 置 0 则禁用退避（行为与改动前一致，每源固定 min-interval 回源）。
+     */
+    @Value("${weather.real.unchanged-backoff-max-seconds:240}")
+    private long unchangedBackoffMaxSeconds;
 
     private final WeatherSourceService sourceService;
     private final Map<String, CachedWeather> cache = new ConcurrentHashMap<>();
@@ -71,6 +82,14 @@ public class RealWeatherService {
          * 要回答「切了这个源之后到底取到没取到」，只有这个单调的时间戳靠得住（界面与合规脚本都读它）。
          */
         volatile long lastSuccessAtMs = 0;
+        /**
+         * 上一次成功回源拿到内容的签名（时序无关的粗粒度指纹）。
+         * 与 {@code lastRequestAtMs} 分开记，目的是把「上游有没有真的变」与
+         * 「我们有没有发请求」两件独立的事分开：前者才能决定下一轮该不该少打一点。
+         */
+        volatile String lastSignature;
+        /** 连续拿到相同内容的轮数（退避指数：有效间隔 = 基础间隔 × 2^streak，上限见配置） */
+        volatile int unchangedStreak;
     }
 
     private final Map<String, SourceState> states = new ConcurrentHashMap<>();
@@ -162,8 +181,9 @@ public class RealWeatherService {
             cntThrottleBlocked++;
             return cachedFor(nodes);
         }
-        // 该源最小请求间隔未到 → 直接用缓存，不发请求
-        if (now - st.lastRequestAtMs < minRequestIntervalMs()) {
+        // 该源最小请求间隔未到 → 直接用缓存，不发请求（内容未变时该窗口会被退避放大，见 effectiveIntervalMs）
+        long intervalMs = effectiveIntervalMs(st);
+        if (now - st.lastRequestAtMs < intervalMs) {
             cntThrottleBlocked++;
             return cachedFor(nodes);
         }
@@ -183,6 +203,14 @@ public class RealWeatherService {
             st.lastSuccessAtMs = now;
             st.consecutiveFailures = 0;
             st.circuitOpenUntilMs = 0;
+            // 内容逐字未变（固定时次的实况接口就是这种情况）→ 指数退避，下轮少打一次上游
+            String sig = signatureOf(fresh);
+            if (sig.equals(st.lastSignature)) {
+                st.unchangedStreak++;
+            } else {
+                st.unchangedStreak = 0;
+                st.lastSignature = sig;
+            }
             for (WeatherPoint p : fresh) {
                 cache.put(p.nodeId(), new CachedWeather(p, p.fetchedAt(), sourceId));
             }
@@ -207,9 +235,15 @@ public class RealWeatherService {
      * 切换数据源后清掉「新选这个源自己」的失败计数与熔断窗口，使它有机会立刻被尝试一次
      * （否则上一轮 Token 失败留下的静默期会让切源看起来"切了没反应"）。
      * <p>
-     * 合规防护：只清该源的失败/静默状态，**不**清它的回源时间戳——每个源仍有自己的
+     * 合规防护：只清该源的失败/静默状态与内容退避，**不**清它的回源时间戳——每个源仍有自己的
      * min-request-interval 与跨源 min-source-switch-gap 两道闸，反复切源仍是变相暴力访问不来的。
      * 同一数据源的重复重置另外限频（两次生效至少间隔 min-request-interval）。
+     * <p>
+     * 退避计数一并清零：不清的话，一个在后台静默退了 4 分钟的源被切回来时，
+     * 用户「切完就点拉取」会撞在一个比基础窗口大几倍的闸上，看起来就是“切了没反应”——
+     * 那正是早先靠 resetThrottle 修掉过的体验缺陷，不能由退避重新引入。
+     * 注意这不等于放宽额度：两道硬闸（本源基础间隔 + 跨源间隔）仍在，
+     * 重置自身也限频，能提前到的只有一轮「本来就该允许」的尝试。
      */
     public synchronized void resetThrottle(String sourceId) {
         if (sourceId == null || sourceId.isBlank()) {
@@ -223,6 +257,8 @@ public class RealWeatherService {
         st.lastResetAtMs = now;
         st.consecutiveFailures = 0;
         st.circuitOpenUntilMs = 0;
+        st.unchangedStreak = 0;
+        st.lastSignature = null;
     }
 
     /** 频度自检：审计计数与守护参数（不含密钥/Token），供合规检查脚本断言节流生效 */
@@ -233,6 +269,13 @@ public class RealWeatherService {
         m.put("throttleBlocked", cntThrottleBlocked);
         m.put("circuitOpens", cntCircuitOpens);
         m.put("minIntervalSeconds", Math.max(1, minRequestIntervalSeconds));
+        // 当前选中源本轮实际生效的回源窗口（内容未变时会被退避放大）与已退避轮数
+        WeatherProvider sel = sourceService.current();
+        SourceState selState = sel == null ? null : stateOf(sel.id());
+        m.put("effectiveIntervalSeconds", selState == null
+                ? Math.max(1, minRequestIntervalSeconds) : effectiveIntervalMs(selState) / 1000);
+        m.put("unchangedStreak", selState == null ? 0 : selState.unchangedStreak);
+        m.put("unchangedBackoffMaxSeconds", Math.max(0, unchangedBackoffMaxSeconds));
         m.put("minSourceSwitchGapSeconds", Math.max(1, minSourceSwitchGapSeconds));
         m.put("secondsSinceLastUpstream", lastAnyRequestAtMs == 0 ? null : (now - lastAnyRequestAtMs) / 1000);
         m.put("circuitOpen", selectedSourceCircuitOpen(now));
@@ -247,6 +290,9 @@ public class RealWeatherService {
             SourceState st = e.getValue();
             Map<String, Object> one = new LinkedHashMap<>();
             one.put("secondsSinceLastUpstream", st.lastRequestAtMs == 0 ? null : (now - st.lastRequestAtMs) / 1000);
+            // 该源当前退避到多长的回源窗口（合规自查看这个就知道“十分钟没回源”是退避还是卡住）
+            one.put("effectiveIntervalSeconds", effectiveIntervalMs(st) / 1000);
+            one.put("unchangedStreak", st.unchangedStreak);
             // 该源最近一次成功取数距今多久（null = 从来没成功拉过）：切源是否真的生效看这个
             one.put("secondsSinceLastSuccess", st.lastSuccessAtMs == 0 ? null : (now - st.lastSuccessAtMs) / 1000);
             one.put("circuitOpen", now < st.circuitOpenUntilMs);
@@ -269,6 +315,52 @@ public class RealWeatherService {
 
     private long minRequestIntervalMs() {
         return Math.max(1, minRequestIntervalSeconds) * 1000L;
+    }
+
+    /**
+     * 该源本轮实际生效的最小回源间隔：基础间隔按「连续拿到相同内容的轮数」指数退避。
+     * <p>
+     * 两道上限：① 配置上限 {@code unchanged-backoff-max-seconds}；② **缓存 TTL**。
+     * 第二道必需：退避到缓存过期之后才回源，会让 {@code cachedFor} 返回空、实时风险被整体清空，
+     * 界面从「有数据」变成「无数据」——省请求不能以掉数据为代价，故夹到 {@code TTL - 基础间隔}。
+     */
+    private long effectiveIntervalMs(SourceState st) {
+        long base = minRequestIntervalMs();
+        if (unchangedBackoffMaxSeconds <= 0) {
+            return base; // 置 0 关闭退避
+        }
+        long ceiling = Math.min(Math.max(base, unchangedBackoffMaxSeconds * 1000L),
+                Math.max(base, ttlMinutes * 60_000L - base));
+        int streak = Math.min(st.unchangedStreak, 16);
+        long scaled = base << streak;
+        if (scaled <= 0 || scaled > ceiling) {
+            return ceiling;
+        }
+        return scaled;
+    }
+
+    /**
+     * 一组天气点的粗粒度内容签名，用于判定「这次回源拿到的和上次是否一模一样」。
+     * <p>
+     * 两个要点：① **累加而非按序拼接**——同一批节点在不同调用里顺序可能不同（守护走的是多条
+     * 走廊的并集），按序拼接会把「顺序变了」误判成「内容变了」，退避永远失效；
+     * ② **不含 fetchedAt**——那是本地时间戳，每次必不同，包含进去等于永远判为有变化。
+     * 各要素按判据精度取整（降水 0.1mm、风 1km/h、能见度 1m、气压 1hPa、气温 0.1°C），
+     * 亚精度抖动不该打断退避。
+     */
+    private static String signatureOf(List<WeatherPoint> pts) {
+        long h = 0;
+        for (WeatherPoint p : pts) {
+            long ph = 17;
+            ph = ph * 31 + (p.nodeId() == null ? 0 : p.nodeId().hashCode());
+            ph = ph * 31 + Math.round(p.precipitationMm() * 10);
+            ph = ph * 31 + Math.round(p.windKph());
+            ph = ph * 31 + Math.round(p.visibilityM());
+            ph = ph * 31 + Math.round(p.pressureHpa());
+            ph = ph * 31 + Math.round(p.temperatureC() * 10);
+            h += ph;
+        }
+        return pts.size() + ":" + h;
     }
 
     /** 跨源最小回源间隔：不超过本源的 min-request-interval，默认 5 秒 */

@@ -1,0 +1,66 @@
+#!/bin/sh
+# 气象数据 Token 防泄漏闸门（提交前拦截）。
+# 服务方规则：Token 由服务提供方统一分配，严禁公开至代码仓库，违者封号。
+# 本钩子只做两件事，且全程不打印 Token 本身：
+#   (a) .env.local 里当前生效的 Token 明文出现在暂存索引中 -> 拒绝提交
+#   (b) 暂存内容里给 WEATHER_REAL_TOKEN 写了字面值（${WEATHER_REAL_TOKEN:} 这类占位符除外）-> 拒绝提交
+# 另对天地图密钥池 / DeepSeek Key 做“只提醒不拦截”检查（团队口径：这两类可容忍）。
+# 安装：copy tools/git-hooks/pre-commit .git/hooks/pre-commit   （Git for Windows 会用自带 sh 执行）
+set -u
+
+root=$(git rev-parse --show-toplevel) || exit 1
+env_file="$root/.env.local"
+
+read_secret() {
+  # $1 = 变量名；输出该变量的值，去掉 CR / 引号 / 首尾空格
+  [ -f "$env_file" ] || return 0
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$env_file" 2>/dev/null \
+    | head -n 1 | tr -d '\r' | tr -d '"' | tr -d "'" \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+block=""
+
+token=$(read_secret WEATHER_REAL_TOKEN)
+if [ -n "$token" ]; then
+  hit=$(git grep --cached -l -F "$token" 2>/dev/null)
+  if [ -n "$hit" ]; then
+    block="$block
+  - 索引中的文件含有当前气象 Token 明文：$(printf '%s' "$hit" | tr '\n' ' ')"
+  fi
+fi
+
+# 字面赋值检查只看新增行，避免历史内容误报；占位符 ${WEATHER_REAL_TOKEN:...} 不算。
+lit=$(git diff --cached -U0 2>/dev/null | grep '^+' | grep 'WEATHER_REAL_TOKEN' \
+      | grep -E 'WEATHER_REAL_TOKEN[[:space:]]*=[[:space:]]*[^$[:space:]]' \
+      | grep -v '\${WEATHER_REAL_TOKEN' | head -n 3)
+if [ -n "$lit" ]; then
+  block="$block
+  - 暂存内容里给 WEATHER_REAL_TOKEN 直接写了值（值本身不回显）。
+    正确写法：properties 用 \${WEATHER_REAL_TOKEN:}，真值只留 .env.local（已被 gitignore）。"
+fi
+
+if [ -n "$block" ]; then
+  # First line is ASCII on purpose: Windows consoles mangle UTF-8, and a blocked
+  # commit whose reason renders as mojibake gets bypassed with --no-verify.
+  cat >&2 <<'MSG'
+
+=== COMMIT BLOCKED: weather data token must not enter the repository ===
+MSG
+  printf '%s\n' "$block" >&2
+  cat >&2 <<'MSG'
+Reason above (Chinese) may render as mojibake in this console - the rule is simple:
+WEATHER_REAL_TOKEN lives only in .env.local (gitignored). Fix it, or bypass (not recommended):
+git commit --no-verify
+MSG
+  exit 1
+fi
+
+for k in TIANDITU_KEYS DEEPSEEK_FALLBACK_KEY; do
+  v=$(read_secret "$k")
+  [ -n "$v" ] || continue
+  h=$(git grep --cached -l -F "$v" 2>/dev/null)
+  [ -n "$h" ] && printf '提醒（不拦截）：%s 明文出现在索引中：%s\n' "$k" "$(printf '%s' "$h" | tr '\n' ' ')"
+done
+
+exit 0
