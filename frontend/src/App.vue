@@ -210,6 +210,11 @@
           <div v-else class="muted">暂无实时数据，点击拉取</div>
         </section>
 
+        <!-- 气象专用风险模型 AMRI：把「多要素气象 → 单一可解释风险指数」显式建模，
+             三个视图常驻——标定曲线（S 型响应 + 分档）、实时工作点（最不利点 + 逐灾种贡献）、
+             短临预报（官方 3h 预报多时效降雨驱动的指数演变）。自包含拉数，随起终点变化刷新。 -->
+        <AmriPanel ref="amriRef" :origin-id="originId" :destination-id="destinationId" />
+
         <section v-if="routeResult && routeResult.route" class="card">
           <h3>路线状态
             <span class="route-state" :class="routeStateClass">{{ routeStateText }}</span>
@@ -531,6 +536,7 @@ import ETAIndicator from './components/ETAIndicator.vue';
 import BriefingPanel from './components/BriefingPanel.vue';
 import CarbonCalc from './components/CarbonCalc.vue';
 import DecisionSandbox from './components/DecisionSandbox.vue';
+import AmriPanel from './components/AmriPanel.vue';
 import TaskDispatchPanel from './components/TaskDispatchPanel.vue';
 import AgentPanel from './components/AgentPanel.vue';
 import CopilotPanel from './components/CopilotPanel.vue';
@@ -583,7 +589,7 @@ const WEATHER_SOURCE_SHORT = {
 export default {
   components: {
     MapView, RiskStrip, ETAIndicator, BriefingPanel, CarbonCalc,
-    DecisionSandbox, TaskDispatchPanel, AgentPanel, OutreachPanel,
+    DecisionSandbox, AmriPanel, TaskDispatchPanel, AgentPanel, OutreachPanel,
     PlatformConfigurator, DecisionLogTimeline, PlaceInput, CopilotPanel, AiBall
   },
   data() {
