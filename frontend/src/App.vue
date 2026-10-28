@@ -1165,6 +1165,8 @@ export default {
         this.weatherSource = 'offline';
       } finally {
         this.weatherLoading = false;
+        // 实况换批了，AMRI 工作点同步重算（走 8 秒节流，不另加请求风暴）
+        this.pingAmri(false);
       }
     },
     /**
@@ -1294,6 +1296,14 @@ export default {
           { nodeId: 'HN', nodeName: '河内', temperatureC: 33, precipitationMm: 0.5, windKph: 8, visibilityM: 10000 }
         ];
       }
+      // 15 秒心跳也带 AMRI 一下（非 force：面板内 8 秒节流自控频率）
+      this.pingAmri(false);
+    },
+    /** 通知 AMRI 面板/预警海报重拉工作点：沙盘/灾害卡/实况刷新都经这里，force=用户动作立刻跟 */
+    pingAmri(force = false) {
+      try {
+        window.dispatchEvent(new CustomEvent('amri-refresh', { detail: { force } }));
+      } catch (e) { /* 老内核无 CustomEvent：面板仍按挂载/切路线刷新 */ }
     },
     async planCrossBorder() {
       try {
@@ -1655,6 +1665,8 @@ export default {
       }
       // 沙盘状态变化（雨量调整/熔断/水运禁航）→ AI 决策面板旧方案立即失效并重算
       if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.notifyRiskChanged();
+      // AMRI 面板跟着沙盘动：滑杆/剧本/台风直写的模拟值已叠进 /model/live，立即重拉工作点
+      this.pingAmri(true);
       // 水运断面：禁航/恢复通航时间线（双向切换场景B，仅在状态翻转时推送）
       if (data.water) {
         if (this._lastWaterBlocked !== undefined && data.water.blocked !== this._lastWaterBlocked) {
@@ -1684,6 +1696,7 @@ export default {
       this.refreshRisks();
       if (this.$refs.sandboxRef) this.$refs.sandboxRef.refresh();
       this.refreshDecisionLog();
+      this.pingAmri(true);
       this.pushTimeline('调度舱指令执行', `自然语言调度舱落地：${tool}`, 'info');
     },
     /**
@@ -1996,6 +2009,8 @@ export default {
      */
     async onQuickInject(payload) {
       if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.notifyRiskChanged();
+      // 灾害卡注入同步改了沙盘滑杆参数（后端 applyScenario 里 setSimParams），AMRI 叠着跟
+      this.pingAmri(true);
       await this.refreshRisks();
       if (payload && payload.clearAll) {
         this.pushTimeline('清除全部风险', '已清空所有灾害注入，路线恢复常态评估', 'ok');

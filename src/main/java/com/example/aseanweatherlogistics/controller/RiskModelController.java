@@ -2,6 +2,7 @@ package com.example.aseanweatherlogistics.controller;
 
 import com.example.aseanweatherlogistics.service.AmriRiskModel;
 import com.example.aseanweatherlogistics.service.ContestForecastService;
+import com.example.aseanweatherlogistics.service.DecisionSandboxService;
 import com.example.aseanweatherlogistics.service.RealWeatherService;
 import com.example.aseanweatherlogistics.service.RouteService;
 import java.util.ArrayList;
@@ -31,6 +32,11 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>数据来源与节流沿用既有链路：实时点走 {@link RouteService#syncRealWeatherForRoute}（自带按源节流/退避/熔断），
  * 预报走 {@link ContestForecastService#fetchRain6h}（30 分钟窗口 + 熔断）。上游不可用时如实返回
  * {@code available=false} 与原因，绝不把「没数据」粉饰成「无风险」。
+ *
+ * <p>与决策沙盘的联动：沙盘处于模拟模式且已推送时，{@link DecisionSandboxService#simWeatherOverlay()}
+ * 会给出友谊关/芒街两断面的滑杆模拟值（与 AI 灾种卡同一叠加口径），这里把它叠加到对应气象点上，
+ * 使「拖滑杆 → AMRI 工作点沿 S 曲线爬升」真实成立；被叠加的点逐个标 {@code sandboxSim=true}，
+ * 绝不把模拟值冒充实测值。
  */
 @RestController
 @RequestMapping("/api/risk")
@@ -42,13 +48,16 @@ public class RiskModelController {
     private final RouteService routeService;
     private final RealWeatherService realWeatherService;
     private final ContestForecastService contestForecastService;
+    private final DecisionSandboxService sandbox;
 
     public RiskModelController(RouteService routeService,
                                RealWeatherService realWeatherService,
-                               ContestForecastService contestForecastService) {
+                               ContestForecastService contestForecastService,
+                               DecisionSandboxService sandbox) {
         this.routeService = routeService;
         this.realWeatherService = realWeatherService;
         this.contestForecastService = contestForecastService;
+        this.sandbox = sandbox;
     }
 
     /** 模型规格：名称/公式/参数表/分档/标定曲线。纯静态，无需气象数据即可绘制。 */
@@ -70,9 +79,11 @@ public class RiskModelController {
     public Map<String, Object> live(@RequestParam(required = false) String originId,
                                     @RequestParam(required = false) String destinationId) {
         List<Map<String, Object>> weather = routeService.syncRealWeatherForRoute(false, originId, destinationId);
+        // 沙盘模拟模式下的滑杆叠加（与 AI 灾种卡同一数据通路）：友谊关/芒街两点取模拟值
+        Map<String, Map<String, Object>> overlay = overlayByNode();
         List<Map<String, Object>> ranked = new ArrayList<>();
         for (Map<String, Object> p : weather) {
-            Map<String, Object> one = evalPoint(p);
+            Map<String, Object> one = evalPoint(p, overlay.get(str(p.get("nodeId"))));
             if (one != null) {
                 ranked.add(one);
             }
@@ -88,6 +99,11 @@ public class RiskModelController {
         out.put("servedSource", realWeatherService.servedSource());
         out.put("servedSourceLabel", sourceLabel(realWeatherService.servedSource()));
         out.put("servedFresh", realWeatherService.servedFresh());
+        boolean simApplied = ranked.stream().anyMatch(m -> Boolean.TRUE.equals(m.get("sandboxSim")));
+        out.put("sandboxSim", simApplied);
+        if (simApplied) {
+            out.put("sandboxNote", "友谊关/芒街取沙盘滑杆模拟值（降雨为未来6h累计口径，与灾种卡同口径），其余点为实时观测");
+        }
         out.put("generatedAt", System.currentTimeMillis());
         if (ranked.isEmpty()) {
             out.put("message", "暂无沿线实时气象点（数据源未就绪或已降级），无法计算工作点指数");
@@ -112,9 +128,13 @@ public class RiskModelController {
             out.put("message", "无沿线气象基线，无法起报短临序列");
             return out;
         }
+        // 沙盘叠加：被滑杆接管的点其风/能见度/气温基线改用模拟值（降雨仍由官方预报逐时效驱动，
+        // 滑杆不能规定未来下多大雨——这点语义在回包注释里向界面说清）
+        Map<String, Map<String, Object>> overlay = overlayByNode();
         // 用实况点坐标构造预报取数点位，并保留各点的风/能见度/气温基线，供逐时效合成 AMRI
         List<ContestForecastService.ForecastPoint> fps = new ArrayList<>();
         Map<String, Map<String, Object>> baseById = new LinkedHashMap<>();
+        boolean simApplied = false;
         for (Map<String, Object> p : weather) {
             String id = str(p.get("nodeId"));
             if (id == null) {
@@ -122,8 +142,17 @@ public class RiskModelController {
             }
             double lat = num(p.get("latitude"));
             double lon = num(p.get("longitude"));
-            fps.add(new ContestForecastService.ForecastPoint(id, str(p.get("nodeName")), lat, lon));
-            baseById.put(id, p);
+            Map<String, Object> base = p;
+            Map<String, Object> ov = overlay.get(id);
+            if (ov != null) {
+                base = new LinkedHashMap<>(p);
+                base.put("windKph", ov.get("windKph"));
+                base.put("visibilityM", ov.get("visibilityM"));
+                base.put("temperatureC", ov.get("temperatureC"));
+                simApplied = true;
+            }
+            fps.add(new ContestForecastService.ForecastPoint(id, str(base.get("nodeName")), lat, lon));
+            baseById.put(id, base);
         }
         if (fps.isEmpty()) {
             out.put("available", false);
@@ -191,6 +220,10 @@ public class RiskModelController {
         }
         out.put("available", true);
         out.put("series", series);
+        out.put("sandboxSim", simApplied);
+        if (simApplied) {
+            out.put("sandboxNote", "沙盘滑杆只接管叠加过的点的现在工作点与风/能见度/气温基线；+3/+6h 降雨仍由官方预报驱动");
+        }
         // 走廊级逐时效峰值（各时效取所有点的最大 AMRI），用于一根线看整条走廊的短临走势
         out.put("corridorPeak", corridorPeak(fr, baseById, hours));
         out.put("servedFresh", fr.servedFresh());
@@ -198,16 +231,25 @@ public class RiskModelController {
         return out;
     }
 
-    /** 单点：取四要素算 AMRI，返回可展示的工作点视图；无有效要素则返回 null。 */
-    private Map<String, Object> evalPoint(Map<String, Object> p) {
-        double rain = num(p.get("precipitationMm"));
-        double wind = num(p.get("windKph"));
-        double vis = num(p.get("visibilityM"));
-        double temp = num(p.get("temperatureC"));
+    /** 单点：取四要素算 AMRI，返回可展示的工作点视图；无有效要素则返回 null。
+     *  simOverlay 非空时该点四要素改取沙盘滑杆值（逐点标 sandboxSim，不冒充实测）。 */
+    private Map<String, Object> evalPoint(Map<String, Object> p, Map<String, Object> simOverlay) {
+        Map<String, Object> src = p;
+        if (simOverlay != null) {
+            src = new LinkedHashMap<>(p);
+            src.put("precipitationMm", simOverlay.get("precipitationMm"));
+            src.put("windKph", simOverlay.get("windKph"));
+            src.put("visibilityM", simOverlay.get("visibilityM"));
+            src.put("temperatureC", simOverlay.get("temperatureC"));
+        }
+        double rain = num(src.get("precipitationMm"));
+        double wind = num(src.get("windKph"));
+        double vis = num(src.get("visibilityM"));
+        double temp = num(src.get("temperatureC"));
         AmriRiskModel.Result r = AmriRiskModel.evaluate(rain, wind, vis, temp);
         Map<String, Object> one = new LinkedHashMap<>();
-        one.put("nodeId", p.get("nodeId"));
-        one.put("nodeName", p.get("nodeName"));
+        one.put("nodeId", src.get("nodeId"));
+        one.put("nodeName", src.get("nodeName"));
         one.put("rainMmH", round(rain));
         one.put("windKph", round(wind));
         one.put("visibilityM", round(vis));
@@ -215,6 +257,7 @@ public class RiskModelController {
         one.put("index", r.index());
         one.put("severity", r.severity());
         one.put("contributions", r.contributions());
+        one.put("sandboxSim", simOverlay != null);
         return one;
     }
 
@@ -249,6 +292,22 @@ public class RiskModelController {
             peak.add(one);
         }
         return peak;
+    }
+
+    /** 沙盘模拟叠加按 nodeId 索引（仅模拟模式且已推送时非空）；取数失败退回空图，不影响实况结果。 */
+    private Map<String, Map<String, Object>> overlayByNode() {
+        Map<String, Map<String, Object>> out = new LinkedHashMap<>();
+        try {
+            for (Map<String, Object> w : sandbox.simWeatherOverlay().values()) {
+                Object id = w.get("nodeId");
+                if (id != null) {
+                    out.put(String.valueOf(id), w);
+                }
+            }
+        } catch (Exception ignored) {
+            // 沙盘不可用时静默退回纯实况口径
+        }
+        return out;
     }
 
     private String sourceLabel(String src) {

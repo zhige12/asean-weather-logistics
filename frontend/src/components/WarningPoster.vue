@@ -15,6 +15,9 @@
       <button v-if="posterUrl" class="btn outline" @click="download">下载 PNG</button>
     </div>
     <div v-if="errorMsg" class="poster-err">{{ errorMsg }}</div>
+    <div v-if="live && live.sandboxSim" class="muted poster-sim">
+      当前走廊含<b>沙盘模拟值</b>（滑杆推演、非实测），海报页脚已如实标注。
+    </div>
     <div v-if="posterUrl" class="poster-preview">
       <img :src="posterUrl" alt="双语预警海报" @click="openBig" />
       <div class="muted poster-tip">点击海报可放大查看 · 底部「下载 PNG」保存分享</div>
@@ -71,7 +74,13 @@ export default {
   data() {
     return { busy: false, posterUrl: '', errorMsg: '', live: null, model: null };
   },
+  mounted() {
+    // 已生成过海报时，沙盘滑杆/灾害卡变动就静默重绘：海报跟得上研判，不靠手动刷新
+    this._onAmriEvent = () => { if (this.posterUrl && !this.busy) this.generate(); };
+    window.addEventListener('amri-refresh', this._onAmriEvent);
+  },
   beforeUnmount() {
+    if (this._onAmriEvent) window.removeEventListener('amri-refresh', this._onAmriEvent);
     if (this.posterUrl) URL.revokeObjectURL(this.posterUrl);
   },
   computed: {
@@ -227,8 +236,18 @@ export default {
       ctx.fillStyle = '#b0bec5';
       ctx.font = '18px "Microsoft YaHei", sans-serif';
       const now = new Date().toLocaleString('zh-CN', { hour12: false });
-      ctx.fillText(`数据来源 Nguồn: ${src} · 模型 Mô hình: AMRI`, 40, H - 66);
-      ctx.fillText(`生成 Thời gian: ${now} · 东盟气象路网风险指数 (ASEAN Meteorological Route Index)`, 40, H - 40);
+      let fy = H - 66;
+      if (this.live.sandboxSim) {
+        // 如实标注：滑杆推演值不是实测，海报流转到人手里也不能假装是官方数据
+        ctx.fillStyle = '#b71c1c';
+        ctx.font = 'bold 18px "Microsoft YaHei", sans-serif';
+        ctx.fillText('＊含沙盘模拟值（非实测）/ Giá trị mô phỏng (không phải thực đo)', 40, fy);
+        fy += 26;
+        ctx.fillStyle = '#b0bec5';
+        ctx.font = '18px "Microsoft YaHei", sans-serif';
+      }
+      ctx.fillText(`数据来源 Nguồn: ${src} · 模型 Mô hình: AMRI`, 40, fy);
+      ctx.fillText(`生成 Thời gian: ${now} · 东盟气象路网风险指数 (ASEAN Meteorological Route Index)`, 40, fy + 26);
 
       // 导出
       if (this.posterUrl) URL.revokeObjectURL(this.posterUrl);
@@ -285,6 +304,7 @@ function sevColorFor(membership) {
 
 <style scoped>
 .poster-card .poster-hint { line-height: 1.6; }
+.poster-sim { margin-top: 6px; color: #6d28d9; }
 .poster-err { color: #c62828; font-size: 12px; margin-top: 6px; }
 .poster-preview { margin-top: 10px; }
 .poster-preview img {

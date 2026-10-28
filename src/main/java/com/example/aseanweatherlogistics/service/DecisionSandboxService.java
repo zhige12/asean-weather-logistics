@@ -298,6 +298,24 @@ public class DecisionSandboxService {
         out.put(s.edgeId, w);
     }
 
+    /**
+     * 把"绕过滑杆直接写断面"的路径（降雨滑杆/剧本推送/模拟台风按钮）的当前生效值
+     * 同步回滑杆参数盒 {@link #sim}：{@link #simWeatherOverlay()} 在模拟模式下读的是参数盒，
+     * 不同步则 AI 灾种卡与 AMRI 面板跟不上这些入口的赋值；且台风状态未激活时把
+     * 气压/风回落中性值（1013hPa/20km/h，与 {@link #neutralSection()} 同口径），
+     * 避免历史台风残值继续留在沙盘叠加里。
+     */
+    private void syncSimFromSections() {
+        this.sim = new SimParams(pullSection(sim.ygg(), ygg), pullSection(sim.mc(), mc));
+    }
+
+    /** 从断面当前生效值拉回一个参数盒：降雨取 forecastMm；台风激活时气压/风取台风值，否则中性。 */
+    private static SectionSim pullSection(SectionSim cur, Section s) {
+        double pressure = s.typhoonActive ? s.typhoonPressureHpa : 1013.0;
+        double wind = s.typhoonActive ? s.typhoonWindKph : 20.0;
+        return new SectionSim(s.forecastMm, pressure, wind, cur.tempC(), cur.humidityPct(), cur.cloudPct(), cur.visibilityM());
+    }
+
     /** 把模拟参数落到断面：降雨直接赋值，气压/风速统一走 TyphoonRiskRule 判定 */
     private void applySimParams() {
         this.pushed = true;
@@ -352,6 +370,8 @@ public class DecisionSandboxService {
             mc.typhoonPressureHpa = SCRIPT_TYPHOON_PRS_HPA;
             mc.typhoonWindKph = SCRIPT_TYPHOON_WIND_KPH;
         }
+        // 剧本直写断面后同步滑杆参数盒，让沙盘叠加（AI灾种卡 / AMRI 面板）读到剧本值
+        syncSimFromSections();
         if (typhoon && rain) {
             this.rainDetail = String.format("剧本值 降雨%.0f/%.0fmm + 芒街台风%.0fhPa/%.0fkm/h",
                     ygg.forecastMm, mc.forecastMm, SCRIPT_TYPHOON_PRS_HPA, SCRIPT_TYPHOON_WIND_KPH);
@@ -477,6 +497,7 @@ public class DecisionSandboxService {
         s.typhoonActive = true;
         s.typhoonPressureHpa = pressureHpa;
         s.typhoonWindKph = windKph;
+        syncSimFromSections();
         // 台风是模拟输入，官方实况要素不再适用，清掉避免界面显示过期要素
         this.liveElements = Map.of();
         this.liveWindText = Map.of();
@@ -499,6 +520,7 @@ public class DecisionSandboxService {
         s.typhoonActive = false;
         s.typhoonPressureHpa = 1013.0;
         s.typhoonWindKph = 0.0;
+        syncSimFromSections();
         decisionLog.log("WEATHER", "解除模拟台风", s.name + " 台风状态已清除，回到按降雨量判定");
         return evaluate("解除模拟台风");
     }
@@ -529,6 +551,10 @@ public class DecisionSandboxService {
         this.rainSource = RAIN_SOURCE_SIM;
         this.mode = MODE_SIM;
         this.rainDetail = "调度员调整滑块";
+        // 降雨滑杆走的是断面直写（不经 setSimParams）：不同步参数盒的话，
+        // 沙盘叠加读到的还是旧滑杆值（AI灾种卡/AMRI不跟降雨滑杆），且下一次
+        // applySimParams 会把 forecastMm 拉回旧值、抹掉刚拖的雨量
+        syncSimFromSections();
         return evaluate("调度员调整决策沙盘");
     }
 

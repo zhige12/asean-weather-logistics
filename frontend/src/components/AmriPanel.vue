@@ -3,9 +3,11 @@
     <h3>
       气象风险模型 · {{ spec.name || 'AMRI' }}
       <span class="route-state" :class="stateClass">{{ stateText }}</span>
+      <span v-if="live.sandboxSim" class="sim-chip" :title="live.sandboxNote || '沙盘滑杆模拟值叠加中'">沙盘模拟叠加</span>
     </h3>
     <div class="muted amri-def">{{ spec.fullName }}</div>
     <div class="amri-formula" :title="spec.membership">{{ spec.formula }}</div>
+    <div v-if="live.sandboxSim && live.sandboxNote" class="sim-note">{{ live.sandboxNote }}；拖动决策沙盘滑杆，下方工作点与曲线圆点实时跟随。</div>
 
     <div class="amri-tabs">
       <button :class="{ on: tab === 'curve' }" @click="tab = 'curve'">标定曲线</button>
@@ -51,7 +53,7 @@
         <div class="muted curve-cap">
           {{ activeHazard.label }}（{{ activeHazard.unit }}）→ 单项风险指数响应曲线；
           半程点 x0={{ activeHazard.x0 }}、陡峭度 k={{ activeHazard.k }}、权重 w={{ activeHazard.weight }}。
-          <template v-if="liveMark"> 圆点为当前走廊最不利点实况值。</template>
+          <template v-if="liveMark"> 圆点为当前走廊最不利点{{ live.worst && live.worst.sandboxSim ? '（沙盘模拟值）' : '实况值' }}。</template>
         </div>
       </div>
       <div v-else class="muted">标定曲线尚在加载…</div>
@@ -68,6 +70,7 @@
           <div class="worst-meta">
             <div class="worst-name">{{ live.worst.nodeName || live.worst.nodeId }}
               <span class="sev-badge" :style="{ background: sevColor(live.worst.severity) }">{{ sevText(live.worst.severity) }}</span>
+              <span v-if="live.worst.sandboxSim" class="sim-chip">模拟值</span>
             </div>
             <div class="muted">全走廊 {{ live.count }} 个沿线气象点中最不利 · 数据源 {{ live.servedSourceLabel || live.servedSource }}</div>
           </div>
@@ -85,7 +88,7 @@
           <div class="pl-title">沿线点风险排名（Top {{ Math.min(6, live.points.length) }}）</div>
           <div v-for="(p, i) in live.points.slice(0, 6)" :key="'p' + i" class="pl-row">
             <span class="pl-rank">{{ i + 1 }}</span>
-            <span class="pl-name">{{ p.nodeName || p.nodeId }}</span>
+            <span class="pl-name">{{ p.nodeName || p.nodeId }}<i v-if="p.sandboxSim" class="pl-sim" title="沙盘滑杆模拟值">拟</i></span>
             <span class="pl-bar"><i :style="{ width: p.index + '%', background: sevColor(p.severity) }"></i></span>
             <span class="pl-idx" :style="{ color: sevColor(p.severity) }">{{ p.index }}</span>
           </div>
@@ -246,6 +249,13 @@ export default {
   },
   mounted() {
     this.loadAll();
+    // 沙盘滑杆/灾害卡/实况刷新都会广播 amri-refresh：工作点跟着动，面板才不是空壳
+    // force（用户动作）立刻重拉；15 秒心跳类的非 force 走 8 秒节流自控频率
+    this._onAmriEvent = (e) => this.loadLive(true, !!(e && e.detail && e.detail.force));
+    window.addEventListener('amri-refresh', this._onAmriEvent);
+  },
+  beforeUnmount() {
+    if (this._onAmriEvent) window.removeEventListener('amri-refresh', this._onAmriEvent);
   },
   watch: {
     originId() { this.loadAll(); },
@@ -254,6 +264,7 @@ export default {
   methods: {
     async loadAll() {
       this.loading = true;
+      this._lastLiveAt = Date.now();
       const od = { originId: this.originId, destinationId: this.destinationId };
       try {
         const [m, l, n] = await Promise.all([
@@ -269,6 +280,24 @@ export default {
       } finally {
         this.loading = false;
       }
+    },
+    /**
+     * 轻刷新：只重算工作点（含可选的短临序列），模型规格不重拉。
+     * 供父页在沙盘变更/灾害卡/实况刷新后调用；默认 8 秒节流防 15 秒心跳叠加拖滑块连环触发，
+     * 沙盘提交这类用户动作传 force=true 立刻跟。后台失败静默：保留旧工作点，不打断演示。
+     */
+    async loadLive(withNowcast = false, force = false) {
+      const now = Date.now();
+      if (!force && now - (this._lastLiveAt || 0) < 8000) return;
+      this._lastLiveAt = now;
+      const od = { originId: this.originId, destinationId: this.destinationId };
+      try {
+        const jobs = [axios.get('/api/risk/model/live', { params: od })];
+        if (withNowcast) jobs.push(axios.get('/api/risk/model/nowcast', { params: od }));
+        const [l, n] = await Promise.all(jobs);
+        this.live = l.data || { points: [] };
+        if (withNowcast && n) this.nowcast = n.data || { available: false };
+      } catch (e) { /* 后台刷新失败：下一次广播/刷新会再试 */ }
     },
     sevColor(sev) {
       return { CRITICAL: '#F44336', HIGH: '#FF9800', MEDIUM: '#FFC107', LOW: '#4CAF50' }[sev] || '#9aa0a6';
@@ -349,4 +378,17 @@ export default {
 .nc-name { font-weight: 600; font-size: 13px; }
 .nc-steps { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: #555; }
 .nc-step em { font-style: normal; margin-left: 2px; }
+/* 沙盘模拟叠加标记：紫色小胶囊 + 说明条，把「哪些数字是滑杆推演值」说在白底外 */
+.sim-chip {
+  background: rgba(124, 58, 237, 0.12); color: #6d28d9; border: 1px solid rgba(124, 58, 237, 0.35);
+  border-radius: 8px; padding: 1px 8px; font-size: 11px; font-weight: 600; cursor: help;
+}
+.sim-note {
+  margin: 4px 0 6px; padding: 5px 8px; border-radius: 8px; font-size: 11px; line-height: 1.5;
+  background: rgba(124, 58, 237, 0.07); border: 1px solid rgba(124, 58, 237, 0.22); color: #5b21b6;
+}
+.pl-sim {
+  font-style: normal; margin-left: 4px; font-size: 10px; color: #6d28d9;
+  border: 1px solid rgba(124, 58, 237, 0.4); border-radius: 4px; padding: 0 3px;
+}
 </style>
