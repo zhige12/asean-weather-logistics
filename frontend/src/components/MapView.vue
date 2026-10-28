@@ -239,6 +239,9 @@ export default {
       // 地图重建后原特效层已失效，置空以便 drawRoute 时重建
       if (this._routeFlow) { this._routeFlow.destroy(); this._routeFlow = null; }
       this.map = L.map(this.$refs.mapEl, options).setView([21.0, 106.0], isLocal ? 7 : 6);
+      // 缩放控件移到左下角：左上角让给「任务操作台」（AI 决策分析 / 决策沙盘展开区），
+      // 否则操作台窗口展开时会盖住缩放按钮；右下角是版权署名，左下角空闲。
+      if (this.map.zoomControl) this.map.zoomControl.setPosition('bottomleft');
       this.map.on('click', e => {
         if (this.pickMode) this.$emit('map-click', { lat: e.latlng.lat, lon: e.latlng.lng });
       });

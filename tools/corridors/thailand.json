@@ -1,0 +1,37 @@
+{
+  "id": "thailand",
+  "label": "泰国走廊（曼谷—大城—呵叻—廊开，北接清迈）",
+  "note": "第三国可行性占位配置：与 vietnam-cn / guangxi-cn 用同一个引擎、同一份字段。跑通它只差一步——把 Geofabrik 的 thailand-latest.osm.pbf（ODbL）放到 tools/data/ 下；本仓库环境不做数据下载，所以这份配置的实际价值是「缺什么会被明确报出来」而不是「已经跑出路网」。口岸虚拟边（廊开—万象等）待接入该走廊时按 manualEdges 补，等级与抽稀阈值沿用越南侧口径。",
+  "bbox": {
+    "lat_min": 6.5,
+    "lat_max": 20.5,
+    "lon_min": 98.0,
+    "lon_max": 105.7
+  },
+  "sources": [
+    {
+      "pbf": "data/thailand-latest.osm.pbf",
+      "label": "泰国",
+      "snapKm": 6.0,
+      "levels": ["motorway", "trunk", "primary", "secondary"],
+      "idPrefix": "",
+      "anchors": {
+        "BKK": ["曼谷", 13.7563, 100.5018],
+        "AYU": ["大城", 14.35, 100.5833],
+        "NWR": ["纳瓦那口岸", 17.8783, 102.7212],
+        "KKN": ["孔敬", 16.4322, 102.8236],
+        "NAK": ["呵叻", 14.9799, 102.0977],
+        "UDN": ["乌隆他尼", 17.4138, 102.7878],
+        "CMY": ["清迈", 18.7883, 98.9853],
+        "CRI": ["清莱", 19.9105, 99.8406],
+        "HKT": ["合艾", 7.0086, 100.4747]
+      }
+    }
+  ],
+  "manualNodes": [],
+  "manualEdges": [],
+  "manualEdgeGeom": {},
+  "refine": false,
+  "connectivity": ["BKK", "NWR"],
+  "out": "data/thailand-road-network.json"
+}

@@ -62,10 +62,28 @@ public class OllamaService {
         return model;
     }
 
-    /** 本地推理；不可用/超时返回 null（调用方负责降级）。 */
+    /**
+     * 一次模型调用的产出：文本 + 真实 token 用量。
+     * token 取自 OpenAI 兼容回包的 {@code usage}（部分端点不回该字段，此时为 0，
+     * 计量侧会照实记 0 而不是拿字符数估算——估算值混进成本表会被当成实测数据）。
+     */
+    public record LlmReply(String text, long promptTokens, long completionTokens) {
+        static final LlmReply NONE = new LlmReply(null, 0, 0);
+
+        boolean ok() {
+            return text != null;
+        }
+    }
+
+    /** 本地推理；不可用/超时返回 null（调用方负责降级）。保持旧签名，不需要用量的调用方不受影响。 */
     public String chat(String systemPrompt, String userPrompt, int maxTokens) {
+        return chatDetailed(systemPrompt, userPrompt, maxTokens).text();
+    }
+
+    /** 本地推理 + token 用量（供 {@code /api/ai/metrics} 计量成本）。 */
+    public LlmReply chatDetailed(String systemPrompt, String userPrompt, int maxTokens) {
         if (!enabled || System.currentTimeMillis() < cooldownUntil) {
-            return null;
+            return LlmReply.NONE;
         }
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("model", model);
@@ -88,22 +106,31 @@ public class OllamaService {
                     .build();
             HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
-                return fail("HTTP " + resp.statusCode());
+                fail("HTTP " + resp.statusCode());
+                return LlmReply.NONE;
             }
-            JsonNode content = mapper.readTree(resp.body())
-                    .path("choices").path(0).path("message").path("content");
+            JsonNode root = mapper.readTree(resp.body());
+            JsonNode content = root.path("choices").path(0).path("message").path("content");
             String text = content.isMissingNode() ? "" : content.asText().trim();
             if (text.isEmpty()) {
-                return fail("空响应");
+                fail("空响应");
+                return LlmReply.NONE;
             }
             failures.set(0);
-            return text;
+            return new LlmReply(text, usageLong(root, "prompt_tokens"), usageLong(root, "completion_tokens"));
         } catch (Exception e) {
-            return fail(e.toString());
+            fail(e.toString());
+            return LlmReply.NONE;
         }
     }
 
-    private String fail(String why) {
+    /** 读 {@code usage} 里的一个计数；端点没回就 0，不猜。 */
+    private static long usageLong(JsonNode root, String field) {
+        JsonNode v = root.path("usage").path(field);
+        return v.isNumber() ? v.asLong() : 0L;
+    }
+
+    private void fail(String why) {
         int n = failures.incrementAndGet();
         if (n >= FAIL_THRESHOLD) {
             cooldownUntil = System.currentTimeMillis() + COOLDOWN_MILLIS;
@@ -113,6 +140,5 @@ public class OllamaService {
         } else {
             log.info("本地 Ollama 不可用（{}），本次降级", why);
         }
-        return null;
     }
 }

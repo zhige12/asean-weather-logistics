@@ -78,6 +78,25 @@ tools/_*
 !tools/_pkg_unzip_verify.ps1
 !tools/_setup_live.ps1
 !tools/_voice_preempt_probe.mjs
+# 以下几支是被 DEV_LOG / 技术文档点名的验证脚本，必须随仓库交出去，
+# 否则文档里写的「跑这条命令就能复现」在评委那边不存在（仓库内文档指向不存在文件是老毛病）。
+!tools/_clone_integrity.mjs
+!tools/_make_clone.mjs
+!tools/_dist_verify.mjs
+!tools/_ai_metrics_probe.mjs
+!tools/_ollama_warm.mjs
+!tools/_corridor_coupling.py
+!tools/_corridor_evidence.py
+# 云端语音识别一轮：部署链脚本与 DEV_LOG §三/§四 点名的语音验证脚本（同「文档点名的取证脚本必须随仓库交出去」纪律）
+!tools/_fe_build.ps1
+!tools/_srv_upload.ps1
+!tools/_srv_apply.ps1
+!tools/_srv_verify.ps1
+!tools/_install_ffmpeg.sh
+!tools/_srv_envcheck.sh
+!tools/_srv_speech_verify.sh
+!tools/_srv_speech_e2e.sh
+!tools/_srv_copilot_verify.sh
 
 # ---------- 运行时缓存 ----------
 /decision-cache/

@@ -16,6 +16,13 @@
           </svg>
         </button>
         <button class="hm-ctrl-btn base-btn" title="切换底图" @click="cycleBase">{{ baseName }}</button>
+        <!-- 整机界面语言切换（国际化演示）：中文 ↔ Tiếng Việt，字典翻译见 i18n.js -->
+        <button class="hm-ctrl-btn lang-toggle" :class="{ on: uiLang === 'vi' }" title="界面语言 Ngôn ngữ" @click="toggleUiLang">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/><path d="M3.2 9.5h17.6M3.2 14.5h17.6"/><path d="M12 3c2.6 2.4 4 5.6 4 9s-1.4 6.6-4 9c-2.6-2.4-4-5.6-4-9s1.4-6.6 4-9Z"/>
+          </svg>
+          <span class="lang-tag">{{ uiLang === 'zh' ? 'VN' : '中' }}</span>
+        </button>
         <!-- 桌面端专属：布局切换（PC 整窗大屏 ↔ 移动版 420px 手机窄列），手机上不显示 -->
         <button v-if="isDesktop" class="hm-ctrl-btn layout-btn" :title="pcLayout ? '切换到移动版（手机小屏样式）' : '切换到PC版（整窗大屏样式）'" @click="toggleLayoutMode">
           <svg v-if="pcLayout" viewBox="0 0 24 24" aria-hidden="true">
@@ -60,14 +67,15 @@
             </svg>
           </span>
           <span class="hm-ph">查找地点、规划路线</span>
-          <!-- 麦克风：emoji 换细线 SVG（与宫格图标同风格，stroke 1.6 中性灰） -->
-          <span class="hm-ico hm-mic">
+          <!-- 麦克风：以前是个纯装饰 SVG（点了只靠冒泡展开搜索框），现在指向 AI志宁——
+               语音输入入口统一收在小球里（原生系统语音识别优先，浏览器降级 Web Speech） -->
+          <button type="button" class="hm-ico hm-mic hm-mic-btn" title="对 AI志宁说话" @click.stop="openAiAssistant">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#64748b"
                  stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <rect x="9" y="3" width="6" height="11" rx="3"/>
               <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/><path d="M8.5 21h7"/>
             </svg>
-          </span>
+          </button>
         </div>
         <div v-else class="hm-search-panel">
           <!-- 起终点一体输入盒：左侧绿-虚线-红站点轨道 + 右侧交换按钮（高德/滴滴式），替代盒式双输入框 -->
@@ -409,6 +417,8 @@
                   @click="navigating ? requestExit() : exitPreview()">
             <span>✕</span>
           </button>
+          <!-- 导航态也可切界面语言（与首页同一开关） -->
+          <button class="nav-back nav-lang" :class="{ on: uiLang === 'vi' }" title="界面语言 Ngôn ngữ" @click="toggleUiLang">{{ uiLang === 'zh' ? 'VN' : '中' }}</button>
           <div class="nav-route-label">
             <span class="nav-from">{{ originName }}</span>
             <span class="nav-arrow">→</span>
@@ -817,6 +827,17 @@
               opacity: 0.35 + swipeEdgeProgress * 0.65
             }">‹</span>
     </div>
+
+    <!-- AI 志宁悬浮小球（司机端）：点一下展开对话，说“导航去河内”即进入路线规划，
+         查天气/查风险/口岸时效等只读指令由后端回结论直接展示（absolute 定位在 .phone 容器内） -->
+    <AiBall ref="aiBallRef" pos="absolute" right="14px" bottom="84px" panel-width="min(390px, calc(100vw - 28px))">
+      <DriverCopilot
+        :origin-id="resolvedOriginId"
+        :destination-id="resolvedDestinationId"
+        :lang="uiLang === 'vi' ? 'vi-VN' : 'zh-CN'"
+        @command="onAiCommand"
+      />
+    </AiBall>
   </div>
 </template>
 
@@ -834,6 +855,10 @@ import '../utils/leafletCanvasGuard.js'
 import { normalizeForTTS, detectLanguage, HAZARD_VN_MAP } from '../utils/ttsNormalizer.js'
 import { fetchPlaceList, resolvePlaceToNode, apiErrorMessage } from '../utils/geocoder.js'
 import { hasAdvisory, resolveAction, advisoryView, advisorySpeakText, ACTION_SHORT } from '../utils/corridorAdvisory.js'
+import { createUiTranslator } from './i18n.js'
+// AI 志宁悬浮小球与司机端对话舱：一句话驱动导航/查天气/查风险等既有能力
+import AiBall from '../components/AiBall.vue'
+import DriverCopilot from './DriverCopilot.vue'
 
 /**
  * EPSG:3857 墨卡托 Y（单位：度当量）：lat → 180/π · ln(tan(π/4 + φ/2))。
@@ -921,6 +946,7 @@ for (const [id, vn] of Object.entries(NODE_NAME_VN)) {
 
 export default {
   name: 'DriverApp',
+  components: { AiBall, DriverCopilot },
   data() {
     return {
       // 换线跳变审计（黑匣子）：watchdog 每 400ms 采样车标/线首，跳变当场 console.warn
@@ -945,6 +971,9 @@ export default {
       lastRerouted: false,
       lastRiskCount: 0,
       tab: 'route',
+      // 整机界面语言：zh=中文 / vi=越南语。DOM 层字典翻译（i18n.js），未命中回落中文；
+      // 持久化到 localStorage，刷新/重开仍保持所选语言
+      uiLang: (() => { try { return localStorage.getItem('driver_ui_lang') === 'vi' ? 'vi' : 'zh' } catch (e) { return 'zh' } })(),
       showReroute: false,
       voiceOn: true,
       // 行程（司机可手动选择/输入起点终点）
@@ -1561,6 +1590,10 @@ export default {
     }
     this._onFullscreenChange = () => { this.isFullscreen = !!document.fullscreenElement }
     document.addEventListener('fullscreenchange', this._onFullscreenChange)
+    // 整机中越切换：恢复上次语言并启动 DOM 翻译层（导航/抽屉里的动态文本由
+    // 翻译器内部的 MutationObserver 增量重译，这里只管初始态）
+    this._uiTranslator = createUiTranslator(() => this.$el)
+    if (this.uiLang === 'vi') this._uiTranslator.setLang('vi')
   },
   beforeUnmount() {
     clearInterval(this.timer)
@@ -1591,9 +1624,16 @@ export default {
       else if (this._desktopMq.removeListener) this._desktopMq.removeListener(this._onDesktopMq)
     }
     if (this._onFullscreenChange) document.removeEventListener('fullscreenchange', this._onFullscreenChange)
+    if (this._uiTranslator) { this._uiTranslator.destroy(); this._uiTranslator = null }
     if (window.speechSynthesis) window.speechSynthesis.cancel()
   },
   methods: {
+    /** 整机界面语言切换：中文 ↔ Tiếng Việt（字典见 i18n.js，未覆盖文案回落中文） */
+    toggleUiLang() {
+      this.uiLang = this.uiLang === 'zh' ? 'vi' : 'zh'
+      try { localStorage.setItem('driver_ui_lang', this.uiLang) } catch (e) { /* 忽略 */ }
+      if (this._uiTranslator) this._uiTranslator.setLang(this.uiLang)
+    },
     /**
      * 取某条路线上**真正命中**的风险段。
      *
@@ -3875,6 +3915,32 @@ export default {
         return
       }
       this.enterPreview()
+    },
+    /** 打开 AI志宁悬浮小球（搜索框麦克风图标的落点：语音指令统一走对话舱解析） */
+    openAiAssistant() {
+      const ball = this.$refs.aiBallRef
+      if (ball && ball.show) ball.show()
+    },
+    /**
+     * AI 志宁端侧指令落地：把对话舱解析出的动作映射到司机端既有能力。
+     *  - navigate_to：把抽取到的地名写入终点（沿用 _normalizeOD 归一到路网节点），必要时先退回首页，
+     *    随即搜索候选并进入路线预览——等价于司机手动输入终点后点「搜索路线」；
+     *  - plan_routes：按当前起终点直接搜索并进入预览。
+     * 只读查询（天气/风险/口岸/决策）由对话舱展示后端返回的结论，这里不重复处理。
+     */
+    async onAiCommand(payload) {
+      const tool = payload && payload.tool
+      if (tool !== 'navigate_to' && tool !== 'plan_routes') return
+      // 导航/预览态下先退回首页：避免在旧路线上就地改终点，或被 navigating 挡掉 enterPreview
+      if (this.navigating) this.exitNavigation()
+      else if (this.previewing) this.exitPreview()
+      if (tool === 'navigate_to') {
+        const dest = String((payload.destination || (payload.args && payload.args.destination) || '')).trim()
+        if (dest) this.destinationId = dest
+      }
+      this.tab = 'route'
+      await this.$nextTick()
+      await this.searchRoutes()
     },
     // 进入全屏大地图预览（选择路线这一步）；此时还未开始导航，不启动 GPS/Agent
     async enterPreview() {
@@ -7280,6 +7346,11 @@ export default {
 .hm-ctrl { position: absolute; right: 12px; top: 96px; z-index: 5; display: flex; flex-direction: column; gap: 8px; }
 .hm-ctrl-btn { width: 44px; height: 44px; border: none; border-radius: 12px; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.15); font-size: 20px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
 .hm-ctrl-btn.base-btn { font-size: 13px; font-weight: 700; color: #374151; }
+.hm-ctrl-btn.lang-toggle { flex-direction: column; gap: 1px; color: #475569; }
+.hm-ctrl-btn.lang-toggle .lang-tag { font-size: 10px; font-weight: 800; line-height: 1; }
+.hm-ctrl-btn.lang-toggle.on { color: #0a7d43; box-shadow: 0 0 0 2px rgba(10,125,67,.35), 0 2px 10px rgba(0,0,0,.15); }
+.nav-back.nav-lang { width: auto; padding: 0 10px; border-radius: 18px; font-size: 12px; font-weight: 800; }
+.nav-back.nav-lang.on { color: #0a7d43; background: rgba(10,125,67,.16); }
 /* 定位图钉图标：深灰经典水滴形（参照系统定位图标），随按钮文字色 */
 .pin-ico { width: 22px; height: 22px; fill: #3d4450; }
 .nav-btn .pin-ico { width: 20px; height: 20px; }
@@ -7301,6 +7372,8 @@ export default {
 .hm-search-bar .hm-ph { flex: 1; color: #94a3b8; font-size: 15px; }
 .hm-search-bar .hm-ico { font-size: 18px; }
 .hm-search-bar .hm-mic { display: flex; align-items: center; }
+/* 麦克风现在是真入口（弹开 AI志宁）：把 button 默认样式抹平，保持与原装饰图标一致观感 */
+.hm-mic-btn { border: none; background: transparent; padding: 0; cursor: pointer; }
 .hm-search-panel { background: #fff; border-radius: 16px; padding: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.18); max-height: 60vh; overflow-y: auto; }
 .hm-search-actions { display: flex; gap: 8px; margin-top: 10px; }
 .hm-search-actions .start-btn { flex: 1; }

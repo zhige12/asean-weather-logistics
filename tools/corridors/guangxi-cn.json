@@ -1,0 +1,44 @@
+{
+  "id": "guangxi-cn",
+  "label": "中国广西内陆走廊（南宁—崇左—凭祥—友谊关 / 南宁—东兴）",
+  "note": "第二走廊可行性验证用：只用广西一份 OSM extract，锚点与手写边全部由本配置给出，转换引擎的代码一行不改即可跑出另一张路网。输入 PBF 不在仓库内（OSM 官方 extract，ODbL）。",
+  "bbox": {
+    "lat_min": 21.4,
+    "lat_max": 23.3,
+    "lon_min": 106.4,
+    "lon_max": 109.2
+  },
+  "sources": [
+    {
+      "pbf": "data/guangxi-latest.osm.pbf",
+      "label": "中国广西",
+      "snapKm": 20.0,
+      "levels": ["motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential"],
+      "idPrefix": "",
+      "anchors": {
+        "NN": ["南宁", 22.817, 108.3665],
+        "CZ": ["崇左", 22.3765, 107.364],
+        "PX": ["凭祥", 22.104, 106.75],
+        "YGG": ["友谊关口岸", 21.977838, 106.714466],
+        "DX": ["东兴", 21.549, 107.966]
+      }
+    }
+  ],
+  "manualNodes": [
+    {"id": "NN", "name": "南宁", "latitude": 22.817, "longitude": 108.3665},
+    {"id": "CZ", "name": "崇左", "latitude": 22.3765, "longitude": 107.364},
+    {"id": "PX", "name": "凭祥", "latitude": 22.104, "longitude": 106.75},
+    {"id": "YGG", "name": "友谊关口岸", "latitude": 21.977838, "longitude": 106.714466},
+    {"id": "DX", "name": "东兴", "latitude": 21.549, "longitude": 107.966}
+  ],
+  "manualEdges": [
+    {"id": "E1", "fromNodeId": "NN", "toNodeId": "CZ", "distanceKm": 120, "speedKmh": 100, "customs": false, "name": "南友高速·南宁—崇左", "roadType": "motorway"},
+    {"id": "E2", "fromNodeId": "CZ", "toNodeId": "PX", "distanceKm": 65, "speedKmh": 100, "customs": false, "name": "南友高速·崇左—凭祥", "roadType": "motorway"},
+    {"id": "E3", "fromNodeId": "PX", "toNodeId": "YGG", "distanceKm": 15, "speedKmh": 60, "customs": false, "name": "国道G322·凭祥—友谊关", "roadType": "trunk"},
+    {"id": "E8", "fromNodeId": "NN", "toNodeId": "DX", "distanceKm": 240, "speedKmh": 100, "customs": false, "name": "兰海高速·南宁—东兴", "roadType": "motorway"}
+  ],
+  "manualEdgeGeom": {},
+  "refine": true,
+  "connectivity": ["NN", "YGG"],
+  "out": "data/guangxi-road-network.json"
+}

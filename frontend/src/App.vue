@@ -31,47 +31,48 @@
 
     <div class="main">
       <aside class="panel" :style="panelStyle">
-        <section class="card">
-          <h3>跨境路径规划</h3>
-          <div class="coords">
-            <!-- 自由输入 + 关键字联想（本地地名库→天地图 POI），空输入点开即常用地点下拉，
-                 选中即吸附路网节点；与地图选点共用同一套草稿起终点 -->
-            <PlaceInput
-              label="起点"
-              placeholder="输入或点选起点，如 南宁 / 青秀"
-              v-model="draftOriginId"
-              v-model:name="originName"
-              ref="originInput"
-            />
-            <PlaceInput
-              label="终点"
-              placeholder="输入或点选终点，如 河内 / 还剑湖"
-              v-model="draftDestinationId"
-              v-model:name="destinationName"
-              ref="destInput"
-            />
-            <div class="row">
-              <button class="btn primary" @click="confirmSelection">确认选择并规划</button>
-              <button class="btn outline" @click="clearRoute">清空</button>
-            </div>
-            <div class="row">
-              <button class="btn" :class="pickMode ? 'pick-on' : 'outline'" @click="togglePickMode">
-                {{ pickMode ? '取消地图选点' : '地图选点' }}
-              </button>
-              <span class="muted" style="align-self:center">{{ pickHintText }}</span>
-            </div>
-          </div>
-        </section>
-
-        <!-- 自然语言调度舱：一句话驱动查风险/规划/决策分析与沙盘注入（写操作先预览后确认） -->
-        <CopilotPanel
+        <!-- 第四幕：公司派单（司机端收到后自动切物流任务模式）。
+             原「跨境路径规划」的起终点输入框与「确认规划 / 清空 / 地图选点」按钮已并入本卡片（route-picker 插槽）：
+             插槽内容仍编译于父作用域，PlaceInput 的 ref 与 confirmSelection/clearRoute/togglePickMode 等方法照常工作 -->
+        <TaskDispatchPanel
+          ref="taskPanelRef"
+          :task-status="taskStatus"
           :origin-id="originId"
           :destination-id="destinationId"
-          @executed="onCopilotExecuted"
-        />
-
-        <!-- 第四幕：公司派单（司机端收到后自动切物流任务模式） -->
-        <TaskDispatchPanel ref="taskPanelRef" :task-status="taskStatus" @refresh="refreshTask" @analyze="onPreDispatchAnalysis" />
+          @refresh="refreshTask"
+          @analyze="onPreDispatchAnalysis"
+        >
+          <template #route-picker>
+            <div class="coords">
+              <!-- 自由输入 + 关键字联想（本地地名库→天地图 POI），空输入点开即常用地点下拉，
+                   选中即吸附路网节点；与地图选点共用同一套草稿起终点 -->
+              <PlaceInput
+                label="起点"
+                placeholder="输入或点选起点，如 南宁 / 青秀"
+                v-model="draftOriginId"
+                v-model:name="originName"
+                ref="originInput"
+              />
+              <PlaceInput
+                label="终点"
+                placeholder="输入或点选终点，如 河内 / 还剑湖"
+                v-model="draftDestinationId"
+                v-model:name="destinationName"
+                ref="destInput"
+              />
+              <div class="row">
+                <button class="btn primary" @click="confirmSelection">确认选择并规划</button>
+                <button class="btn outline" @click="clearRoute">清空</button>
+              </div>
+              <div class="row">
+                <button class="btn" :class="pickMode ? 'pick-on' : 'outline'" @click="togglePickMode">
+                  {{ pickMode ? '取消地图选点' : '地图选点' }}
+                </button>
+                <span class="muted" style="align-self:center">{{ pickHintText }}</span>
+              </div>
+            </div>
+          </template>
+        </TaskDispatchPanel>
 
         <!-- 全域受阻：区域性灾害（台风 / 大范围暴雨）同时盖住多条出境走廊，平陆运河也禁航。
              此时算路引擎仍会给出一条「向前」的路线——那是把已封闭路段降级放行换来的，
@@ -111,68 +112,29 @@
           </div>
         </section>
 
-        <!-- 第一/二幕：决策沙盘（官方推送熔断 + 滑块观察决策边界） -->
-        <DecisionSandbox ref="sandboxRef" @sandbox-change="onSandboxChange" @quick-inject="onQuickInject">
-          <!-- 通关时效并入决策沙盘：simMode/pushed 由沙盘经作用域插槽下发。
-               未点「模拟」只读展示真实时效，点「模拟」后才可手动调节各口岸 -->
-          <template #extra="{ simMode, pushed }">
-            <div class="sandbox-sub">
-              <h3>
-                通关时效（customs_efficiency）
-                <span v-if="pushed && !simMode" class="route-state">真实 · 只读</span>
-                <span v-else-if="simMode" class="route-state ok">模拟 · 可调</span>
-              </h3>
-              <div v-if="!pushed" class="muted" style="line-height:1.6">
-                未拉取真实数据：请先在上方「决策沙盘」点击「拉取 GOWFS 数据」查看真实通关时效；再点「模拟」方可手动调节各口岸时效。
-              </div>
-              <template v-else>
-                <div class="row">
-                  <label class="inline-label">时段
-                    <select v-model="period" :disabled="!simMode" @change="replanIfNeeded">
-                      <option value="normal">普通</option>
-                      <option value="peak">高峰 ×1.3~1.4</option>
-                      <option value="holiday">节假日 ×1.7~1.8</option>
-                    </select>
-                  </label>
-                  <label class="inline-label">货类
-                    <select v-model="cargoType" :disabled="!simMode" @change="replanIfNeeded">
-                      <option value="general">普货</option>
-                      <option value="cold">冷链</option>
-                      <option value="dangerous">危化</option>
-                      <option value="oversized">大件</option>
-                    </select>
-                  </label>
-                </div>
-                <div v-for="p in customsList" :key="p.portId" class="customs-item" :class="{adjusted: p.adjusted}">
-                  <div class="customs-head">
-                    <span class="customs-name">{{ p.portName }}</span>
-                    <span class="customs-hours">{{ p.currentHours }}h</span>
-                    <span v-if="p.adjusted" class="customs-note" :title="p.note">(调整)</span>
-                  </div>
-                  <div class="row">
-                    <button class="btn tiny" :disabled="!simMode" @click="adjustCustoms(p.portId, -0.5)">-0.5h</button>
-                    <button class="btn tiny" :disabled="!simMode" @click="adjustCustoms(p.portId, 0.5)">+0.5h</button>
-                    <button class="btn tiny outline" :disabled="!simMode" @click="resetCustoms(p.portId)">重置</button>
-                  </div>
-                </div>
-                <div class="muted" style="margin-top:6px">基准：友谊关 {{ baseHours('YGG') }}h / 芒街 {{ baseHours('MC') }}h</div>
-              </template>
-            </div>
-          </template>
-        </DecisionSandbox>
+        <!-- 决策沙盘：本体常驻地图左上「任务操作台」；左栏只留入口卡。
+             用到即自动弹窗：点「拉取 GOWFS 数据」→ 展开沙盘并立即拉取真实气象（无手动「展开」按钮） -->
+        <section class="card dock-entry">
+          <h3>决策沙盘 · 气象熔断与调参</h3>
+          <div class="muted de-hint">拉取真实气象、拖动参数触发熔断——点下方「拉取 GOWFS 数据」后自动在地图左上弹出操作窗口。</div>
+          <div class="row">
+            <button class="btn live" @click="launchSandbox">拉取 GOWFS 数据</button>
+          </div>
+        </section>
 
-        <!-- 第三幕：多智能体协同决策分析（含第四幕确认下发入口） -->
-        <AgentPanel
-          ref="agentPanelRef"
-          :originId="originId"
-          :destinationId="destinationId"
-          :canalLiveBlock="canalBlockLive ? canalBlockLive.blocked : undefined"
-          :canalLiveReason="canalBlockLive && canalBlockLive.blocked ? canalBlockLive.reason : ''"
-          :taskAccepted="!!(taskStatus && taskStatus.task && taskStatus.task.status === 'ACCEPTED')"
-          @dispatched="onDispatched"
-          @dispatch-task="onDispatchTask"
-          @preview-candidate="onPreviewCandidate"
-        />
+        <!-- AI 决策分析：本体常驻地图左上「任务操作台」；派单「AI 气象分析并规划路线」会自动弹出到这里（无手动「展开」按钮） -->
+        <section class="card dock-entry">
+          <h3>AI 决策分析 · 多智能体协同</h3>
+          <div class="muted de-hint">在上方「公司派单」点「AI 气象分析并规划路线」，会自动在地图左上弹出操作窗口，查看六维对比与候选。</div>
+          <!-- 装饰用：把分析窗里的三个智能体球像搬到入口卡上（纯静态、无状态驱动） -->
+          <div class="de-agents" aria-hidden="true">
+            <span class="de-agent"><span class="de-dot">🔵</span><span class="de-an">风险研判智能体</span></span>
+            <span class="de-arrow">→</span>
+            <span class="de-agent"><span class="de-dot">🟢</span><span class="de-an">方案生成智能体</span></span>
+            <span class="de-arrow">→</span>
+            <span class="de-agent"><span class="de-dot">🟡</span><span class="de-an">触达智能体</span></span>
+          </div>
+        </section>
 
         <!-- 第五/六幕：多角色触达 + 分级叫应追踪 -->
         <OutreachPanel :status="outreachStatus" @refresh="refreshOutreach" />
@@ -406,8 +368,131 @@
           @edge-click="onEdgeClick"
           @map-click="onMapClick"
         />
+
+        <!-- 任务操作台（地图左上「红框」区）：AI 决策分析 / 决策沙盘 两个窗口常驻于此（v-show 控制显隐，
+             不用 Teleport 搬 DOM，避免组件实例在搬移中自毁导致 ref/SSE 断链）。用到哪个就展开哪个；
+             两个都用→并排；都不用→两窗 display:none、整块 pointer-events:none → 透明不挡地图。 -->
+        <div ref="dockEl" class="task-dock" :class="{ 'is-empty': dockOpenCount === 0 }">
+          <div v-if="dockOpenCount > 0" class="dock-toolbar">
+            <span class="dock-toolbar-title">任务操作台 · {{ dockOpenCount }} 个窗口</span>
+            <button class="dock-tool-btn" @click="toggleDockAll">
+              {{ dockAllCollapsed ? '全部展开' : '全部收起' }}
+            </button>
+            <button class="dock-tool-btn" title="把两个窗口放回预设槽位" @click="resetDockLayout">复位布局</button>
+          </div>
+          <div class="dock-row">
+            <!-- AI 决策分析窗口（2 号）：按住标题栏可拖动；首次展开落在预设左槽位 agentPos -->
+            <section
+              ref="agentWinRef"
+              v-show="agentDockOpen"
+              class="dock-window"
+              :style="{ left: agentPos.x + 'px', top: agentPos.y + 'px', width: agentW + 'px', zIndex: dockFront === 'agent' ? 6 : 5 }"
+            >
+              <header class="dw-head" :style="dwZoomStyle(agentScale)" title="按住标题栏可拖动窗口" @pointerdown="startDockDrag('agent', $event)">
+                <span class="dw-title"><span class="dw-grip">⣿</span> AI 决策分析 · 多智能体协同</span>
+                <span class="dw-actions" @pointerdown.stop>
+                  <button class="dw-btn" :title="agentDockCollapsed ? '展开' : '收起'" @click="toggleDockCollapse('agent')">{{ agentDockCollapsed ? '▸ 展开' : '▾ 收起' }}</button>
+                  <button class="dw-btn" title="收回左栏" @click="closeDock('agent')">✕</button>
+                </span>
+              </header>
+              <div class="dw-body" :style="dwZoomStyle(agentScale)" v-show="!agentDockCollapsed">
+                <AgentPanel
+                  ref="agentPanelRef"
+                  :originId="originId"
+                  :destinationId="destinationId"
+                  :canalLiveBlock="canalBlockLive ? canalBlockLive.blocked : undefined"
+                  :canalLiveReason="canalBlockLive && canalBlockLive.blocked ? canalBlockLive.reason : ''"
+                  :taskAccepted="!!(taskStatus && taskStatus.task && taskStatus.task.status === 'ACCEPTED')"
+                  @dispatched="onDispatched"
+                  @dispatch-task="onDispatchTask"
+                  @preview-candidate="onPreviewCandidate"
+                />
+              </div>
+              <div class="dw-resizer" title="拖动右边缘调整宽度 · 双击复位"
+                   @pointerdown.stop="startDockResize('agent', $event)" @dblclick="resetDockWinW('agent')"></div>
+            </section>
+            <!-- 决策沙盘窗口（3 号）：同样可拖动；首次展开落在预设右槽位 sandboxPos（并排在 2 号右侧） -->
+            <section
+              ref="sandboxWinRef"
+              v-show="sandboxDockOpen"
+              class="dock-window"
+              :style="{ left: sandboxPos.x + 'px', top: sandboxPos.y + 'px', width: sandboxW + 'px', zIndex: dockFront === 'sandbox' ? 6 : 5 }"
+            >
+              <header class="dw-head" :style="dwZoomStyle(sandboxScale)" title="按住标题栏可拖动窗口" @pointerdown="startDockDrag('sandbox', $event)">
+                <span class="dw-title"><span class="dw-grip">⣿</span> 决策沙盘 · 气象熔断与调参</span>
+                <span class="dw-actions" @pointerdown.stop>
+                  <button class="dw-btn" :title="sandboxDockCollapsed ? '展开' : '收起'" @click="toggleDockCollapse('sandbox')">{{ sandboxDockCollapsed ? '▸ 展开' : '▾ 收起' }}</button>
+                  <button class="dw-btn" title="收回左栏" @click="closeDock('sandbox')">✕</button>
+                </span>
+              </header>
+              <div class="dw-body" :style="dwZoomStyle(sandboxScale)" v-show="!sandboxDockCollapsed">
+                <DecisionSandbox ref="sandboxRef" @sandbox-change="onSandboxChange" @quick-inject="onQuickInject">
+                  <!-- 通关时效并入决策沙盘：simMode/pushed 由沙盘经作用域插槽下发。
+                       未点「模拟」只读展示真实时效，点「模拟」后才可手动调节各口岸 -->
+                  <template #extra="{ simMode, pushed }">
+                    <div class="sandbox-sub">
+                      <h3>
+                        通关时效（customs_efficiency）
+                        <span v-if="pushed && !simMode" class="route-state">真实 · 只读</span>
+                        <span v-else-if="simMode" class="route-state ok">模拟 · 可调</span>
+                      </h3>
+                      <div v-if="!pushed" class="muted" style="line-height:1.6">
+                        未拉取真实数据：请先在上方「决策沙盘」点击「拉取 GOWFS 数据」查看真实通关时效；再点「模拟」方可手动调节各口岸时效。
+                      </div>
+                      <template v-else>
+                        <div class="row">
+                          <label class="inline-label">时段
+                            <select v-model="period" :disabled="!simMode" @change="replanIfNeeded">
+                              <option value="normal">普通</option>
+                              <option value="peak">高峰 ×1.3~1.4</option>
+                              <option value="holiday">节假日 ×1.7~1.8</option>
+                            </select>
+                          </label>
+                          <label class="inline-label">货类
+                            <select v-model="cargoType" :disabled="!simMode" @change="replanIfNeeded">
+                              <option value="general">普货</option>
+                              <option value="cold">冷链</option>
+                              <option value="dangerous">危化</option>
+                              <option value="oversized">大件</option>
+                            </select>
+                          </label>
+                        </div>
+                        <div v-for="p in customsList" :key="p.portId" class="customs-item" :class="{adjusted: p.adjusted}">
+                          <div class="customs-head">
+                            <span class="customs-name">{{ p.portName }}</span>
+                            <span class="customs-hours">{{ p.currentHours }}h</span>
+                            <span v-if="p.adjusted" class="customs-note" :title="p.note">(调整)</span>
+                          </div>
+                          <div class="row">
+                            <button class="btn tiny" :disabled="!simMode" @click="adjustCustoms(p.portId, -0.5)">-0.5h</button>
+                            <button class="btn tiny" :disabled="!simMode" @click="adjustCustoms(p.portId, 0.5)">+0.5h</button>
+                            <button class="btn tiny outline" :disabled="!simMode" @click="resetCustoms(p.portId)">重置</button>
+                          </div>
+                        </div>
+                        <div class="muted" style="margin-top:6px">基准：友谊关 {{ baseHours('YGG') }}h / 芒街 {{ baseHours('MC') }}h</div>
+                      </template>
+                    </div>
+                  </template>
+                </DecisionSandbox>
+              </div>
+              <div class="dw-resizer" title="拖动右边缘调整宽度 · 双击复位"
+                   @pointerdown.stop="startDockResize('sandbox', $event)" @dblclick="resetDockWinW('sandbox')"></div>
+            </section>
+          </div>
+        </div>
       </main>
     </div>
+
+    <!-- AI 志宁悬浮小球：把自然语言调度舱收进右下角圆球，点一下展开对话，
+         一句话即可驱动查风险/规划路线/决策分析与沙盘注入（写操作先预览后确认） -->
+    <AiBall pos="fixed" right="22px" bottom="26px" panel-width="440px">
+      <CopilotPanel
+        :origin-id="originId"
+        :destination-id="destinationId"
+        @executed="onCopilotExecuted"
+        @navigate="onCopilotNavigate"
+      />
+    </AiBall>
   </div>
 </template>
 
@@ -422,12 +507,13 @@ import DecisionSandbox from './components/DecisionSandbox.vue';
 import TaskDispatchPanel from './components/TaskDispatchPanel.vue';
 import AgentPanel from './components/AgentPanel.vue';
 import CopilotPanel from './components/CopilotPanel.vue';
+import AiBall from './components/AiBall.vue';
 import OutreachPanel from './components/OutreachPanel.vue';
 import PlatformConfigurator from './components/PlatformConfigurator.vue';
 import DecisionLogTimeline from './components/DecisionLogTimeline.vue';
 import PlaceInput from './components/PlaceInput.vue';
 import { advisoryView, ACTION_SHORT } from './utils/corridorAdvisory';
-import { fetchPlaceList } from './utils/geocoder.js';
+import { fetchPlaceList, resolvePlaceToNode } from './utils/geocoder.js';
 import { isLite, isAutoLite, onLiteChange, toggleLite } from './utils/perfMode.js';
 
 // 左侧面板拖拽缩放边界：1=默认 360px；上限约 2.2 倍（≈790px，投影仪/后排也能看清）
@@ -441,6 +527,16 @@ const PANEL_BASE_WIDTH = 360;
  * 会吸到同几个远处节点，不拦就会出现“点了一下、起点跑到几百公里外”。
  */
 const PICK_SNAP_MAX_KM = 60;
+
+// 任务操作台两窗口的预设「槽位」布局（相对地图区左上角，px）：
+// 首次展开时窗口固定出现在这里；之后可按住标题栏拖到任意位置（见 startDockDrag）。
+// 地图区是 flex:1，左栏（1 号）放大时地图区整体右移 → 两窗口随之右移，无需额外换算。
+const DOCK_WIN_W = 560;                                       // 窗口预设宽度（拖动右边缘可放大，双击复位回此值）
+const DOCK_WIN_MIN_W = 360;                                   // 窗口可拖到的最小宽度
+const DOCK_EDGE = 12;                                         // 距地图区左边缘
+const DOCK_TOP = 52;                                          // 距地图区顶边缘（让开顶部工具条）
+const DOCK_AGENT_X = DOCK_EDGE;                               // 2 号窗（AI 决策分析）槽位 X
+const DOCK_SANDBOX_X = DOCK_EDGE + DOCK_WIN_W + 12;           // 3 号窗（决策沙盘）槽位 X（并排在 2 号右侧）
 /**
  * 浏览器是否支持 zoom。Chromium 与 Firefox 126+ 均支持，且 zoom 参与布局尺寸计算，
  * 因此面板宽度与内部字号能一起等比放大（子组件字号是写死的 px，靠父级 zoom 才会放大）。
@@ -461,11 +557,25 @@ export default {
   components: {
     MapView, RiskStrip, ETAIndicator, BriefingPanel, CarbonCalc,
     DecisionSandbox, TaskDispatchPanel, AgentPanel, OutreachPanel,
-    PlatformConfigurator, DecisionLogTimeline, PlaceInput, CopilotPanel
+    PlatformConfigurator, DecisionLogTimeline, PlaceInput, CopilotPanel, AiBall
   },
   data() {
     return {
       status: null,
+      // 地图左上「任务操作台」两窗口状态：open=是否从左侧面板搬进操作台展开；collapsed=窗口是否收成一条标题栏
+      agentDockOpen: false,
+      agentDockCollapsed: false,
+      sandboxDockOpen: false,
+      sandboxDockCollapsed: false,
+      // 两窗口在地图区内的位置（px，按住标题栏可拖动改变）；首次展开用预设槽位。
+      agentPos: { x: DOCK_AGENT_X, y: DOCK_TOP },
+      sandboxPos: { x: DOCK_SANDBOX_X, y: DOCK_TOP },
+      // 两窗口宽度（px）：拖动右边缘手柄放大，双击手柄复位到 DOCK_WIN_W
+      agentW: DOCK_WIN_W,
+      sandboxW: DOCK_WIN_W,
+      dockDrag: null,      // 拖动中：{ name, sx, sy, ox, oy }
+      dockResize: null,    // 调宽中：{ name, sx, ow }
+      dockFront: 'agent',  // 最近交互的窗口置于最上层
       routeResult: null,
       showRawResult: false,
       routeCoords: [],
@@ -550,6 +660,12 @@ export default {
       perfAuto: isAutoLite()
     };
   },
+  watch: {
+    // 左栏缩放变化时，把两窗口重新夹回地图区可视范围，避免放大后右侧窗口溢出到屏外
+    panelZoom() {
+      this.$nextTick(this.clampDockPositions);
+    }
+  },
   computed: {
     /** 选点面板提示：把「现在该点哪里 / 已经选到哪一步」说清楚 */
     pickHintText() {
@@ -582,6 +698,9 @@ export default {
       }
       return { width: Math.round(PANEL_BASE_WIDTH * this.panelZoom) + 'px', flex: '0 0 auto' };
     },
+    // 操作台两窗放大比例：当前宽 ÷ 预设宽，用于对 .dw-head/.dw-body 施加 zoom（字体随宽度等比放大）
+    agentScale() { return this.agentW / DOCK_WIN_W; },
+    sandboxScale() { return this.sandboxW / DOCK_WIN_W; },
     // 天气面板只展示有名字的节点，避免几千个格子卡死
     visibleWeather() {
       const pts = this.weatherPoints || [];
@@ -693,9 +812,143 @@ export default {
         (it.desc && it.desc.toLowerCase().includes(q)) ||
         (it.time && String(it.time).toLowerCase().includes(q))
       );
+    },
+    // ---- 地图左上「任务操作台」：两窗口开合/收展的派生状态 ----
+    dockOpenCount() {
+      return (this.agentDockOpen ? 1 : 0) + (this.sandboxDockOpen ? 1 : 0);
+    },
+    // 所有「已展开到操作台」的窗口是否都处于收起（只剩标题栏）态：决定工具条按钮文案
+    dockAllCollapsed() {
+      const open = [];
+      if (this.agentDockOpen) open.push(this.agentDockCollapsed);
+      if (this.sandboxDockOpen) open.push(this.sandboxDockCollapsed);
+      return open.length > 0 && open.every(c => c);
     }
   },
   methods: {
+    // ---- 任务操作台：把 AI 决策分析 / 决策沙盘 在地图左上展开/收回/收展 ----
+    openDock(which) {
+      this[which + 'DockOpen'] = true;
+      this[which + 'DockCollapsed'] = false;
+    },
+    closeDock(which) {
+      this[which + 'DockOpen'] = false;
+      this[which + 'DockCollapsed'] = false;
+    },
+    toggleDockCollapse(which) {
+      this[which + 'DockCollapsed'] = !this[which + 'DockCollapsed'];
+    },
+    // 工具条一键：当前所有展开窗口若都收起则全展开，否则全收起
+    toggleDockAll() {
+      const target = !this.dockAllCollapsed;
+      if (this.agentDockOpen) this.agentDockCollapsed = target;
+      if (this.sandboxDockOpen) this.sandboxDockCollapsed = target;
+    },
+    /** 左栏「拉取 GOWFS 数据」入口：把决策沙盘展开到地图左上操作台，并立即发起真实气象拉取 */
+    launchSandbox() {
+      this.openDock('sandbox');
+      this.$nextTick(() => {
+        const sb = this.$refs.sandboxRef;
+        if (sb && typeof sb.pullLive === 'function') sb.pullLive();
+      });
+    },
+    /** 按住窗口标题栏开始拖动：记录起点，窗口位置 = 起点 + 指针位移（见 onDockDragMove） */
+    startDockDrag(name, e) {
+      if (e.button !== undefined && e.button !== 0) return; // 只跟手左键
+      e.preventDefault();
+      const pos = name === 'agent' ? this.agentPos : this.sandboxPos;
+      this.dockFront = name;
+      this.dockDrag = { name, sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y };
+      window.addEventListener('pointermove', this.onDockDragMove);
+      window.addEventListener('pointerup', this.endDockDrag);
+      window.addEventListener('pointercancel', this.endDockDrag);
+    },
+    onDockDragMove(e) {
+      const d = this.dockDrag;
+      if (!d) return;
+      const pos = d.name === 'agent' ? this.agentPos : this.sandboxPos;
+      const rect = this.$refs.dockEl ? this.$refs.dockEl.getBoundingClientRect() : null;
+      const el = d.name === 'agent' ? this.$refs.agentWinRef : this.$refs.sandboxWinRef;
+      const w = el ? el.offsetWidth : DOCK_WIN_W;
+      const headH = 44; // 至少留一条标题栏在可视区内，别把窗口拖丢
+      let x = d.ox + (e.clientX - d.sx);
+      let y = d.oy + (e.clientY - d.sy);
+      if (rect) {
+        x = Math.max(0, Math.min(x, Math.max(0, rect.width - w)));
+        y = Math.max(0, Math.min(y, Math.max(0, rect.height - headH)));
+      }
+      pos.x = x;
+      pos.y = y;
+    },
+    endDockDrag() {
+      this.dockDrag = null;
+      window.removeEventListener('pointermove', this.onDockDragMove);
+      window.removeEventListener('pointerup', this.endDockDrag);
+      window.removeEventListener('pointercancel', this.endDockDrag);
+    },
+    /** 复位：把两窗口放回预设槽位（位置 + 宽度，首次展开就是这里） */
+    resetDockLayout() {
+      this.agentPos = { x: DOCK_AGENT_X, y: DOCK_TOP };
+      this.sandboxPos = { x: DOCK_SANDBOX_X, y: DOCK_TOP };
+      this.agentW = DOCK_WIN_W;
+      this.sandboxW = DOCK_WIN_W;
+    },
+    /** 双击某窗右边缘手柄：只把该窗宽度复位到预设值 */
+    resetDockWinW(name) {
+      if (name === 'agent') this.agentW = DOCK_WIN_W;
+      else this.sandboxW = DOCK_WIN_W;
+    },
+    /**
+     * 放大窗口时让内部字体一起变大的样式：对 .dw-head/.dw-body 施加 zoom（子组件字号写死 px，只有 zoom 会放大）。
+     * 关键：zoom 只加在内容层，外层 .dock-window 的 left/top/width/max-height 保持未缩放，
+     * 避免直接 zoom 整个窗口导致定位漂移与高度溢出（见 DEV_LOG）。内容基准宽固定 DOCK_WIN_W，
+     * zoom=scale 后视觉宽 = DOCK_WIN_W×scale = 当前窗口宽，正好铺满；不支持 zoom 时退回只加宽（width:100%）。
+     */
+    dwZoomStyle(scale) {
+      if (!ZOOM_SUPPORTED) return { width: '100%' };
+      return { zoom: scale, width: DOCK_WIN_W + 'px' };
+    },
+    /** 按住窗口右边缘开始调宽：新宽 = 起始宽 + 指针水平位移（夹在最小宽与地图区可用宽之间） */
+    startDockResize(name, e) {
+      if (e.button !== undefined && e.button !== 0) return; // 只跟手左键
+      e.preventDefault();
+      const w = name === 'agent' ? this.agentW : this.sandboxW;
+      this.dockFront = name;
+      this.dockResize = { name, sx: e.clientX, ow: w };
+      window.addEventListener('pointermove', this.onDockResizeMove);
+      window.addEventListener('pointerup', this.endDockResize);
+      window.addEventListener('pointercancel', this.endDockResize);
+    },
+    onDockResizeMove(e) {
+      const d = this.dockResize;
+      if (!d) return;
+      const pos = d.name === 'agent' ? this.agentPos : this.sandboxPos;
+      const rect = this.$refs.dockEl ? this.$refs.dockEl.getBoundingClientRect() : null;
+      // 上限：地图区宽度 - 窗口左边位 - 右边距，保证拉宽后不溢出屏右
+      const maxW = rect ? Math.max(DOCK_WIN_MIN_W, rect.width - pos.x - DOCK_EDGE) : 2000;
+      let w = Math.round(d.ow + (e.clientX - d.sx));
+      w = Math.max(DOCK_WIN_MIN_W, Math.min(w, maxW));
+      if (d.name === 'agent') this.agentW = w;
+      else this.sandboxW = w;
+    },
+    endDockResize() {
+      this.dockResize = null;
+      window.removeEventListener('pointermove', this.onDockResizeMove);
+      window.removeEventListener('pointerup', this.endDockResize);
+      window.removeEventListener('pointercancel', this.endDockResize);
+    },
+    /** 把两窗口夹回地图区可视范围（地图区随左栏缩放变窄时调用） */
+    clampDockPositions() {
+      const dockEl = this.$refs.dockEl;
+      if (!dockEl) return;
+      const rect = dockEl.getBoundingClientRect();
+      [[this.agentPos, this.$refs.agentWinRef], [this.sandboxPos, this.$refs.sandboxWinRef]].forEach(([pos, el]) => {
+        if (!pos) return;
+        const w = el ? el.offsetWidth : DOCK_WIN_W;
+        pos.x = Math.max(0, Math.min(pos.x, Math.max(0, rect.width - w)));
+        pos.y = Math.max(0, Math.min(pos.y, Math.max(0, rect.height - 44)));
+      });
+    },
     fmtKm(nodeIds) {
       return (nodeIds || []).length;
     },
@@ -1120,21 +1373,27 @@ export default {
         console.warn('陆水联运走廊拉取失败', e);
       }
     },
-    // 确认输入/选点得到的起终点：用户只打字没选候选时兜底在线解析+吸附，
-    // 然后提交草稿并触发规划，同时注册关注（风险时该路线会被重算推送）
-    async confirmSelection() {
+    // 解析 PlaceInput 草稿起终点 → 确认 originId/destinationId（只打字未选候选时兜底在线解析+吸附）。
+    // 成功返回 true；解析失败或起终点相同则弹提示返回 false。confirmSelection 与派单前分析共用这一套。
+    async ensureEndpoints() {
+      if (!this.$refs.originInput || !this.$refs.destInput) return false;
       const o = await this.$refs.originInput.ensure();
-      if (!o.ok) { alert(o.msg); return; }
+      if (!o.ok) { alert(o.msg); return false; }
       const d = await this.$refs.destInput.ensure();
-      if (!d.ok) { alert(d.msg); return; }
+      if (!d.ok) { alert(d.msg); return false; }
       this.originName = o.name;
       this.destinationName = d.name;
       this.originId = this.draftOriginId;
       this.destinationId = this.draftDestinationId;
       if (this.originId === this.destinationId) {
         alert('起终点不能是同一节点，请重新选择');
-        return;
+        return false;
       }
+      return true;
+    },
+    // 确认输入/选点得到的起终点：解析草稿后提交并触发规划，同时注册关注（风险时该路线会被重算推送）
+    async confirmSelection() {
+      if (!await this.ensureEndpoints()) return;
       this.watchRoute(this.originId, this.destinationId);
       this.planCrossBorder();
     },
@@ -1360,6 +1619,25 @@ export default {
       this.refreshDecisionLog();
       this.pushTimeline('调度舱指令执行', `自然语言调度舱落地：${tool}`, 'info');
     },
+    /**
+     * 调度舱导航意图（对 AI 说“导航去河内”）：把抽取到的地名归一到路网节点，
+     * 落到终点并立即触发一次跨境规划——与手动选终点走同一条 planCrossBorder 链路。
+     */
+    async onCopilotNavigate(payload) {
+      const name = (payload && payload.destination || '').trim();
+      if (!name) return;
+      try {
+        const { nodeId, nodeName } = await resolvePlaceToNode(name, '终点');
+        this.draftDestinationId = nodeId;
+        this.destinationId = nodeId;
+        this.destinationName = nodeName || name;
+        this.watchRoute(this.originId, this.destinationId);
+        await this.planCrossBorder();
+        this.pushTimeline('调度舱导航指令', `AI志宁按口令规划去「${this.destinationName}」的路线`, 'info');
+      } catch (e) {
+        this.pushTimeline('调度舱导航失败', `未能定位「${name}」：${(e && e.message) || '超出路网覆盖范围'}`, 'warn');
+      }
+    },
     onDispatched(status) {
       this.outreachStatus = status;
       this.pushTimeline('任务变更下发', '调度员确认方案，任务变更指令已推送至司机/船东/沿岸百姓', 'warn');
@@ -1437,10 +1715,13 @@ export default {
       }
     },
     /** 派单前出车分析完成：记住订单信息、同步起终点并触发多智能体「派单前·常态」决策分析（版本一） */
-    onPreDispatchAnalysis(payload) {
-      this.dispatchForm = payload || null;
-      if (payload && payload.originId) this.originId = payload.originId;
-      if (payload && payload.destinationId) this.destinationId = payload.destinationId;
+    async onPreDispatchAnalysis(payload) {
+      // 起终点已并入本卡片的 PlaceInput：分析前先解析草稿，保证 AI 分析用的就是当前输入框/地图选点的起终点
+      if (!await this.ensureEndpoints()) return;
+      // 派单下发仍需 originId/destinationId：把解析后的起终点回填进订单快照（子组件表单已不再携带 OD）
+      this.dispatchForm = { ...(payload || {}), originId: this.originId, destinationId: this.destinationId };
+      // 任务动态展开：把 AI 决策分析窗口在地图左上「任务操作台」就地弹出，再触发常态分析
+      this.openDock('agent');
       this.pushTimeline('派单前 AI 决策分析', '调度员发起出车前分析，三智能体生成常态方案对比与多路线候选，选定一条后派单给司机', 'info');
       this.$nextTick(() => {
         if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.runAnalysis(false, 'normal');
@@ -1793,9 +2074,13 @@ export default {
       this.perfLite = isLite();
       this.perfAuto = isAutoLite();
     });
+    // 视口宽度变化（含浏览器缩放）时把两窗口夹回可视区，防止拖到边缘后窗口丢失
+    this._onWinResize = () => this.clampDockPositions();
+    window.addEventListener('resize', this._onWinResize);
   },
   beforeUnmount() {
     this._unmounted = true;
+    if (this._onWinResize) { window.removeEventListener('resize', this._onWinResize); this._onWinResize = null; }
     if (this._agentReconnectTimer) { clearTimeout(this._agentReconnectTimer); this._agentReconnectTimer = null; }
     if (this._taskSyncTimer) clearInterval(this._taskSyncTimer);
     if (this._offLiteChange) { this._offLiteChange(); this._offLiteChange = null; }
@@ -1954,6 +2239,95 @@ export default {
 .main { display:flex; height:calc(100vh - 65px); }
 .map-area { flex:1; position:relative; background:#dfe7f5; }
 
+/* 任务操作台（地图区）：AI 决策分析 / 决策沙盘 两个窗口常驻于此（v-show 控制显隐）。
+   两窗均为绝对定位、可按住标题栏拖动；首次展开按预设槽位出现（2 号左、3 号右并排）；
+   都不用时两窗 display:none、整块 pointer-events:none → 不挡地图。地图缩放控件已移到左下角（见 MapView）。 */
+.task-dock {
+  /* 铺满整个地图区作为拖拽定位上下文；本身透明不接事件，只有子窗口/工具条接 */
+  position: absolute; inset: 0; z-index: 600; pointer-events: none;
+}
+.task-dock.is-empty { pointer-events: none; }
+.dock-toolbar {
+  position: absolute; top: 12px; left: 12px; z-index: 7;
+  display: flex; align-items: center; gap: 10px; pointer-events: auto;
+  padding: 4px 6px 4px 14px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(79, 109, 245, 0.3);
+  box-shadow: 0 4px 14px rgba(30, 50, 90, 0.15);
+}
+.dock-toolbar-title { font-size: 12px; font-weight: 700; color: #40507a; letter-spacing: .3px; }
+.dock-tool-btn {
+  border: 1px solid rgba(79,109,245,0.45); background: rgba(79,109,245,0.10);
+  color: #4f6df5; font-size: 11.5px; font-weight: 600;
+  padding: 3px 12px; border-radius: 999px; cursor: pointer;
+}
+.dock-tool-btn:hover { background: rgba(79,109,245,0.18); }
+/* 包裹层不生成盒子：让两个 .dock-window 直接以 .task-dock（inset:0 铺满地图区）为定位上下文，
+   从而可各自按 left/top 绝对定位并自由拖动 */
+.dock-row { display: contents; }
+/* 操作台窗口：绝对定位在地图区内的玻璃卡片，可按住标题栏拖动（left/top 由内联 style 给出）。
+   首次展开落在预设槽位；pointer-events:auto 让窗口可交互，容器透明 → 空态不挡地图。 */
+.dock-window {
+  position: absolute; width: 560px; box-sizing: border-box;
+  display: flex; flex-direction: column;
+  max-height: calc(100vh - 150px);
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(79, 109, 245, 0.35);
+  border-radius: 14px; overflow: hidden;
+  box-shadow: 0 12px 40px rgba(30, 50, 90, 0.22);
+  pointer-events: auto;
+  animation: mto-in .2s ease;
+}
+@keyframes mto-in {
+  from { opacity: 0; transform: translateY(-8px) scale(.98); }
+  to   { opacity: 1; transform: none; }
+}
+.dw-head {
+  display: flex; align-items: center; justify-content: space-between;
+  box-sizing: border-box; /* 放大时内联 width 为基准值，border-box 让 padding 计入宽度，不横向溢出窗口 */
+  padding: 8px 12px; flex: 0 0 auto; cursor: move; user-select: none; touch-action: none;
+  background: linear-gradient(135deg, rgba(79,109,245,0.14), rgba(34,184,207,0.14));
+  border-bottom: 1px solid rgba(79, 109, 245, 0.22);
+}
+.dw-grip { color: #9fb0d8; margin-right: 4px; font-size: 12px; letter-spacing: -1px; }
+.dw-title { font-size: 12.5px; font-weight: 700; color: #40507a; letter-spacing: .3px; }
+.dw-actions { display: flex; gap: 6px; }
+.dw-btn {
+  border: 1px solid rgba(79,109,245,0.4); background: rgba(255,255,255,0.72);
+  color: #4f6df5; font-size: 11.5px; font-weight: 600;
+  padding: 2px 8px; border-radius: 7px; cursor: pointer; white-space: nowrap;
+}
+.dw-btn:hover { background: rgba(79,109,245,0.12); }
+.dw-body { box-sizing: border-box; padding: 12px; overflow: auto; flex: 1 1 auto; min-height: 0; }
+.dw-body::-webkit-scrollbar { width: 6px; }
+.dw-body::-webkit-scrollbar-thumb { background: rgba(79,109,245,0.35); border-radius: 3px; }
+/* 右边缘调宽手柄：与左栏 .panel-resizer 同交互（col-resize 拖动、双击复位）。盖在右边缘，
+   不随标题栏拖动（@pointerdown.stop），z-index 高于 body 保证可抓 */
+.dw-resizer {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 9px;
+  cursor: col-resize; z-index: 8; touch-action: none;
+  background: linear-gradient(180deg, rgba(99,102,241,0.14), rgba(34,211,238,0.14), rgba(168,85,247,0.14));
+  transition: background .18s ease;
+}
+.dw-resizer:hover { background: rgba(79, 109, 245, 0.30); }
+/* 窗口内的卡片不需要下边距（操作台 body 已有内边距） */
+.dw-body .card { margin-bottom: 0; }
+/* 左栏入口卡：把沙盘 / 分析收进操作台后，原位置留一张带「展开 / 拉取」按钮的引导卡 */
+.dock-entry { border-style: dashed; }
+.dock-entry .de-hint { font-size: 11.5px; line-height: 1.5; }
+/* 入口卡里的三个智能体球装饰条：复用分析窗 .agent-flow 的观感（白底圆角 + 渐变球 + 箭头），纯装饰 */
+.dock-entry .de-agents {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 4px; margin-top: 10px; padding: 8px 6px;
+  border-radius: 10px; background: rgba(255, 255, 255, 0.60);
+}
+.dock-entry .de-agent { display: flex; flex-direction: column; align-items: center; gap: 2px; flex: 1; }
+.dock-entry .de-dot { font-size: 20px; line-height: 1; }
+.dock-entry .de-an { font-size: 10px; font-weight: 600; color: #1c2a44; }
+.dock-entry .de-arrow { align-self: center; color: #93a2ba; font-weight: 700; font-size: 12px; }
+
 /* Side panel —— 棱彩发光面板
    底色不再是一片纯白：接上与 .app-root::before 极光同源的色相（靛蓝/天蓝/青/紫/品红），
    多层 background 做棱彩流动 + 右缘多色发光边；卡片仍是近不透明白，数据可读性不受影响。
@@ -2087,13 +2461,16 @@ export default {
 .btn:active { transform:scale(.97); }
 .btn.primary { background:linear-gradient(135deg, #4f6df5, #22b8cf); box-shadow:0 4px 18px rgba(79,109,245,0.35); }
 .btn.primary:hover { box-shadow:0 6px 24px rgba(79,109,245,0.45); }
-.btn:not(.primary):not(.outline):not(.muted):not(.tiny):not(.pick-on):not(.driver-entry) { background:#eef1f8; border:1px solid #dbe3f2; color:#33415c; }
-.btn:hover:not(.primary):not(.outline):not(.muted):not(.tiny):not(.pick-on):not(.driver-entry) { background:#e4eaf6; }
+.btn:not(.primary):not(.outline):not(.muted):not(.tiny):not(.pick-on):not(.live):not(.driver-entry) { background:#eef1f8; border:1px solid #dbe3f2; color:#33415c; }
+.btn:hover:not(.primary):not(.outline):not(.muted):not(.tiny):not(.pick-on):not(.live):not(.driver-entry) { background:#e4eaf6; }
 .btn.small { padding:6px 10px; font-size:11px; }
 .btn.muted { background:#eef1f8; color:#8b99b5; }
 .btn.outline { background:transparent; color:#0e9bb0; border:1px solid rgba(14,155,176,0.4); }
 .btn.outline:hover { border-color:#0e9bb0; background:rgba(14,155,176,0.08); }
 .btn.outline-light { background:rgba(255,255,255,0.25); color:#fff; border:1px solid rgba(255,255,255,.5); }
+/* 左栏「拉取 GOWFS 数据」入口按钮：与沙盘内同名按钮（DecisionSandbox .btn.live）同一绿色实底配色 */
+.btn.live { background:#16a34a; color:#fff; }
+.btn.live:hover { background:#15803d; }
 /* 司机端入口：头部其余按钮都是冷蓝灰，这里用品牌棱镜里的暖端（橙→品红）做整屏唯一暖色块，
    再叠一呼吸发光。高度控制在 ~29px：.main 的 calc(100vh - 65px) 是写死的，
    按钮把头部顶高就会在底部多出/缺一段空隙 */

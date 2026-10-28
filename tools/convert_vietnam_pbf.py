@@ -671,7 +671,13 @@ def generate_source(pbf_paths, bbox, anchor_cities, snap_km, label, levels=LEVEL
     return nodes, edges, anchor_match, degree, coords, ways, key_nodes
 
 
-def main():
+def legacy_main():
+    """改造前的编排（走廊参数写死在模块常量里）。
+
+    留着它不是为了当入口，而是当作 corridor_convert.py 的等价对账基准：
+    新引擎在 vietnam-cn 走廊上的产物必须与它逐字节相同，重构才算真没改逻辑。
+    入口已改到文件末尾的 main()。
+    """
     import argparse
     from collections import deque
     parser = argparse.ArgumentParser()
@@ -810,6 +816,17 @@ def main():
         with open("convert_debug.txt", "w", encoding="utf-8") as f:
             f.write("\n".join(debug_lines))
         print(f"[诊断] 未接入锚点信息 -> convert_debug.txt ({len(debug_lines)} 行)")
+
+
+def main():
+    """入口收敛到走廊配置（tools/corridors/<name>.json）。
+
+    本文件顶部的常量仍是缺省走廊 vietnam-cn 的定义源：跑
+    `python tools/corridor_convert.py --dump-corridor vietnam-cn` 把它们导出成配置文件，
+    再用 `--check-corridor` 对账，再用 `--out` 重生路网与已入库文件逐字节比。
+    """
+    from corridor_convert import run
+    sys.exit(run())
 
 
 if __name__ == "__main__":

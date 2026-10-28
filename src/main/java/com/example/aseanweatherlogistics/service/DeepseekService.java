@@ -52,9 +52,12 @@ public class DeepseekService {
 
     // ---- 本地通道：Ollama（离线演示主力，拔网线可用；优先级最高）----
     private final OllamaService ollamaService;
+    /** 调用计量（token / 耗时 / 并发）；为 null 时（单测直接构造）静默不记。 */
+    private final AiMetricsService metrics;
 
-    public DeepseekService(OllamaService ollamaService) {
+    public DeepseekService(OllamaService ollamaService, AiMetricsService metrics) {
         this.ollamaService = ollamaService;
+        this.metrics = metrics;
     }
 
     /** 在线通道超时：公网链路较长，给足时间但也不能无限等 */
@@ -71,8 +74,21 @@ public class DeepseekService {
     /**
      * 一次 AI 回复 + 它的真实来源。channel 取值见 {@link #CHANNEL_LOCAL} 等常量，
      * 两条通道全部失败时为 null（调用方须按「非模型生成」处理）。
+     * <p>
+     * {@code elapsedMs} 是<b>整条链路的等待时长</b>（含本地失败后重试在线的那一段），
+     * 不是某个模型自己的生成时间——用户关心的是“我等了多久”，拿后者报前者会低估。
+     * 保留三参构造器，不需要用量的旧调用方写法不变。
      */
-    public record AiReply(String text, String channel, String model) {
+    public record AiReply(String text, String channel, String model,
+                          long elapsedMs, long promptTokens, long completionTokens) {
+        public AiReply(String text, String channel, String model) {
+            this(text, channel, model, 0, 0, 0);
+        }
+
+        public long tokens() {
+            return promptTokens + completionTokens;
+        }
+
         /** 给上层落库/透传用的紧凑标记：channel[:model]，无通道时为 null。 */
         public String tag() {
             if (channel == null) {
@@ -95,21 +111,43 @@ public class DeepseekService {
      * @return 回复文本与来源通道；两条通道都失败 / 无 key 时 text 与 channel 均为 null
      */
     public AiReply chatWithChannel(String systemPrompt, String userPrompt, int maxTokens) {
-        // 本地 Ollama 优先：拔网线离线演示时所有 AI 功能仍可用，数据不出境
-        if (ollamaService != null && ollamaService.enabled()) {
-            String local = ollamaService.chat(systemPrompt, userPrompt, maxTokens);
-            if (local != null) {
-                return new AiReply(local, CHANNEL_LOCAL, ollamaService.model());
+        long t0 = System.nanoTime();
+        if (metrics != null) {
+            metrics.beginCall();
+        }
+        try {
+            // 本地 Ollama 优先：拔网线离线演示时所有 AI 功能仍可用，数据不出境
+            if (ollamaService != null && ollamaService.enabled()) {
+                OllamaService.LlmReply local = ollamaService.chatDetailed(systemPrompt, userPrompt, maxTokens);
+                if (local.ok()) {
+                    return answered(CHANNEL_LOCAL, ollamaService.model(), local.text(), local, t0);
+                }
+            }
+            if (!keyConfigured(fallbackKey)) {
+                log.info("未配置在线 DeepSeek 令牌（deepseek.fallback.key 为空或占位符），降级到规则模板");
+                return answered(null, null, null, null, t0);
+            }
+            OllamaService.LlmReply online = chatRemote(fallbackUrl, fallbackModel,
+                    SecretCodec.resolve(fallbackKey), systemPrompt, userPrompt, maxTokens, ONLINE_TIMEOUT_SECONDS);
+            // 只有真拿到内容才算命中在线通道，否则通道为 null（降级到规则模板）
+            return answered(online.ok() ? CHANNEL_ONLINE : null, fallbackModel, online.text(), online, t0);
+        } finally {
+            if (metrics != null) {
+                metrics.endCall();
             }
         }
-        if (!keyConfigured(fallbackKey)) {
-            log.info("未配置在线 DeepSeek 令牌（deepseek.fallback.key 为空或占位符），降级到规则模板");
-            return new AiReply(null, null, null);
+    }
+
+    /** 统一出口：算耗时、记计量、拼回 {@link AiReply}（失败也记，否则「本地一直挂」会被看成「本地很快」）。 */
+    private AiReply answered(String channel, String model, String text,
+                             OllamaService.LlmReply usage, long t0) {
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        long pt = usage == null ? 0 : usage.promptTokens();
+        long ct = usage == null ? 0 : usage.completionTokens();
+        if (metrics != null) {
+            metrics.record(channel, model, ms, pt, ct, text != null);
         }
-        String online = chatRemote(fallbackUrl, fallbackModel, SecretCodec.resolve(fallbackKey),
-                systemPrompt, userPrompt, maxTokens, ONLINE_TIMEOUT_SECONDS);
-        // 只有真拿到内容才算命中在线通道，否则通道为 null（降级到规则模板）
-        return new AiReply(online, online != null ? CHANNEL_ONLINE : null, fallbackModel);
+        return new AiReply(text, channel, model, ms, pt, ct);
     }
 
     /**
@@ -121,11 +159,11 @@ public class DeepseekService {
         return chatWithChannel(systemPrompt, userPrompt, maxTokens).text();
     }
 
-    /** 向 OpenAI 兼容端点发一次 chat 请求（携带 Bearer 鉴权） */
-    private String chatRemote(String url, String mdl, String key,
-                              String systemPrompt, String userPrompt, int maxTokens, int timeoutSeconds) {
+    /** 向 OpenAI 兼容端点发一次 chat 请求（携带 Bearer 鉴权），失败回 {@link OllamaService.LlmReply#NONE}。 */
+    private OllamaService.LlmReply chatRemote(String url, String mdl, String key,
+                             String systemPrompt, String userPrompt, int maxTokens, int timeoutSeconds) {
         if (url == null || url.isBlank() || mdl == null || mdl.isBlank()) {
-            return null;
+            return OllamaService.LlmReply.NONE;
         }
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("model", mdl);
@@ -152,19 +190,29 @@ public class DeepseekService {
             HttpResponse<String> resp = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
                 log.warn("AI 端点 {} 返回 HTTP {}，按失败处理", url, resp.statusCode());
-                return null;
+                return OllamaService.LlmReply.NONE;
             }
             JsonNode root = mapper.readTree(resp.body());
             JsonNode content = root.path("choices").path(0).path("message").path("content");
             if (content.isMissingNode() || content.isNull()) {
-                return null;
+                return OllamaService.LlmReply.NONE;
             }
             String text = content.asText().trim();
-            return text.isEmpty() ? null : text;
+            if (text.isEmpty()) {
+                return OllamaService.LlmReply.NONE;
+            }
+            return new OllamaService.LlmReply(text, usageLong(root, "prompt_tokens"),
+                    usageLong(root, "completion_tokens"));
         } catch (IOException | InterruptedException e) {
             log.warn("AI 端点 {} 请求异常：{}", url, e.toString());
-            return null;
+            return OllamaService.LlmReply.NONE;
         }
+    }
+
+    /** 读 {@code usage} 里的一个计数；端点没回就 0（不拿字符数估算）。 */
+    private static long usageLong(JsonNode root, String field) {
+        JsonNode v = root.path("usage").path(field);
+        return v.isNumber() ? v.asLong() : 0L;
     }
 
     /**

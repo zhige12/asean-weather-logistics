@@ -28,19 +28,11 @@
         <span class="fld-label">重量(t)</span>
         <input v-model.number="form.weightT" class="fld-input" type="number" min="1" step="1" />
       </label>
-      <label class="fld">
-        <span class="fld-label">起点</span>
-        <select v-model="form.originId" class="fld-input">
-          <option v-for="n in nodes" :key="n.id" :value="n.id">{{ n.name }}</option>
-        </select>
-      </label>
-      <label class="fld">
-        <span class="fld-label">终点</span>
-        <select v-model="form.destinationId" class="fld-input">
-          <option v-for="n in nodes" :key="n.id" :value="n.id">{{ n.name }}</option>
-        </select>
-      </label>
     </div>
+
+    <!-- 起终点输入框与地图选点/清空/确认规划按钮：由 App.vue 经 route-picker 插槽注入
+         （内容编译于父作用域，PlaceInput 的 ref 与相关方法照常工作） -->
+    <slot name="route-picker" />
 
     <!-- 触发出车前 AI 气象分析：路线比选与派单入口在「AI 决策分析」面板 -->
     <div class="row actions">
@@ -59,7 +51,7 @@
     <div v-if="analyzed" class="analyze-box">
       <div class="analyze-head">
         <span>出车前 AI 气象分析已触发</span>
-        <span class="muted od-tag">{{ form.originId }} → {{ form.destinationId }}</span>
+        <span class="muted od-tag">{{ originId }} → {{ destinationId }}</span>
       </div>
       <div class="analyze-summary">
         多路线候选与六维对比已生成在「AI 决策分析 · 多智能体协同」面板。
@@ -93,24 +85,19 @@ import axios from "axios";
 const props = defineProps({
   // 由 App.vue 经 SSE（task-assigned）实时推送 + 挂载时补拉一次；null = 服务端态还没取到
   taskStatus: { type: Object, default: null },
+  // 起终点已上提到 App.vue 的 PlaceInput（经 route-picker 插槽渲染）：这里只接过来做展示回显
+  originId: { type: String, default: "" },
+  destinationId: { type: String, default: "" },
 });
 const emit = defineEmits(["refresh", "analyze"]);
 
-// 面板可选起终点：只列演示确定存在的节点，避免编造路网 ID
-const nodes = [
-  { id: "NN", name: "南宁（NN）" },
-  { id: "LJ", name: "南宁港六景作业区（LJ）" },
-  { id: "HN", name: "河内（HN）" },
-  { id: "PX", name: "凭祥（PX）" },
-];
-
+// 起终点不再由本面板的下拉框控制（已并入 App.vue 的 PlaceInput，经 route-picker 插槽注入）；
+// 本表单只留订单字段，analyze 时递上去，起终点由父组件解析后回填
 const form = reactive({
   plate: "桂A·D12345",
   driverName: "阿明",
   cargoType: "DRAGON_FRUIT",
   weightT: 18,
-  originId: "NN",
-  destinationId: "HN",
 });
 const cargoTypes = ref({ DRAGON_FRUIT: { name: "冷链火龙果" }, ELECTRONICS: { name: "电子元件" } });
 const busy = ref(false);

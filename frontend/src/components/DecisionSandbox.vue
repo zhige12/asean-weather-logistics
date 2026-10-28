@@ -831,8 +831,8 @@ onMounted(() => {
   loadScenarios();
 });
 
-// 供父组件调用：外部（配置器改阈值）触发后刷新沙盘
-defineExpose({ refresh });
+// 供父组件调用：外部（配置器改阈值）触发后刷新沙盘；左栏「拉取 GOWFS」入口卡展开沙盘同时直接发起拉取
+defineExpose({ refresh, pullLive: pushLive });
 </script>
 
 <style scoped>

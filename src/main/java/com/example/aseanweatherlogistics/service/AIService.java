@@ -754,16 +754,20 @@ public class AIService {
             return "当前无气象风险，暂无行业知识依据。";
         }
         List<KnowledgeEntry> matched = new ArrayList<>();
+        // 上限 3 条：旧值 2 是在旧版“整句子串匹配”的前提下定的（那时能命中 1 条就算运气）。
+        // 现在改成分词 + 稀有度打分，召 3 条的成本是提示词变长，收益是多给模型两条可选依据；
+        // 再多就会把弱命中也塞进去，反而污染生成结果。
+        final int maxContextEntries = 3;
         for (String q : queries) {
             for (KnowledgeEntry e : knowledgeBaseService.search(q, 1)) {
                 if (!matched.contains(e)) {
                     matched.add(e);
                 }
-                if (matched.size() >= 2) {
+                if (matched.size() >= maxContextEntries) {
                     break;
                 }
             }
-            if (matched.size() >= 2) {
+            if (matched.size() >= maxContextEntries) {
                 break;
             }
         }
