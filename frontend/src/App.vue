@@ -436,6 +436,33 @@
                         <span v-if="pushed && !simMode" class="route-state">真实 · 只读</span>
                         <span v-else-if="simMode" class="route-state ok">模拟 · 可调</span>
                       </h3>
+                      <!-- 通关时效「真实抓取」溯源块：独立于下方沙盘 push/sim 逻辑，常驻展示官方公告抽取值 + 出处 -->
+                      <div v-if="customsBulletin" class="bulletin-box">
+                        <div class="row" style="align-items:center;justify-content:space-between">
+                          <span class="route-state" :class="customsBulletin.ok ? 'ok' : 'warn'">
+                            {{ customsBulletin.ok ? '官方公告 · 真实抓取' : (customsBulletin.enabled === false ? '抓取未启用 · 包内基线' : '公告未命中 · 降级包内基线') }}
+                          </span>
+                          <button class="btn tiny outline" :disabled="bulletinLoading" @click="loadBulletin(true)">
+                            {{ bulletinLoading ? '抓取中…' : '刷新公告' }}
+                          </button>
+                        </div>
+                        <template v-if="customsBulletin.ok">
+                          <div class="bulletin-nums">
+                            进口整体通关 <b>{{ customsBulletin.importHours }}</b> h<template v-if="customsBulletin.exportHours != null"> · 出口 <b>{{ customsBulletin.exportHours }}</b> h</template>
+                          </div>
+                          <div class="muted bulletin-meta">
+                            {{ customsBulletin.metric || '全区口岸整体通关时间（小时）·官方口径' }}
+                            <template v-if="customsBulletin.publishDate"> · 发布 {{ customsBulletin.publishDate }}</template>
+                            <template v-if="customsBulletin.fetchedAtText"> · 抓取 {{ customsBulletin.fetchedAtText }}<template v-if="bulletinAge(customsBulletin)">（{{ bulletinAge(customsBulletin) }}）</template></template>
+                            <a v-if="customsBulletin.sourceUrl" :href="customsBulletin.sourceUrl" target="_blank" rel="noopener" class="bulletin-link">🔗 来源</a>
+                          </div>
+                          <div v-if="customsBulletin.quote" class="bulletin-quote" :title="customsBulletin.quote">原文：{{ customsBulletin.quote }}</div>
+                          <div v-if="customsBulletin.stats && customsBulletin.stats.upstreamRequests != null" class="muted bulletin-meta">
+                            回源 {{ customsBulletin.stats.upstreamRequests }} 次 · 缓存命中 {{ customsBulletin.stats.cacheHits }} · 节流 {{ customsBulletin.stats.throttled }}<template v-if="customsBulletin.fromCache">（本次命中缓存，未重复回源）</template>
+                          </div>
+                        </template>
+                        <div v-else class="muted" style="line-height:1.6">{{ customsBulletin.error || '公告尚不可用' }}——下方各口岸仍用包内基线时效。</div>
+                      </div>
                       <div v-if="!pushed" class="muted" style="line-height:1.6">
                         未拉取真实数据：请先在上方「决策沙盘」点击「拉取 GOWFS 数据」查看真实通关时效；再点「模拟」方可手动调节各口岸时效。
                       </div>
@@ -601,6 +628,9 @@ export default {
       hazardItems: [],
       hazardInjected: false,
       customsList: [],
+      // 通关时效「真实抓取」：官方公告页抽取结果（含出处），null=尚未取到
+      customsBulletin: null,
+      bulletinLoading: false,
       period: 'normal',
       cargoType: 'general',
       knowledgeQuery: '',
@@ -1038,6 +1068,28 @@ export default {
     baseHours(portId) {
       const p = this.customsList.find(x => x.portId === portId);
       return p ? p.baseHours : '-';
+    },
+    /** 通关时效「真实抓取」：拉官方公告抽取结果（含出处）。refresh=true 手动刷新（服务端仍按硬地板/熔断限频）。 */
+    async loadBulletin(refresh = false) {
+      this.bulletinLoading = true;
+      try {
+        const r = await axios.get('/api/customs/bulletin', { params: { refresh: refresh ? 1 : 0 }, timeout: 20000 });
+        this.customsBulletin = r.data || null;
+      } catch (e) {
+        console.error('load customs bulletin failed', e);
+        this.customsBulletin = { ok: false, enabled: true, error: '公告接口请求失败（离线或后端未连通）' };
+      } finally {
+        this.bulletinLoading = false;
+      }
+    },
+    /** 抓取时刻距今多久（分/小时/天），用于溯源行的“新鲜度”展示。 */
+    bulletinAge(b) {
+      if (!b || !b.ageSeconds) return '';
+      const s = b.ageSeconds;
+      if (s < 60) return s + ' 秒前';
+      if (s < 3600) return Math.round(s / 60) + ' 分钟前';
+      if (s < 86400) return Math.round(s / 3600) + ' 小时前';
+      return Math.round(s / 86400) + ' 天前';
     },
     async adjustCustoms(portId, delta) {
       try {
@@ -2050,6 +2102,8 @@ export default {
     this.loadNetwork();
     this.refreshRisks();
     this.loadCustoms();
+    // 通关时效溯源：拉官方公告抽取（含出处）。首屏只读，不触发刷新（服务端 24h 窗口内回缓存）
+    this.loadBulletin(false);
     // 先拿“选了哪个源”，再拉数据：反过来会让拉数据回包临时顶掉下拉框
     this.loadWeatherSource();
     this.loadRealWeather();
@@ -2609,6 +2663,19 @@ export default {
 
 /* 通关时效并入决策沙盘卡片内的子块：不再自带 card 外框，用顶部虚线与上方沙盘内容分隔 */
 .sandbox-sub { margin-top:16px; padding-top:14px; border-top:1px dashed rgba(30,50,90,0.15); }
+/* 通关时效「真实抓取」溯源块：与下方包内基线列表区分开，左侧主强调色竖条 + 浅背景 */
+.bulletin-box { margin:8px 0 10px; padding:8px 10px; border-radius:10px; background:rgba(79,109,245,0.06);
+  border-left:3px solid #4f6df5; }
+.bulletin-box .route-state { float:none; }
+.route-state.warn { background:rgba(217,119,6,0.14); color:#b45309; }
+.route-state.ok { background:rgba(22,163,74,0.14); color:#16a34a; }
+.bulletin-nums { font-size:14px; color:#1c2a44; margin:6px 0 2px; }
+.bulletin-nums b { font-size:18px; font-family:var(--mono,monospace); color:#4f6df5; }
+.bulletin-meta { font-size:11px; line-height:1.7; word-break:break-all; }
+.bulletin-quote { font-size:11px; color:#64748f; line-height:1.5; margin-top:4px; padding:4px 8px;
+  background:rgba(30,50,90,0.05); border-radius:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.bulletin-link { margin-left:6px; color:#4f6df5; text-decoration:none; font-weight:600; }
+.bulletin-link:hover { text-decoration:underline; }
 
 .kb-input { flex:1; padding:8px 10px; background:#f4f6fc; border:1px solid #dbe3f2; border-radius:8px; color:#33415c; font-size:13px; outline:none; }
 .kb-input:focus { border-color:#4f6df5; box-shadow:0 0 0 3px rgba(79,109,245,0.12); }

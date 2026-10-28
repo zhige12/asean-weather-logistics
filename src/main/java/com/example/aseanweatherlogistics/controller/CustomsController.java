@@ -1,5 +1,6 @@
 package com.example.aseanweatherlogistics.controller;
 
+import com.example.aseanweatherlogistics.service.CustomsBulletinFetcher;
 import com.example.aseanweatherlogistics.service.CustomsEfficiencyService;
 import java.util.List;
 import java.util.Map;
@@ -21,9 +22,22 @@ import org.springframework.web.bind.annotation.RestController;
 public class CustomsController {
 
     private final CustomsEfficiencyService service;
+    private final CustomsBulletinFetcher bulletinFetcher;
 
-    public CustomsController(CustomsEfficiencyService service) {
+    public CustomsController(CustomsEfficiencyService service, CustomsBulletinFetcher bulletinFetcher) {
         this.service = service;
+        this.bulletinFetcher = bulletinFetcher;
+    }
+
+    /**
+     * 通关时效「真实抓取」：抓政府口岸主管部门公开通报页，抽取官方口径进口/出口整体通关时间，
+     * 连同出处（来源 URL / 发布日期 / 命中原句 / 抓取时刻）返回。带 refresh=1 触发手动刷新
+     * （仍受服务端最小间隔硬地板与熔断约束）。抓不到时 ok=false 并给出原因，由界面降级到包内基线。
+     */
+    @GetMapping("/bulletin")
+    public Map<String, Object> bulletin(
+            @org.springframework.web.bind.annotation.RequestParam(required = false, defaultValue = "false") boolean refresh) {
+        return bulletinFetcher.bulletin(refresh);
     }
 
     /** 全部口岸通关时效（含默认值与当前生效值）。 */
