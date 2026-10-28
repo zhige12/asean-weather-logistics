@@ -215,6 +215,14 @@
              短临预报（官方 3h 预报多时效降雨驱动的指数演变）。自包含拉数，随起终点变化刷新。 -->
         <AmriPanel ref="amriRef" :origin-id="originId" :destination-id="destinationId" />
 
+        <!-- 多模态生成：把 AMRI 风险研判一键绘成中越双语预警海报（结构化数据→图像），可下载 PNG 分享 -->
+        <WarningPoster
+          :origin-id="originId"
+          :destination-id="destinationId"
+          :origin-name="originName"
+          :destination-name="destinationName"
+        />
+
         <section v-if="routeResult && routeResult.route" class="card">
           <h3>路线状态
             <span class="route-state" :class="routeStateClass">{{ routeStateText }}</span>
@@ -537,6 +545,7 @@ import BriefingPanel from './components/BriefingPanel.vue';
 import CarbonCalc from './components/CarbonCalc.vue';
 import DecisionSandbox from './components/DecisionSandbox.vue';
 import AmriPanel from './components/AmriPanel.vue';
+import WarningPoster from './components/WarningPoster.vue';
 import TaskDispatchPanel from './components/TaskDispatchPanel.vue';
 import AgentPanel from './components/AgentPanel.vue';
 import CopilotPanel from './components/CopilotPanel.vue';
@@ -589,7 +598,7 @@ const WEATHER_SOURCE_SHORT = {
 export default {
   components: {
     MapView, RiskStrip, ETAIndicator, BriefingPanel, CarbonCalc,
-    DecisionSandbox, AmriPanel, TaskDispatchPanel, AgentPanel, OutreachPanel,
+    DecisionSandbox, AmriPanel, WarningPoster, TaskDispatchPanel, AgentPanel, OutreachPanel,
     PlatformConfigurator, DecisionLogTimeline, PlaceInput, CopilotPanel, AiBall
   },
   data() {
