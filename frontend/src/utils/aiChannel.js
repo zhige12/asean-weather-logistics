@@ -52,13 +52,21 @@ export async function fetchAiMetrics() {
   }
 }
 
-/** 累计量的一行人话：只报能核的数（token、峰值并发），单价没填时不提钱。 */
+/** 累计量的一行人话：只报能核的数（token、峰值并发、并发闸），单价没填时不提钱。 */
 export function formatPool(m) {
   if (!m) return "";
   const tokens = Number(m.tokens) || 0;
   const parts = [];
   if (tokens) parts.push(`累计 ${tokens >= 10000 ? (tokens / 1000).toFixed(1) + "k" : tokens} tokens`);
-  if (m.peakInFlight) parts.push(`峰值并发 ${m.peakInFlight}`);
+  // 并发闸：有上限时把「峰值/上限」摆出来，被限流拒绝过就补一个计数——证明并发是被「限住」而非只「看到」
+  const limit = Number(m.inFlightLimit) || 0;
+  if (limit > 0) {
+    parts.push(`峰值并发 ${Number(m.peakInFlight) || 0}/${limit}`);
+    const rej = Number(m.rejected) || 0;
+    if (rej > 0) parts.push(`限流降级 ${rej}`);
+  } else if (m.peakInFlight) {
+    parts.push(`峰值并发 ${m.peakInFlight}`);
+  }
   if (m.costConfigured && Number(m.costCny) > 0) parts.push(`≈¥${m.costCny}`);
   return parts.join(" · ");
 }

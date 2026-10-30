@@ -53,4 +53,13 @@ public class SimulatedWeatherProvider implements WeatherProvider {
         }
         return out;
     }
+
+    /**
+     * 离线模拟本身就是纯本地计算（按节点 ID 派生确定性数值），不碰网络，
+     * 所以节流窗口内也可以直接给新口岸补数——这正是断网演示时「选了哪条线就看到哪条线的点」要保证的。
+     */
+    @Override
+    public List<RealWeatherService.WeatherPoint> interpolateFromLastFetch(List<RoadNode> nodes) {
+        return fetchForNodes(nodes);
+    }
 }

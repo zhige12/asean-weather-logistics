@@ -66,6 +66,10 @@ public class AiMetricsService {
     private final Map<String, ChannelStat> channels = new ConcurrentHashMap<>();
     private final AtomicInteger inFlight = new AtomicInteger();
     private final AtomicInteger peakInFlight = new AtomicInteger();
+    /** 被并发闸拒绝、直接降级（未占工作线程）的调用数——「限住了」的证据，与 failures 分开记。 */
+    private final LongAdder rejected = new LongAdder();
+    /** 并发闸上限（由 {@code DeepseekService} 启动时回填）；0 表示未启用有界闸。 */
+    private volatile int inFlightLimit;
     /** 最近一次成功调用的快照，供前端「本次 X tokens / Y ms」直接取用。 */
     private volatile Map<String, Object> lastCall;
 
@@ -79,6 +83,16 @@ public class AiMetricsService {
 
     public void endCall() {
         inFlight.decrementAndGet();
+    }
+
+    /** 并发已满、本次快速失败降级时计数（不进入 beginCall，因为没真正占用模型线程）。 */
+    public void recordRejection() {
+        rejected.increment();
+    }
+
+    /** 由持有并发闸的 {@code DeepseekService} 在启动时回填上限，供回包如实展示「X/Y」。 */
+    public void setInFlightLimit(int limit) {
+        this.inFlightLimit = Math.max(0, limit);
     }
 
     /**
@@ -139,6 +153,9 @@ public class AiMetricsService {
         out.put("byChannel", byChannel);
         out.put("inFlight", inFlight.get());
         out.put("peakInFlight", peakInFlight.get());
+        // 并发闸：上限与被拒绝数——「看得到并发」之外补上「限得住并发」的当场证据
+        out.put("inFlightLimit", inFlightLimit);
+        out.put("rejected", rejected.sum());
         out.put("lastCall", lastCall);
         // 成本：单价缺省时明确回报「未核价」而不是 0 元，防止被读成「本地推理免费」以外的意思
         double cost = onlineInputPerMtok / 1_000_000 * allPrompt

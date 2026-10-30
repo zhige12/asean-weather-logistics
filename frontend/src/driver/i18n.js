@@ -1,10 +1,11 @@
 /**
- * 司机端整机界面中越切换（国际化）。
- * 设计取舍：不做全量模板重构（8000 行文件改动风险高），而用「中文原文 → 越南语」字典 +
+ * 司机端整机界面多语言切换（国际化）：中文 ↔ 越南语 ↔ 英语。
+ * 设计取舍：不做全量模板重构（8000 行文件改动风险高），而用「中文原文 → 目标语」字典 +
  * t() 包裹函数渐进覆盖。字典未命中的字符串原样回落中文，界面永不出现空白或 key 泄漏；
  * 后续每补一个词条就多覆盖一处，可增量完善。
  * 专名兜底：动态拼接串（如城市名、口岸名）即便整体不在字典里，也先按术语表逐词替换，
- * 让越南语司机至少能认出南宁/河内/友谊关这些地名。
+ * 让外语司机至少能认出南宁/河内/友谊关这些地名。
+ * 多字典：vi / en 各一份精确字典 + 术语表，按当前语言选一份用（见 UI_DICTS / UI_TERMS）。
  */
 
 // 界面 chrome 精确字典：key 为界面上的中文原文
@@ -258,24 +259,250 @@ const VI_TERMS = [
 // 长词优先，防止「南宁港」被「南宁」先截断；只做多字术语替换，避免单字误伤
 VI_TERMS.sort((a, b) => b[0].length - a[0].length)
 
+// ===== 英语界面字典（国际化第三语言；key 同为中文原文，未命中回落中文）=====
+export const EN_UI = {
+  // 顶部控件 / 悬浮按钮
+  '放大': 'Zoom in',
+  '缩小': 'Zoom out',
+  '回到网络中心': 'Recenter',
+  '切换底图': 'Change basemap',
+  '卫星影像': 'Satellite',
+  '矢量地图': 'Vector map',
+  '标准地图': 'Standard map',
+  '离线地图': 'Offline map',
+  '切换到移动版（手机小屏样式）': 'Switch to mobile',
+  '切换到PC版（整窗大屏样式）': 'Switch to PC',
+  '退出全屏': 'Exit fullscreen',
+  '全屏显示': 'Fullscreen',
+
+  // 模式 / 状态浮标
+  '物流任务模式': 'Logistics task mode',
+  '普通导航模式': 'Standard navigation mode',
+  '预览订单': 'Preview order',
+  '已接单': 'Accepted',
+  '退出': 'Exit',
+  '免费导航 · 天气与口岸提醒': 'Free navigation · Weather & border-crossing alerts',
+
+  // 搜索 / 路线候选
+  '查找地点、规划路线': 'Search places, plan routes',
+  '从哪里出发？如 南宁': 'Where from? e.g. Nanning',
+  '要去哪里？如 河内': 'Where to? e.g. Hanoi',
+  '交换起终点': 'Swap origin/destination',
+  '常用路线': 'Frequent routes',
+  '可选路线': 'Available routes',
+  '点选一条进入地图预览': 'Select a route to preview on the map',
+  '风险': 'risk',
+  '无风险': 'No risk',
+  '处风险': 'risk points',
+  '灾害概率': 'Hazard probability',
+  '低于阈值视为通畅': 'Below threshold, treated as clear',
+  '可坐船': 'Ferry available',
+  '已禁航': 'Navigation banned',
+  '不受公路熔断影响': 'Unaffected by road closure',
+  '平陆运河触发通航安全红线': 'Binh Luc Canal breached navigation safety limit',
+  '收起': 'Collapse',
+  '功能': 'Features',
+  '路线计算中…': 'Calculating route…',
+  '搜索路线中…': 'Searching routes…',
+  '查看路线预览': 'View route preview',
+  '搜索路线并进入地图预览': 'Search routes and preview on map',
+  '导航中 · Agent 实时守护': 'Navigating · Agent live guard',
+  '导航': 'Navigate',
+  '去': 'To',
+  '公里': 'km',
+  '分钟': 'min',
+
+  // 底部 Tab / 抽屉标题
+  '首页': 'Home',
+  '任务': 'Task',
+  '预警': 'Alerts',
+  '知识库': 'Knowledge',
+  '我的': 'Me',
+  '运单': 'Waybill',
+  '物流任务': 'Logistics task',
+  '风险预警': 'Risk alert',
+  'AI方案': 'AI plan',
+  '我的车辆': 'My vehicle',
+
+  // 状态条
+  '全线通畅': 'Route clear',
+  '风险预警 · 谨慎驾驶': 'Risk alert · Drive carefully',
+  '已熔断 · 自动绕行': 'Closed · Auto rerouting',
+  '原地等待 · 车辆停驶': 'Hold in place · Vehicle stopped',
+  '待选路线': 'No route selected',
+  'GPS 搜索中…': 'Acquiring GPS…',
+  '搜索中…': 'Searching…',
+  '已定位 ✓': 'Located ✓',
+  '不可用 ✗': 'Unavailable ✗',
+  '模拟行驶 △': 'Simulated △',
+  '停驶等待 ▮': 'Stopped ▮',
+
+  // 地图 / 预览 / 导航 HUD
+  '地图加载中…': 'Loading map…',
+  '安全路段': 'Safe segment',
+  '风险路段': 'Risk segment',
+  '口岸': 'Border crossing',
+  '退出导航': 'Exit navigation',
+  '返回首页': 'Back to home',
+  '路线预览': 'Route preview',
+  '共': 'Total',
+  '条可选路线': 'available routes',
+  '预计到达': 'ETA',
+  '展开路线列表': 'Expand route list',
+  '收起路线列表': 'Collapse route list',
+  '展开 ▴': 'Expand ▴',
+  '收起 ▾': 'Collapse ▾',
+  'AI 最安全': 'AI safest',
+  '已选': 'Selected',
+  '不建议通行': 'Not recommended',
+  '暂无预测': 'No forecast yet',
+  '展开详情 ▾': 'Details ▾',
+  '展开详情': 'Details',
+  '全览路线': 'Overview route',
+  '开始导航': 'Start navigation',
+  '导航中': 'Navigating',
+  '延误': 'Delay',
+  '陆水联运 · 平陆运河': 'Road-waterway intermodal · Binh Luc Canal',
+  '原地等待中 · 车辆停驶': 'Holding in place · Vehicle stopped',
+  '已按调度指令停在当前位置，车标不再前进；冷链机组保持运行，待风险解除后恢复行驶。':
+    'Stopped in place per dispatch order; the vehicle holds position while the refrigeration unit keeps running, and will resume once the risk clears.',
+  '恢复行驶': 'Resume',
+  '我的位置': 'My location',
+  '气象': 'Weather',
+
+  // 任务抽屉
+  '任务变更通知': 'Task change notice',
+  '已确认': 'Confirmed',
+  '待确认': 'Pending',
+  '您的权益保障': 'Your entitlements are protected',
+  '确认中…': 'Confirming…',
+  '确认接收': 'Confirm receipt',
+  '已确认接收 · 新路线已同步': 'Confirmed · New route synced',
+  'AI 方案建议': 'AI plan suggestion',
+  '查看方案': 'View plan',
+  '分析中…': 'Analyzing…',
+  '时效': 'Timeliness',
+  '费用': 'Cost',
+  '货损': 'Cargo damage',
+  '不可用': 'Unavailable',
+  '触达状态': 'Delivery status',
+  'AI 双语预警': 'AI bilingual alert',
+  '生成中…': 'Generating…',
+  '生成预警': 'Generate alert',
+  '当前风险清单': 'Current risk list',
+  '当前无生效风险': 'No active risk',
+  '行业知识速查': 'Industry knowledge quick lookup',
+
+  // 我的
+  '未设置姓名': 'Name not set',
+  '未登记车牌': 'Plate not registered',
+  '任务模式': 'Task mode',
+  '姓名': 'Name',
+  '请输入姓名': 'Enter name',
+  '车牌': 'Plate',
+  '车型': 'Vehicle type',
+  '货物': 'Cargo',
+  '请输入货物名称': 'Enter cargo name',
+  '重量(t)': 'Weight (t)',
+  '温控': 'Temperature',
+  '语音播报': 'Voice broadcast',
+  '保存信息': 'Save info',
+
+  // 订单详情弹层
+  '订单信息': 'Order info',
+  '✅ 已接单': '✅ Accepted',
+  '❌ 已拒单': '❌ Declined',
+  '⏳ 待接单': '⏳ Awaiting acceptance',
+  '吨': 't',
+  '起运': 'Origin',
+  '目的': 'Destination',
+  '承运司机': 'Driver',
+  '送达时限': 'Delivery deadline',
+  '调度下发路线': 'Dispatched route',
+  '路线摘要': 'Route summary',
+  'AI 灾害概率': 'AI hazard probability',
+  '出车前 AI 气象分析': 'Pre-departure AI weather analysis',
+  '处理中…': 'Processing…',
+  '接单中…': 'Accepting…',
+  '✅ 确认接单': '✅ Confirm order',
+  '跨境': 'cross-border',
+  '待接单': 'Awaiting acceptance',
+  '已拒单': 'Declined',
+
+  // 通用按钮
+  '播报': 'Read',
+}
+
+// 英语专名/术语兜底（城市、口岸、灾害等；长词优先，逐词替换）
+const EN_TERMS = [
+  ['友谊关', 'Friendship Pass'],
+  ['平陆运河', 'Binh Luc Canal'],
+  ['钦州港', 'Qinzhou Port'],
+  ['海防港', 'Haiphong Port'],
+  ['南宁港', 'Nanning Port'],
+  ['六景', 'Liujing'],
+  ['芒街', 'Mong Cai'],
+  ['同登', 'Dong Dang'],
+  ['河口', 'Haikou (Laocai)'],
+  ['凭祥', 'Pingxiang'],
+  ['昆明', 'Kunming'],
+  ['海防', 'Haiphong'],
+  ['河内', 'Hanoi'],
+  ['南宁', 'Nanning'],
+  ['东兴', 'Dongxing'],
+  ['老街', 'Lao Cai'],
+  ['谅山', 'Lang Son'],
+  ['广西', 'Guangxi'],
+  ['云南', 'Yunnan'],
+  ['中国', 'China'],
+  ['越南', 'Vietnam'],
+  ['熔断', 'closure'],
+  ['禁航', 'navigation ban'],
+  ['绕行', 'detour'],
+  ['口岸', 'border crossing'],
+  ['风险', 'risk'],
+  ['暴雨', 'heavy rain'],
+  ['台风', 'typhoon'],
+  ['大雾', 'dense fog'],
+  ['公路', 'road'],
+  ['海运', 'sea freight'],
+  ['随船', 'on-board'],
+  ['跨境', 'cross-border'],
+  ['推荐', 'recommended'],
+  ['超阈值', 'over threshold'],
+  ['已生效', 'in effect'],
+]
+EN_TERMS.sort((a, b) => b[0].length - a[0].length)
+
+// 多字典索引：按当前语言选一份精确字典与术语表（zh 不在表内 → translate 原样返回）
+const UI_DICTS = { vi: VI_UI, en: EN_UI }
+const UI_TERMS = { vi: VI_TERMS, en: EN_TERMS }
+
 /**
- * 中文 → 越南语。先查整串精确字典；未命中则逐术语兜底替换。
+ * 中文 → 目标语言（vi/en）。先查整串精确字典；未命中则逐术语兜底替换。
  * 两者都没命中时原样返回（回落中文），绝不返回空或 key。
  */
-export function translateToVi(zh) {
+export function translate(zh, lang) {
   if (zh == null) return zh
-  const exact = VI_UI[zh]
+  const dict = UI_DICTS[lang]
+  if (!dict) return zh
+  const exact = dict[zh]
   if (exact) return exact
   let out = zh
-  for (const [cn, vi] of VI_TERMS) {
-    if (out.includes(cn)) out = out.split(cn).join(vi)
+  for (const [cn, tr] of (UI_TERMS[lang] || [])) {
+    if (out.includes(cn)) out = out.split(cn).join(tr)
   }
   return out
 }
 
-/** 当前语言下是否要做越南语替换 */
+/** 兼容旧签名：中文 → 越南语（内部走通用 translate）。 */
+export function translateToVi(zh) {
+  return translate(zh, 'vi')
+}
+
+/** 当前语言下是否要做界面替换（vi 或 en 才译，zh 原样） */
 export function shouldTranslate(lang) {
-  return lang === 'vi'
+  return lang === 'vi' || lang === 'en'
 }
 
 /**
@@ -298,9 +525,10 @@ export function createUiTranslator(rootEl) {
   function nodeTextTranslate(raw) {
     const key = raw.trim()
     if (!key) return null
+    const dict = UI_DICTS[lang] || {}
     // 先按整串精确匹配（兼顾「AI方案」这类拉丁开头的词条，不能被前缀剥掉）
-    if (VI_UI[key]) {
-      const out = VI_UI[key]
+    if (dict[key]) {
+      const out = dict[key]
       return /[\u00C0-\u024Fa-zA-Z]$/.test(out) ? out + ' ' : out
     }
     // 剥离前导 emoji/符号（如「📋 预览订单」「✅ 已接单」），用剩余中文核心查字典
@@ -309,9 +537,9 @@ export function createUiTranslator(rootEl) {
     const head = key.slice(0, key.length - core.length)
     if (!core) return null
     let out = null
-    if (VI_UI[core]) out = head + VI_UI[core]
+    if (dict[core]) out = head + dict[core]
     else {
-      const w = translateToVi(core)
+      const w = translate(core, lang)
       if (w !== core) out = head + w
     }
     if (!out || out === key) return null
@@ -321,6 +549,7 @@ export function createUiTranslator(rootEl) {
 
   function walkAndApply(root) {
     applying = true
+    const translateNow = shouldTranslate(lang)
     try {
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT)
       let n
@@ -328,7 +557,7 @@ export function createUiTranslator(rootEl) {
         if (n.nodeType === Node.TEXT_NODE) {
           const parent = n.parentElement
           if (!parent || SKIP_TAGS.has(parent.tagName)) continue
-          if (lang === 'vi') {
+          if (translateNow) {
             const t = nodeTextTranslate(n.data)
             if (t) {
               if (n.__zh === undefined) n.__zh = n.data
@@ -343,8 +572,8 @@ export function createUiTranslator(rootEl) {
           for (const attr of ['placeholder', 'title']) {
             const v = n.getAttribute && n.getAttribute(attr)
             if (!v) continue
-            if (lang === 'vi') {
-              const tv = translateToVi(v.trim())
+            if (translateNow) {
+              const tv = translate(v.trim(), lang)
               if (tv !== v.trim()) {
                 if (n['__zh_' + attr] === undefined) n['__zh_' + attr] = v
                 n.setAttribute(attr, tv)
@@ -362,7 +591,7 @@ export function createUiTranslator(rootEl) {
   }
 
   function scheduleReapply() {
-    if (lang !== 'vi' || applying) return
+    if (!shouldTranslate(lang) || applying) return
     // rAF 级节流：导航中每帧都有节点变动，300ms 合并一次遍历足够跟手
     if (timer) return
     timer = setTimeout(() => { timer = null; walkAndApply(root()) }, 300)
@@ -375,13 +604,19 @@ export function createUiTranslator(rootEl) {
 
   return {
     setLang(next) {
+      // 先在上一门外语下把节点还原回中文底，再译到新语言：
+      // 否则 vi→en 直接切会在越南语文本上查中文字典，命中不了、换不动（三态循环必需这一步）。
+      if (shouldTranslate(lang)) {
+        lang = 'zh'
+        walkAndApply(root())
+      }
       lang = next
       walkAndApply(root())
-      if (next === 'vi' && !observer) {
+      if (shouldTranslate(next) && !observer) {
         observer = new MutationObserver(scheduleReapply)
         observer.observe(root(), { subtree: true, childList: true, characterData: true })
       }
-      if (next !== 'vi' && observer) {
+      if (!shouldTranslate(next) && observer) {
         observer.disconnect()
         observer = null
       }

@@ -11,6 +11,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -48,6 +49,9 @@ public class ContestWeatherProvider implements WeatherProvider {
     private double bboxPaddingDeg;
     @Value("${weather.real.request-timeout-seconds:20}")
     private long requestTimeoutSeconds;
+    /** 缓存 TTL（与 RealWeatherService 同一份配置）：上一轮格点超过这个时长就不再拿来补数 */
+    @Value("${weather.real.ttl-minutes:10}")
+    private long ttlMinutes;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -67,6 +71,15 @@ public class ContestWeatherProvider implements WeatherProvider {
         return t;
     });
 
+    /**
+     * 上一轮真实回源取回的格点快照（纯内存、整体替换，读侧不加锁）。
+     * <p>存在的理由：调度员换一条经芒街的线，芒街不在已有缓存里，而上游正被节流挡着——
+     * 实况接口按固定时次取数、内容未变会指数退避（实测 240 秒窗口），守护每 60 秒的回源还会不断
+     * 把窗口往后顶，实测新口岸 9 分钟都进不了打分点。格点已经在这台机器内存里了，
+     * 直接给它插值一次不用打上游。</p>
+     */
+    private volatile LastGrid lastGrid;
+
     @Override
     public String id() {
         return ID;
@@ -85,6 +98,40 @@ public class ContestWeatherProvider implements WeatherProvider {
     @Override
     public List<RealWeatherService.WeatherPoint> fetchForNodes(List<RoadNode> nodes) {
         return fetchObservation(nodes);
+    }
+
+    /**
+     * 节流窗口内给新进来的口岸补数：拿上一轮已下载的格点在内存里插值，**不发任何请求**。
+     * 只补落在那张格点覆盖范围内的点（见 {@link #inGrid}）：范围外取最近边界格点等于
+     * 把几百公里外的读数当成这个口岸的天气，那种数据不如没有，等上游窗口打开真拉一次。</p>
+     */
+    @Override
+    public List<RealWeatherService.WeatherPoint> interpolateFromLastFetch(List<RoadNode> nodes) {
+        LastGrid g = lastGrid;
+        if (g == null || nodes == null || nodes.isEmpty()) {
+            return List.of();
+        }
+        // 格点比缓存 TTL 还旧就不再补：免得把几小时前的实况当“现在”画在屏幕上
+        if (System.currentTimeMillis() - g.fetchedAt() >= ttlMinutes * 60_000L) {
+            return List.of();
+        }
+        List<RealWeatherService.WeatherPoint> out = new ArrayList<>();
+        for (RoadNode node : nodes) {
+            if (inGrid(g, node)) {
+                out.add(sampleNode(g, node));
+            }
+        }
+        return out;
+    }
+
+    /** 节点是否落在这张格点场的经纬度范围内 */
+    private static boolean inGrid(LastGrid g, RoadNode node) {
+        double minLat = Collections.min(g.latitudes());
+        double maxLat = Collections.max(g.latitudes());
+        double minLon = Collections.min(g.longitudes());
+        double maxLon = Collections.max(g.longitudes());
+        return node.getLatitude() >= minLat && node.getLatitude() <= maxLat
+                && node.getLongitude() >= minLon && node.getLongitude() <= maxLon;
     }
 
     private List<RealWeatherService.WeatherPoint> fetchObservation(List<RoadNode> nodes) {
@@ -130,25 +177,38 @@ public class ContestWeatherProvider implements WeatherProvider {
             merged.putAll(p3.data());
         }
         long fetchedAt = System.currentTimeMillis();
+        // 把这张格点存下来：下一轮若被节流挡住、而路线又多了新口岸，就靠它在内存里补数
+        LastGrid grid = new LastGrid(latitudes, longitudes, Map.copyOf(merged), lastTime, fetchedAt);
+        this.lastGrid = grid;
         List<RealWeatherService.WeatherPoint> out = new ArrayList<>(nodes.size());
         for (RoadNode node : nodes) {
-            int latIdx = nearestIndex(latitudes, node.getLatitude());
-            int lonIdx = nearestIndex(longitudes, node.getLongitude());
-            double tmp = read(merged, "TMP", lastTime, latIdx, lonIdx, 0);
-            double rh = read(merged, "RH", lastTime, latIdx, lonIdx, 50);
-            double pre = read(merged, "PRE", lastTime, latIdx, lonIdx, 0);
-            double visKm = read(merged, "VIS", lastTime, latIdx, lonIdx, 20);
-            double windU = read(merged, "WIN_U", lastTime, latIdx, lonIdx, 0);
-            double windV = read(merged, "WIN_V", lastTime, latIdx, lonIdx, 0);
-            double windKph = Math.hypot(windU, windV) * 3.6;
-            // 气压取不到时填标准海压 1013：等价于"无低气压信号"，不触发台风判据
-            double prs = read(merged, "PRS", lastTime, latIdx, lonIdx, 1013.0);
-            out.add(new RealWeatherService.WeatherPoint(
-                    node.getId(), node.getLatitude(), node.getLongitude(),
-                    tmp, rh, pre, windKph, visKm * 1000.0, prs, fetchedAt
-            ));
+            out.add(sampleNode(grid, node));
         }
         return out;
+    }
+
+    /**
+     * 把一张格点场按最近网格点取到单个节点上（真实回源与节流窗口内补数走同一个取值规则，
+     * 不会因为“走的分支不同”而给同一个节点两套数字）。
+     */
+    private RealWeatherService.WeatherPoint sampleNode(LastGrid g, RoadNode node) {
+        Map<String, VariableGrid> merged = g.grids();
+        int lastTime = g.timeIndex();
+        int latIdx = nearestIndex(g.latitudes(), node.getLatitude());
+        int lonIdx = nearestIndex(g.longitudes(), node.getLongitude());
+        double tmp = read(merged, "TMP", lastTime, latIdx, lonIdx, 0);
+        double rh = read(merged, "RH", lastTime, latIdx, lonIdx, 50);
+        double pre = read(merged, "PRE", lastTime, latIdx, lonIdx, 0);
+        double visKm = read(merged, "VIS", lastTime, latIdx, lonIdx, 20);
+        double windU = read(merged, "WIN_U", lastTime, latIdx, lonIdx, 0);
+        double windV = read(merged, "WIN_V", lastTime, latIdx, lonIdx, 0);
+        double windKph = Math.hypot(windU, windV) * 3.6;
+        // 气压取不到时填标准海压 1013：等价于"无低气压信号"，不触发台风判据
+        double prs = read(merged, "PRS", lastTime, latIdx, lonIdx, 1013.0);
+        return new RealWeatherService.WeatherPoint(
+                node.getId(), node.getLatitude(), node.getLongitude(),
+                tmp, rh, pre, windKph, visKm * 1000.0, prs, g.fetchedAt()
+        );
     }
 
     private ObservationResponse queryObservations(List<String> variables, Bbox bbox) {
@@ -317,5 +377,13 @@ public class ContestWeatherProvider implements WeatherProvider {
                                        List<Double> latitudes,
                                        List<Double> longitudes,
                                        Map<String, VariableGrid> data) {
+    }
+
+    /** 上一轮取回的整张格点场：经纬度轴 + 各变量网格 + 取的是哪个时次 + 本机拿到它的时刻 */
+    private record LastGrid(List<Double> latitudes,
+                            List<Double> longitudes,
+                            Map<String, VariableGrid> grids,
+                            int timeIndex,
+                            long fetchedAt) {
     }
 }

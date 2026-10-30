@@ -2,9 +2,11 @@ package com.example.aseanweatherlogistics.service;
 
 import com.example.aseanweatherlogistics.model.entity.RoadNode;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -98,6 +100,11 @@ public class RealWeatherService {
     private volatile long cntCacheServed = 0;
     private volatile long cntThrottleBlocked = 0;
     private volatile long cntCircuitOpens = 0;
+    /**
+     * 节流窗口内靠「上一轮已下载格点」补上的节点个数（累计）。
+     * 合规自查看这个数：它越大越说明「没多打一次上游却把新口岸补上了」，0 才是本该去查的。
+     */
+    private volatile long cntGridFilled = 0;
 
     public RealWeatherService(WeatherSourceService sourceService) {
         this.sourceService = sourceService;
@@ -170,7 +177,7 @@ public class RealWeatherService {
         WeatherProvider provider = sourceService.current();
         if (provider == null || !provider.isConfigured()) {
             lastSource = "none";
-            return cachedFor(nodes);
+            return cachedOrLastFetch(provider, nodes);
         }
         String sourceId = provider.id();
         SourceState st = stateOf(sourceId);
@@ -179,18 +186,18 @@ public class RealWeatherService {
         if (now < st.circuitOpenUntilMs) {
             lastSource = "none";
             cntThrottleBlocked++;
-            return cachedFor(nodes);
+            return cachedOrLastFetch(provider, nodes);
         }
         // 该源最小请求间隔未到 → 直接用缓存，不发请求（内容未变时该窗口会被退避放大，见 effectiveIntervalMs）
         long intervalMs = effectiveIntervalMs(st);
         if (now - st.lastRequestAtMs < intervalMs) {
             cntThrottleBlocked++;
-            return cachedFor(nodes);
+            return cachedOrLastFetch(provider, nodes);
         }
         // 跨源保护：刚向别的源回过源，立刻切过来也要等一下（防反复切源刷上游）
         if (now - lastAnyRequestAtMs < minSourceSwitchGapMs()) {
             cntThrottleBlocked++;
-            return cachedFor(nodes);
+            return cachedOrLastFetch(provider, nodes);
         }
         st.lastRequestAtMs = now;
         lastAnyRequestAtMs = now;
@@ -218,7 +225,59 @@ public class RealWeatherService {
         }
         lastSource = "none";
         registerFailure(st, now);
-        return cachedFor(nodes);
+        return cachedOrLastFetch(provider, nodes);
+    }
+
+    /**
+     * 节流/熔断/未配置时的取数：缓存里有的照旧给；缓存里没有的节点（换走廊刚把芒街/东兴带进路线）
+     * 再试一个数据源的「上一轮已下载到本机的格点」内存插值——**一次网络请求都不发，不占上游额度**。
+     *
+     * <p>为什么不等到上游窗口打开再说：上游按内容未变指数退避（实测 240 秒），而守护每 60 秒
+     * 的例行回源会把窗口不断往后顶，两个条件叠在一起，实测选定走芒街的线后 9 分钟芒街仍进不了
+     * 打分点——“派单选的路线经过哪里、实时工作点就显示哪里”这条要求落空。格点已在内存里，
+     * 取一次值不需要打上游，于是新口岸第一次打分就能出现。</p>
+     */
+    private List<WeatherPoint> cachedOrLastFetch(WeatherProvider provider, List<RoadNode> nodes) {
+        List<WeatherPoint> out = new ArrayList<>(cachedFor(nodes));
+        if (provider == null) {
+            return out;
+        }
+        Set<String> have = new HashSet<>();
+        for (WeatherPoint p : out) {
+            have.add(p.nodeId());
+        }
+        List<RoadNode> missing = new ArrayList<>();
+        for (RoadNode n : nodes) {
+            if (!have.contains(n.getId())) {
+                missing.add(n);
+            }
+        }
+        if (missing.isEmpty()) {
+            return out;
+        }
+        List<WeatherPoint> extra;
+        try {
+            extra = provider.interpolateFromLastFetch(missing);
+        } catch (Exception e) {
+            // 补数失败不影响已有缓存结果（例如格点覆盖不到这个节点、或该源不支持补数）
+            return out;
+        }
+        if (extra == null || extra.isEmpty()) {
+            return out;
+        }
+        String src = provider.id();
+        boolean hadCached = !out.isEmpty();
+        for (WeatherPoint p : extra) {
+            cache.put(p.nodeId(), new CachedWeather(p, p.fetchedAt(), src));
+            out.add(p);
+        }
+        cntGridFilled += extra.size();
+        if (!hadCached) {
+            // 缓存全空（新节点一个都没缓存过）时 cachedFor 会把来源记成 none，这里要如实改成补数来源
+            servedSource = src;
+        }
+        // 这批数字仍是「本机已有数据」而不是本次回源所得：servedFresh 由 cachedFor 置为 false，保持不变
+        return out;
     }
 
     /** 记录一次失败：某源连续失败达阈值则打开该源的熔断窗口（静默期，不重试） */
@@ -268,6 +327,8 @@ public class RealWeatherService {
         m.put("upstreamRequests", cntUpstreamRequests);
         m.put("throttleBlocked", cntThrottleBlocked);
         m.put("circuitOpens", cntCircuitOpens);
+        // 零上游请求补上的节点数（节流窗口内用本机已有格点插值）
+        m.put("gridFilledNodes", cntGridFilled);
         m.put("minIntervalSeconds", Math.max(1, minRequestIntervalSeconds));
         // 当前选中源本轮实际生效的回源窗口（内容未变时会被退避放大）与已退避轮数
         WeatherProvider sel = sourceService.current();

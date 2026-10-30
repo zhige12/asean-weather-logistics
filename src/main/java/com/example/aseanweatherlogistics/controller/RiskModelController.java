@@ -7,8 +7,10 @@ import com.example.aseanweatherlogistics.service.RealWeatherService;
 import com.example.aseanweatherlogistics.service.RouteService;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -23,10 +25,11 @@ import org.springframework.web.bind.annotation.RestController;
  *   <li>{@code GET /api/risk/model}：下发模型规格——名称、公式、各灾种隶属度参数、
  *       严重度分档、标定曲线采样点，供前端绘制「物理量—风险」响应曲线；</li>
  *   <li>{@code GET /api/risk/model/live}：用沿线<b>实时</b>气象点算出各点的连续 AMRI 指数、
- *       档位与逐灾种贡献，并标出全走廊最不利点——把「这条路为什么红」拆成可核验的贡献条；</li>
+ *       档位与逐灾种贡献，并标出当前路线最不利点——把「这条路为什么红」拆成可核验的贡献条；</li>
  *   <li>{@code GET /api/risk/model/nowcast}：以 GOWFS 官方 3h 预报的多时效降雨为驱动量，
- *       逐时效推算 AMRI 指数的<b>短临演变序列</b>（风/能见度/气温沿用实况基线，只让降雨随预报推进），
- *       用于「未来 3/6 小时这条走廊风险怎么变」的曲线。</li>
+ *       逐时效推算 AMRI 指数的<b>短临演变序列</b>（风/能见度/气温沿用该点实况基线，被沙盘滑杆接管的点
+ *       则取滑杆基线；只让降雨随预报推进），
+ *       用于「未来 3/6 小时这条路线风险怎么变」的曲线。</li>
  * </ol>
  *
  * <p>数据来源与节流沿用既有链路：实时点走 {@link RouteService#syncRealWeatherForRoute}（自带按源节流/退避/熔断），
@@ -72,13 +75,17 @@ public class RiskModelController {
     }
 
     /**
-     * 实时工作点：用沿线当前气象算 AMRI 连续指数 + 档位 + 逐灾种贡献，标出全走廊最不利点。
+     * 实时工作点：用沿线当前气象算 AMRI 连续指数 + 档位 + 逐灾种贡献，标出当前路线最不利点。
      * 未传起终点时退回全量有名节点（与 /api/weather/real 一致）。
+     * 传了 {@code routeKey}（调度大屏本程选定的那条候选）则按那条线的沿线点打分，
+     * 不再固定按基准最短路——否则「派单选了走芒街的线」时 AMRI 仍只看见友谊关。
      */
     @GetMapping("/model/live")
     public Map<String, Object> live(@RequestParam(required = false) String originId,
-                                    @RequestParam(required = false) String destinationId) {
-        List<Map<String, Object>> weather = routeService.syncRealWeatherForRoute(false, originId, destinationId);
+                                    @RequestParam(required = false) String destinationId,
+                                    @RequestParam(required = false) String routeKey) {
+        List<String> routeNodes = routeService.cachedCandidateNodeIds(originId, destinationId, routeKey);
+        List<Map<String, Object>> weather = weatherOnRoute(originId, destinationId, routeNodes);
         // 沙盘模拟模式下的滑杆叠加（与 AI 灾种卡同一数据通路）：友谊关/芒街两点取模拟值
         Map<String, Map<String, Object>> overlay = overlayByNode();
         List<Map<String, Object>> ranked = new ArrayList<>();
@@ -94,6 +101,8 @@ public class RiskModelController {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("modelName", AmriRiskModel.NAME);
         out.put("count", ranked.size());
+        // 本指数按哪条线打分：回显给界面，避免「界面画的是芒街线、分数却是友谊关线」这种对不上
+        out.put("scoredRouteKey", routeNodes == null || routeNodes.isEmpty() ? null : routeKey);
         out.put("worst", ranked.isEmpty() ? null : ranked.get(0));
         out.put("points", ranked);
         out.put("servedSource", realWeatherService.servedSource());
@@ -104,6 +113,13 @@ public class RiskModelController {
         if (simApplied) {
             out.put("sandboxNote", "友谊关/芒街取沙盘滑杆模拟值（降雨为未来6h累计口径，与灾种卡同口径），其余点为实时观测");
         }
+        // 沙盘滑杆已接管、但不在本程路线沿线点上的断面（如当前起终点走友谊关 E4、而滑杆推了芒街 E9）：
+        // 它们不参与本指数——AMRI 是「路线」风险指数，给不在你路线上的口岸打分反而是错的。
+        // 但必须如实列出，否则同一屏会出现「沙盘已熔断 / AMRI 低风险」这种看着自相矛盾的画面。
+        List<Map<String, Object>> skipped = skippedSections(overlay, weather);
+        if (!skipped.isEmpty()) {
+            out.put("skippedSections", skipped);
+        }
         out.put("generatedAt", System.currentTimeMillis());
         if (ranked.isEmpty()) {
             out.put("message", "暂无沿线实时气象点（数据源未就绪或已降级），无法计算工作点指数");
@@ -112,17 +128,35 @@ public class RiskModelController {
     }
 
     /**
+     * 沿线气象点取数：已解析出本程选定路线（{@code routeNodes}）就按那条线取，
+     * 否则（未选过 / 候选快照已过期）退回无天气基准最短路。
+     *
+     * <p>两个口径并存是故意的：基准线保证调度员没手动选路时分数纵向可比，
+     * 而一旦他选了某条候选并把它画在地图上，「打分点」就必须与地图上那条线一致。</p>
+     */
+    private List<Map<String, Object>> weatherOnRoute(String originId, String destinationId, List<String> routeNodes) {
+        if (routeNodes != null && !routeNodes.isEmpty()) {
+            return routeService.syncRealWeatherForPath(routeNodes);
+        }
+        return routeService.syncRealWeatherForRoute(false, originId, destinationId);
+    }
+
+    /**
      * 短临预报序列：以官方 3h 预报的多时效降雨为驱动量，逐时效推算 AMRI 指数演变。
-     * 风/能见度/气温沿用该点实况基线，只让降雨随预报推进——这正是 nowcasting 关注的降水演变。
+     * 风/能见度/气温沿用该点实况基线（被沙盘滑杆接管的点取滑杆基线），只让降雨随预报推进——
+     * 这正是 nowcasting 关注的降水演变。
      */
     @GetMapping("/model/nowcast")
     public Map<String, Object> nowcast(@RequestParam(required = false) String originId,
-                                       @RequestParam(required = false) String destinationId) {
+                                       @RequestParam(required = false) String destinationId,
+                                       @RequestParam(required = false) String routeKey) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("modelName", AmriRiskModel.NAME);
         out.put("generatedAt", System.currentTimeMillis());
 
-        List<Map<String, Object>> weather = routeService.syncRealWeatherForRoute(false, originId, destinationId);
+        List<String> routeNodes = routeService.cachedCandidateNodeIds(originId, destinationId, routeKey);
+        List<Map<String, Object>> weather = weatherOnRoute(originId, destinationId, routeNodes);
+        out.put("scoredRouteKey", routeNodes == null || routeNodes.isEmpty() ? null : routeKey);
         if (weather.isEmpty()) {
             out.put("available", false);
             out.put("message", "无沿线气象基线，无法起报短临序列");
@@ -306,6 +340,36 @@ public class RiskModelController {
             }
         } catch (Exception ignored) {
             // 沙盘不可用时静默退回纯实况口径
+        }
+        return out;
+    }
+
+    /**
+     * 找出「沙盘滑杆已接管、但不在本程路线沿线气象点里」的断面：overlay 有、weather 无。
+     *
+     * <p>典型场景：起终点走友谊关（E4）而调度员拖了芒街（E9）的滑杆——芒街那边确实会熔断，
+     * 但熔断的是另一条边的通行性，与本程路线的 AMRI 无关，所以界面必须单独交代而不是静默丢弃，
+     * 否则会被读成「调了没反应」或「面板坏了」。措辞与 {@code DecisionOrchestrator} 的
+     * 「已熔断，但不在本程路线上」保持同一口径。
+     */
+    private static List<Map<String, Object>> skippedSections(Map<String, Map<String, Object>> overlay,
+                                                             List<Map<String, Object>> weather) {
+        Set<String> onRoute = new LinkedHashSet<>();
+        for (Map<String, Object> p : weather) {
+            String id = str(p.get("nodeId"));
+            if (id != null) {
+                onRoute.add(id);
+            }
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map.Entry<String, Map<String, Object>> e : overlay.entrySet()) {
+            if (onRoute.contains(e.getKey())) {
+                continue;
+            }
+            Map<String, Object> one = new LinkedHashMap<>();
+            one.put("nodeId", e.getKey());
+            one.put("nodeName", e.getValue().get("nodeName"));
+            out.add(one);
         }
         return out;
     }

@@ -38,6 +38,13 @@
                 :x="CW - PAD_R - 2" :y="b.y - 2" class="band-txt" :fill="b.color" text-anchor="end">{{ b.name }}</text>
           <!-- 曲线 -->
           <polyline :points="curvePts" class="curve-line" />
+          <!-- 算路侧运营动作阈值竖线：让「分数落在哪档」与「业务动不动作」在同一把横轴上直接对读，
+               否则会出现「曲线已饱和、99.8 CRITICAL，而业务侧尚未熔断」只能靠口头解释的画面 -->
+          <template v-if="opMark">
+            <line :x1="opMark.x" :x2="opMark.x" :y1="PAD_T" :y2="CH - PAD_B" class="op-line"
+                  :stroke-dasharray="opMark.dir === 'down' ? '2 2' : '4 3'" />
+            <text :x="opMark.x" :y="PAD_T + 7" class="op-txt" text-anchor="middle">{{ opMark.dir === 'down' ? '<' : '≥' }}{{ opMark.value }} 动作线</text>
+          </template>
           <!-- 当前实况工作点 -->
           <template v-if="liveMark">
             <line :x1="liveMark.px" :x2="liveMark.px" :y1="PAD_T" :y2="CH - PAD_B" class="mark-line" />
@@ -53,13 +60,27 @@
         <div class="muted curve-cap">
           {{ activeHazard.label }}（{{ activeHazard.unit }}）→ 单项风险指数响应曲线；
           半程点 x0={{ activeHazard.x0 }}、陡峭度 k={{ activeHazard.k }}、权重 w={{ activeHazard.weight }}。
-          <template v-if="liveMark"> 圆点为当前走廊最不利点{{ live.worst && live.worst.sandboxSim ? '（沙盘模拟值）' : '实况值' }}。</template>
+          <!-- 圆点只画位不报数时，讲解得切页签才能读出数值，故在本行直接给读数；
+               “取值”用中性措词，模拟值另用括号声明，不拿滑杆值冒充实测 -->
+          <template v-if="liveReading && !liveReading.missing">
+            圆点 = 当前路线最不利点 <b class="cap-val">{{ live.worst.nodeName || live.worst.nodeId }}</b>：
+            取值 <b class="cap-val">{{ liveReading.value }} {{ activeHazard.unit }}</b> ·
+            隶属度 <b class="cap-val">{{ liveReading.membership }}</b>
+            <template v-if="live.worst.sandboxSim">（沙盘模拟值，非实测）</template>。
+          </template>
+          <template v-else-if="liveReading && liveReading.missing">
+            当前路线最不利点该灾种<b>缺测</b>，故曲线不画圆点。
+          </template>
+          <!-- 完整阈值口径放 title 悬停，行内只留结论，避免说明行胀长 -->
+          <template v-if="opMark && opVerdict">
+            <span :title="spec.opThresholdNote">动作线 {{ opMark.dir === 'down' ? '<' : '≥' }}{{ opMark.value }}{{ activeHazard.unit }}：圆点在其{{ opVerdict.side }}，<b>{{ opVerdict.triggered ? '已触发' : '未触发' }}</b>该动作。</span>
+          </template>
         </div>
       </div>
       <div v-else class="muted">标定曲线尚在加载…</div>
     </div>
 
-    <!-- ② 实时工作点：全走廊最不利点的 AMRI 指数 + 逐灾种贡献条 -->
+    <!-- ② 实时工作点：当前路线最不利点的 AMRI 指数 + 逐灾种贡献条 -->
     <div v-show="tab === 'live'" class="amri-body">
       <div v-if="!live.points || !live.points.length" class="muted">
         {{ live.message || '暂无沿线实时气象点，先在上方「实时气象」拉取后再看。' }}
@@ -72,7 +93,12 @@
               <span class="sev-badge" :style="{ background: sevColor(live.worst.severity) }">{{ sevText(live.worst.severity) }}</span>
               <span v-if="live.worst.sandboxSim" class="sim-chip">模拟值</span>
             </div>
-            <div class="muted">全走廊 {{ live.count }} 个沿线气象点中最不利 · 数据源 {{ live.servedSourceLabel || live.servedSource }}</div>
+            <div class="muted">
+              <span class="route-tag" :title="live.scoredRouteKey ? '打分点 = 本程选定的这条候选路线沿线气象点' : '未手动选路，按无天气基准最短路沿线点打分'">
+                打分路线：{{ scoredRouteName }}
+              </span>
+              沿线 {{ live.count }} 个气象点中最不利 · 数据源 {{ live.servedSourceLabel || live.servedSource }}
+            </div>
           </div>
         </div>
         <div class="contribs">
@@ -96,7 +122,7 @@
       </template>
     </div>
 
-    <!-- ③ 短临预报：以官方 3h 预报多时效降雨驱动，逐时效推算走廊最不利指数演变 -->
+    <!-- ③ 短临预报：以官方 3h 预报多时效降雨驱动，逐时效推算当前路线最不利指数演变 -->
     <div v-show="tab === 'nowcast'" class="amri-body">
       <div v-if="!nowcast.available" class="muted">
         {{ nowcast.message || '短临预报数据尚不可用（预报通道未配置 / 节流 / 熔断 / 上游无数据）。' }}
@@ -115,8 +141,12 @@
                   :x="s.px" :y="CH - 6" class="tick" text-anchor="middle">{{ s.label }}</text>
           </svg>
           <div class="muted curve-cap">
-            走廊「最不利点」AMRI 指数短临走势：now（实况）→ +3h → +6h。
-            降雨由 GOWFS 官方预报逐时效驱动，风 / 能见度 / 气温沿用实况基线。起报 {{ nowcast.forecastRunTime }}。
+            当前路线「最不利点」AMRI 指数短临走势：now（实况）→ +3h → +6h。
+            <!-- 沙盘叠加时风/能见度/气温其实取的是滑杆基线，不是实况；原硬编码文案说“沿用实况基线”
+                 与实际行为矛盾（拖风滑杆本面页数字会变），改为直接渲染后端下发的 sandboxNote，单一数据源 -->
+            <template v-if="nowcast.sandboxSim && nowcast.sandboxNote">{{ nowcast.sandboxNote }}。</template>
+            <template v-else>风 / 能见度 / 气温沿用各点实况基线，降雨由 GOWFS 官方预报逐时效驱动。</template>
+            起报 {{ nowcast.forecastRunTime }}。
           </div>
         </div>
         <div class="nc-table">
@@ -147,14 +177,26 @@ const PAD_R = 10;
 const PAD_T = 12;
 const PAD_B = 24;
 
+// SVG 几何常量：模板与 computed 共用同一份，避免两处各写一遍数字而对不齐
+const GEO = { CW, CH, PAD_L, PAD_R, PAD_T, PAD_B };
+
 export default {
   name: 'AmriPanel',
   props: {
     originId: { type: String, default: '' },
-    destinationId: { type: String, default: '' }
+    destinationId: { type: String, default: '' },
+    // 本程在调度大屏/派单面板里选定的那条候选路线 key：
+    // 传上来后，沿线打分点 = 那条线经过的点（选走芒街的线就能看见芒街），不再固定基准最短路
+    routeKey: { type: String, default: '' },
+    // 同一候选的展示名，仅用于界面上说清「现在打的是哪条线」
+    routeLabel: { type: String, default: '' }
   },
   data() {
     return {
+      // 必须挂到实例上：Vue 3 普通 <script>（非 script setup）的模板只认组件实例，
+      // 直接写模块级常量会静默解析成 undefined —— 实测 viewBox 变成 "0 0 undefined undefined"、
+      // 坐标轴 / 分档虚线 / 刻度文字全部拿到 NaN 坐标而整体不渲染（不报任何错）。
+      ...GEO,
       tab: 'curve',
       hazard: 'rain',
       loading: false,
@@ -176,6 +218,46 @@ export default {
     },
     bands() {
       return this.spec.bands || { CRITICAL: 80, HIGH: 45, MEDIUM: 18, LOW: 0 };
+    },
+    /** 算路侧运营动作阈值在当前灾种曲线上的竖线位置（后端 opThresholds 下发，前端不写死数值）。
+     *  气温等无阈值灾种、或阈值落在采样范围外时不画。 */
+    opMark() {
+      const t = (this.spec.opThresholds || {})[this.hazard];
+      if (t == null || !this.curve.length) return null;
+      const xs = this.curve.map(p => p[0]);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      if (t < minX || t > maxX) return null;
+      const plotW = CW - PAD_L - PAD_R;
+      return {
+        x: PAD_L + (maxX === minX ? 0 : (t - minX) / (maxX - minX) * plotW),
+        value: t,
+        dir: this.activeHazard.direction
+      };
+    },
+    /** 圆点相对动作线的位置与是否触发该动作。
+     *  能见度是反向轴（direction=down，越小越险），触发判据必须跟着翻——
+     *  若一律用 value>=threshold，能见度 50m（实际已触发 <100m 动作线）会被说成未触发。 */
+    opVerdict() {
+      const m = this.opMark;
+      const r = this.liveReading;
+      if (!m || !r || r.missing || r.value == null) return null;
+      const down = m.dir === 'down';
+      return {
+        side: r.value < m.value ? '左侧' : '右侧',
+        triggered: down ? r.value < m.value : r.value >= m.value
+      };
+    },
+    /** 本指数实际按哪条线打分：后端未命中候选快照时会退回基准线，这里据实回显，不拿线名冒充。 */
+    scoredRouteName() {
+      if (!this.live || !this.live.scoredRouteKey) return '基准最短路';
+      return this.routeLabel || this.live.scoredRouteKey;
+    },
+    /** 请求参数：routeKey 为空时不带（axios 会剔掉 undefined），保持与老调用方一致的基准线口径。 */
+    odParams() {
+      const p = { originId: this.originId, destinationId: this.destinationId };
+      if (this.routeKey) p.routeKey = this.routeKey;
+      return p;
     },
     stateClass() {
       const s = this.live && this.live.worst ? this.live.worst.severity : null;
@@ -213,19 +295,26 @@ export default {
         mk('MEDIUM', this.bands.MEDIUM, '#FFC107')
       ];
     },
-    // 当前实况工作点在所选灾种曲线上的位置（取走廊最不利点的该灾种实测值）
-    liveMark() {
+    /** 标定曲线页签的读数：最不利点在所选灾种上的取值与隶属度。
+     *  有最不利点但该灾种缺测时只回 {missing:true}，让说明行改口、不硬印 null。 */
+    liveReading() {
       if (!this.live.worst || !this.curve.length) return null;
       const c = this.live.worst.contributions && this.live.worst.contributions.find(x => x.id === this.hazard);
-      if (!c || c.value == null) return null;
+      if (!c || c.value == null) return { missing: true };
+      return { missing: false, value: c.value, membership: c.membership };
+    },
+    // 当前实况工作点在所选灾种曲线上的位置（与说明行共用 liveReading，单一数据源）
+    liveMark() {
+      const r = this.liveReading;
+      if (!r || r.missing) return null;
       const xs = this.curve.map(p => p[0]);
       const minX = Math.min(...xs);
       const maxX = Math.max(...xs);
       const plotW = CW - PAD_L - PAD_R;
       const plotH = CH - PAD_T - PAD_B;
-      const v = Math.max(minX, Math.min(maxX, c.value));
+      const v = Math.max(minX, Math.min(maxX, r.value));
       const px = PAD_L + (maxX === minX ? 0 : (v - minX) / (maxX - minX) * plotW);
-      const py = PAD_T + (1 - (c.membership * this.activeHazard.weight * 100) / 100) * plotH;
+      const py = PAD_T + (1 - (r.membership * this.activeHazard.weight * 100) / 100) * plotH;
       return { px, py };
     },
     // 短临折线：now(实况最不利) + 各时效走廊峰值
@@ -259,13 +348,15 @@ export default {
   },
   watch: {
     originId() { this.loadAll(); },
-    destinationId() { this.loadAll(); }
+    destinationId() { this.loadAll(); },
+    // 换一条候选线（如从走友谊关改成走芒街）就是换一批打分点，必须重拉
+    routeKey() { this.loadAll(); }
   },
   methods: {
     async loadAll() {
       this.loading = true;
       this._lastLiveAt = Date.now();
-      const od = { originId: this.originId, destinationId: this.destinationId };
+      const od = this.odParams;
       try {
         const [m, l, n] = await Promise.all([
           axios.get('/api/risk/model'),
@@ -290,7 +381,7 @@ export default {
       const now = Date.now();
       if (!force && now - (this._lastLiveAt || 0) < 8000) return;
       this._lastLiveAt = now;
-      const od = { originId: this.originId, destinationId: this.destinationId };
+      const od = this.odParams;
       try {
         const jobs = [axios.get('/api/risk/model/live', { params: od })];
         if (withNowcast) jobs.push(axios.get('/api/risk/model/nowcast', { params: od }));
@@ -352,6 +443,14 @@ export default {
 .mark-line { stroke: #333; stroke-dasharray: 2 2; stroke-width: 1; opacity: 0.5; }
 .mark-dot { fill: #333; stroke: #fff; stroke-width: 1.5; }
 .curve-cap { margin-top: 4px; line-height: 1.5; }
+/* 读数加对比：说明行整体是 .muted 浅灰，数值/节点名提深并加粗，投影仪后排也能读 */
+.curve-cap .cap-val { color: #33415c; font-weight: 700; font-family: ui-monospace, Consolas, monospace; }
+/* 运营动作阈值竖线：与横向分档线（指数轴）正交，用差别较大的玫红以免与四色分档线混淆 */
+.op-line { stroke: #e0457b; stroke-width: 1.2; opacity: 0.9; }
+.op-txt { font-size: 8px; fill: #e0457b; font-weight: 700; }
+/* 打分路线标：把「本指数是按哪条线打的」摆在数字旁边，与地图上的主线对得上 */
+.route-tag { display: inline-block; margin-right: 6px; padding: 1px 7px; font-size: 11px; border-radius: 8px;
+  color: #1e5fa8; background: rgba(79, 109, 245, 0.10); border: 1px solid rgba(79, 109, 245, 0.28); cursor: help; }
 .worst-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .worst-idx { font-size: 40px; font-weight: 800; font-family: ui-monospace, Consolas, monospace; line-height: 1; }
 .worst-meta { flex: 1; }

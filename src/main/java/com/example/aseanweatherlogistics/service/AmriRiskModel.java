@@ -66,6 +66,24 @@ public final class AmriRiskModel {
     public static final double BAND_HIGH = 45.0;
     public static final double BAND_MEDIUM = 18.0;
 
+    /**
+     * 算路侧「运营动作阈值」（{@code RouteService.buildRealRisk} 的实际判据），按灾种 id 索引。
+     *
+     * <p>AMRI 的分档边界就是照这批阈值反推标定的（见类注释），故界面把它画成标定曲线上的<b>竖线</b>，
+     * 让「分数落在哪档」与「业务动不动作」在同一把横轴上直接对读——否则会出现
+     * 「曲线已饱和、指数 99.8 CRITICAL，而业务侧尚未熔断」这种看着自相矛盾、只能靠口头解释的状态。
+     *
+     * <p>注意与沙盘「断面熔断阈值」（友谊关 80mm / 芒街 70mm）<b>不是同一套</b>：那两套的是
+     * 某条公路断面的通行判定，属另一子系统，画到本曲线上反而重新混淆口径，故不在此下发。
+     *
+     * <p>气温在算路侧无对应硬阈值（高温走 WeatherSimulator 软惩罚），故不下发、界面不画竖线。
+     */
+    public static final Map<String, Double> OP_THRESHOLDS = Map.of(
+            "rain", 50.0,   // precipitationMm >= 50 → penalty 100（硬熔断）
+            "wind", 60.0,   // windKph >= 60        → penalty 50 （软惩罚）
+            "vis", 100.0    // visibilityM < 100    → penalty 50 （能见度为反向轴）
+    );
+
     /** 一次评估的结果：连续指数 + 档位 + 各灾种贡献明细。 */
     public record Result(double index, String severity, List<Map<String, Object>> contributions) {
     }
@@ -180,6 +198,9 @@ public final class AmriRiskModel {
         bands.put("MEDIUM", BAND_MEDIUM);
         bands.put("LOW", 0);
         m.put("bands", bands);
+        // 运营动作阈值：界面据此在标定曲线上画竖线，把「分数分档」与「业务动作」对读
+        m.put("opThresholds", OP_THRESHOLDS);
+        m.put("opThresholdNote", "竖线为算路侧运营动作阈值（雨≥50mm 硬熔断；风≥60km/h、能见度<100m 软惩罚）；AMRI 分档即按此反推标定");
         // 标定曲线（降雨为主曲线 + 各灾种响应），界面直接绘制，无需前端重算公式
         Map<String, Object> curves = new LinkedHashMap<>();
         curves.put("rain", calibrationCurve("rain", 0, 80, 33));

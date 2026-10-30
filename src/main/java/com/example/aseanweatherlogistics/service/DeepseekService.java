@@ -14,6 +14,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -55,9 +57,30 @@ public class DeepseekService {
     /** 调用计量（token / 耗时 / 并发）；为 null 时（单测直接构造）静默不记。 */
     private final AiMetricsService metrics;
 
-    public DeepseekService(OllamaService ollamaService, AiMetricsService metrics) {
+    /**
+     * AI 并发闸：两条模型通道都是阻塞调用（超时 60s），一次调用就占住一个 Tomcat 工作线程
+     * 直到返回。评分点「落地可行性·并发」要求能<b>限住</b>而不只是<b>看到</b>并发——旧版只有
+     * {@code peakInFlight} 观测而无背压，多位评委同时点「AI 决策分析」（每请求串行 3 个智能体）
+     * 会把工作线程挂到 60s 量级。这里用有界 {@link Semaphore} 卡并发上限：抢不到令牌且在
+     * {@code acquireWaitMs} 内不空位就<b>快速失败</b>、立即返回 null 通道让上层降级到缓存/规则模板，
+     * 而不是排队把等待堆成新的挂死。上限可配 {@code ai.max-concurrency}，演示机默认 4。
+     */
+    private final Semaphore gate;
+    private final int maxConcurrency;
+    private final long acquireWaitMs;
+
+    public DeepseekService(OllamaService ollamaService, AiMetricsService metrics,
+                           @Value("${ai.max-concurrency:4}") int maxConcurrency,
+                           @Value("${ai.acquire-wait-ms:2000}") long acquireWaitMs) {
         this.ollamaService = ollamaService;
         this.metrics = metrics;
+        this.maxConcurrency = Math.max(1, maxConcurrency);
+        this.acquireWaitMs = Math.max(0, acquireWaitMs);
+        // 公平模式：饱和时按到达顺序放行，避免后来的请求长期饿死在快失败分支上
+        this.gate = new Semaphore(this.maxConcurrency, true);
+        if (metrics != null) {
+            metrics.setInFlightLimit(this.maxConcurrency);
+        }
     }
 
     /** 在线通道超时：公网链路较长，给足时间但也不能无限等 */
@@ -80,9 +103,14 @@ public class DeepseekService {
      * 保留三参构造器，不需要用量的旧调用方写法不变。
      */
     public record AiReply(String text, String channel, String model,
-                          long elapsedMs, long promptTokens, long completionTokens) {
+                          long elapsedMs, long promptTokens, long completionTokens, boolean rejected) {
         public AiReply(String text, String channel, String model) {
-            this(text, channel, model, 0, 0, 0);
+            this(text, channel, model, 0, 0, 0, false);
+        }
+
+        public AiReply(String text, String channel, String model,
+                       long elapsedMs, long promptTokens, long completionTokens) {
+            this(text, channel, model, elapsedMs, promptTokens, completionTokens, false);
         }
 
         public long tokens() {
@@ -112,6 +140,24 @@ public class DeepseekService {
      */
     public AiReply chatWithChannel(String systemPrompt, String userPrompt, int maxTokens) {
         long t0 = System.nanoTime();
+        // 并发闸：先抢令牌，抢不到且在 acquireWaitMs 内不空位就快速失败（不占工作线程、不堆队），
+        // 返回 null 通道交上层降级——把「60s 挂死」换成「立即降级」，这正是「限住并发」的含义。
+        boolean acquired;
+        try {
+            acquired = gate.tryAcquire(acquireWaitMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            acquired = false;
+        }
+        if (!acquired) {
+            long waited = (System.nanoTime() - t0) / 1_000_000;
+            if (metrics != null) {
+                metrics.recordRejection();
+            }
+            log.warn("AI 并发已达上限 {}（等待 {}ms 无空位），本次快速失败降级到缓存/规则模板，不占工作线程",
+                    maxConcurrency, waited);
+            return new AiReply(null, null, null, waited, 0, 0, true);
+        }
         if (metrics != null) {
             metrics.beginCall();
         }
@@ -135,6 +181,7 @@ public class DeepseekService {
             if (metrics != null) {
                 metrics.endCall();
             }
+            gate.release();
         }
     }
 

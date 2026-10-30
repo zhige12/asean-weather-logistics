@@ -32,8 +32,11 @@
     <div class="main">
       <aside class="panel" :style="panelStyle">
         <!-- 第四幕：公司派单（司机端收到后自动切物流任务模式）。
-             原「跨境路径规划」的起终点输入框与「确认规划 / 清空 / 地图选点」按钮已并入本卡片（route-picker 插槽）：
-             插槽内容仍编译于父作用域，PlaceInput 的 ref 与 confirmSelection/clearRoute/togglePickMode 等方法照常工作 -->
+             原「跨境路径规划」的起终点输入框已并入本卡片（route-picker 插槽）：
+             插槽内容仍编译于父作用域，PlaceInput 的 ref 与 clearRoute/togglePickMode 等方法照常工作。
+             原「确认选择并规划」与卡底的「AI 气象分析并规划路线」已合为单个「进入路线规划」按钮
+             （在 TaskDispatchPanel 里）：调度员不必为同一件事点两次，也不会出现
+             「只规划了没分析 / 只分析了没规划」的中间态。 -->
         <TaskDispatchPanel
           ref="taskPanelRef"
           :task-status="taskStatus"
@@ -61,15 +64,12 @@
                 ref="destInput"
               />
               <div class="row">
-                <button class="btn primary" @click="confirmSelection">确认选择并规划</button>
-                <button class="btn outline" @click="clearRoute">清空</button>
-              </div>
-              <div class="row">
                 <button class="btn" :class="pickMode ? 'pick-on' : 'outline'" @click="togglePickMode">
                   {{ pickMode ? '取消地图选点' : '地图选点' }}
                 </button>
-                <span class="muted" style="align-self:center">{{ pickHintText }}</span>
+                <button class="btn outline" @click="clearRoute">清空</button>
               </div>
+              <div class="muted pick-hint">{{ pickHintText }}</div>
             </div>
           </template>
         </TaskDispatchPanel>
@@ -122,10 +122,10 @@
           </div>
         </section>
 
-        <!-- AI 决策分析：本体常驻地图左上「任务操作台」；派单「AI 气象分析并规划路线」会自动弹出到这里（无手动「展开」按钮） -->
+        <!-- AI 决策分析：本体常驻地图左上「任务操作台」；派单「进入路线规划」会自动弹出到这里（无手动「展开」按钮） -->
         <section class="card dock-entry">
           <h3>AI 决策分析 · 多智能体协同</h3>
-          <div class="muted de-hint">在上方「公司派单」点「AI 气象分析并规划路线」，会自动在地图左上弹出操作窗口，查看六维对比与候选。</div>
+          <div class="muted de-hint">在上方「公司派单」点「进入路线规划」，会自动在地图左上弹出操作窗口，查看六维对比与候选。</div>
           <!-- 装饰用：把分析窗里的三个智能体球像搬到入口卡上（纯静态、无状态驱动） -->
           <div class="de-agents" aria-hidden="true">
             <span class="de-agent"><span class="de-dot">🔵</span><span class="de-an">风险研判智能体</span></span>
@@ -135,6 +135,27 @@
             <span class="de-agent"><span class="de-dot">🟡</span><span class="de-an">触达智能体</span></span>
           </div>
         </section>
+
+        <!-- 气象专用风险模型 AMRI：把「多要素气象 → 单一可解释风险指数」显式建模，
+             三个视图常驻——标定曲线（S 型响应 + 分档）、实时工作点（最不利点 + 逐灾种贡献）、
+             短临预报（官方 3h 预报多时效降雨驱动的指数演变）。自包含拉数，随起终点变化刷新。
+             位置：紧跟两张操作台入口卡之后、「多角色触达」之前——AMRI 是触达/叫应的风险依据来源，
+             读图顺序应为「研判 → 打分 → 触达」，不堆到面板底部（用户要求上移）。 -->
+        <AmriPanel
+          ref="amriRef"
+          :origin-id="originId"
+          :destination-id="destinationId"
+          :route-key="selectedCandidateKey"
+          :route-label="selectedCandidateLabel"
+        />
+
+        <!-- 多模态生成：把 AMRI 风险研判一键绘成中/越/英三语预警海报（结构化数据→图像），可下载 PNG 分享 -->
+        <WarningPoster
+          :origin-id="originId"
+          :destination-id="destinationId"
+          :origin-name="originName"
+          :destination-name="destinationName"
+        />
 
         <!-- 第五/六幕：多角色触达 + 分级叫应追踪 -->
         <OutreachPanel :status="outreachStatus" @refresh="refreshOutreach" />
@@ -209,19 +230,6 @@
           </div>
           <div v-else class="muted">暂无实时数据，点击拉取</div>
         </section>
-
-        <!-- 气象专用风险模型 AMRI：把「多要素气象 → 单一可解释风险指数」显式建模，
-             三个视图常驻——标定曲线（S 型响应 + 分档）、实时工作点（最不利点 + 逐灾种贡献）、
-             短临预报（官方 3h 预报多时效降雨驱动的指数演变）。自包含拉数，随起终点变化刷新。 -->
-        <AmriPanel ref="amriRef" :origin-id="originId" :destination-id="destinationId" />
-
-        <!-- 多模态生成：把 AMRI 风险研判一键绘成中越双语预警海报（结构化数据→图像），可下载 PNG 分享 -->
-        <WarningPoster
-          :origin-id="originId"
-          :destination-id="destinationId"
-          :origin-name="originName"
-          :destination-name="destinationName"
-        />
 
         <section v-if="routeResult && routeResult.route" class="card">
           <h3>路线状态
@@ -574,6 +582,10 @@ const PICK_SNAP_MAX_KM = 60;
 // 首次展开时窗口固定出现在这里；之后可按住标题栏拖到任意位置（见 startDockDrag）。
 // 地图区是 flex:1，左栏（1 号）放大时地图区整体右移 → 两窗口随之右移，无需额外换算。
 const DOCK_WIN_W = 560;                                       // 窗口预设宽度（拖动右边缘可放大，双击复位回此值）
+// 内容布局基准宽：AgentPanel/DecisionSandbox 字号写死 px，靠对内容层施加 zoom=窗口宽÷此基准 才会放大。
+// 刻意小于 DOCK_WIN_W，使「默认窗口宽 560」本身就带 ~1.22× 放大（默认字号不再偏小）；
+// 视觉宽 = 此基准 × zoom = 当前窗口宽，正好铺满，拖宽/复位/槽位数学不变（见 DEV_LOG 分层缩放）。
+const DOCK_CONTENT_BASE = 460;
 const DOCK_WIN_MIN_W = 360;                                   // 窗口可拖到的最小宽度
 const DOCK_EDGE = 12;                                         // 距地图区左边缘
 const DOCK_TOP = 52;                                          // 距地图区顶边缘（让开顶部工具条）
@@ -682,6 +694,10 @@ export default {
       // 当前主线对应的候选 key（默认 = 后端返回的 "recommended"，选中后变为对应 key）
       // 预先写 'recommended' 是为了让候选到达后 drawAlternates 能直接跳过它，避免与主线红绿分层重叠
       selectedCandidateKey: 'recommended',
+      // 调度员人工选定的那条候选（含几何）：15 秒轮询与 SSE 都拿推荐线重画主线，
+      // 不钉回去就是「选了走芒街的线、十几秒又弹回友谊关」，AMRI 沿线打分点也跟着弹回去
+      pinnedCandidate: null,
+      pinnedCandidateKey: '',
       // === 演示场景（11幕）===
       outreachStatus: { targets: [], total: 0, confirmed: 0, pending: 0 },
       // 运输任务（公司派单）：司机端据此切物流任务模式，大屏派单面板显示接单状态
@@ -714,10 +730,15 @@ export default {
   computed: {
     /** 选点面板提示：把「现在该点哪里 / 已经选到哪一步」说清楚 */
     pickHintText() {
-      if (!this.pickMode) return '选择起终点后点击「确认选择并规划」';
+      if (!this.pickMode) return '选择起终点后点下方「进入路线规划」';
       if (!this.pickOriginNode) return '点击地图任意位置选起点';
       if (!this.pickDestinationNode) return '已选起点「' + this.originName + '」，再点一处选终点';
       return '已选「' + this.originName + ' → ' + this.destinationName + '」，继续点击可换终点并重规';
+    },
+    /** 当前主线对应的候选展示名：供 AMRI 面板说明「现在按哪条线打分」 */
+    selectedCandidateLabel() {
+      const c = (this.candidates || []).find(x => x.key === this.selectedCandidateKey);
+      return c ? (c.label || c.key) : '';
     },
     /** 大屏不在途（规划态），动作固定为「暂缓发车」；进度归司机端算 */
     corridorView() {
@@ -743,9 +764,9 @@ export default {
       }
       return { width: Math.round(PANEL_BASE_WIDTH * this.panelZoom) + 'px', flex: '0 0 auto' };
     },
-    // 操作台两窗放大比例：当前宽 ÷ 预设宽，用于对 .dw-head/.dw-body 施加 zoom（字体随宽度等比放大）
-    agentScale() { return this.agentW / DOCK_WIN_W; },
-    sandboxScale() { return this.sandboxW / DOCK_WIN_W; },
+    // 操作台两窗放大比例：当前宽 ÷ 内容布局基准宽（非窗口预设宽），默认 560/460≈1.22× 让字号默认更大
+    agentScale() { return this.agentW / DOCK_CONTENT_BASE; },
+    sandboxScale() { return this.sandboxW / DOCK_CONTENT_BASE; },
     // 天气面板只展示有名字的节点，避免几千个格子卡死
     visibleWeather() {
       const pts = this.weatherPoints || [];
@@ -951,7 +972,7 @@ export default {
      */
     dwZoomStyle(scale) {
       if (!ZOOM_SUPPORTED) return { width: '100%' };
-      return { zoom: scale, width: DOCK_WIN_W + 'px' };
+      return { zoom: scale, width: DOCK_CONTENT_BASE + 'px' };
     },
     /** 按住窗口右边缘开始调宽：新宽 = 起始宽 + 指针水平位移（夹在最小宽与地图区可用宽之间） */
     startDockResize(name, e) {
@@ -1306,6 +1327,11 @@ export default {
       } catch (e) { /* 老内核无 CustomEvent：面板仍按挂载/切路线刷新 */ }
     },
     async planCrossBorder() {
+      // 起终点换了：上一程人工选的那条线不再属于本程，必须拆钉，
+      // 否则新 OD 的推荐线会被旧几何盖掉（且旧候选在新走廊上根本不存在）
+      const od = this.originId + '>' + this.destinationId;
+      if (this._plannedOd && this._plannedOd !== od) this.unpinCandidate();
+      this._plannedOd = od;
       try {
         this.watchRoute(this.originId, this.destinationId);
         const r = await axios.get('/api/route/plan-with-weather', {
@@ -1354,9 +1380,10 @@ export default {
         // 公路候选之外的「可坐船出境」推荐位：一并接住，供坐船卡片与地图走廊高亮使用
         this.canalOption = (r.data && r.data.canalOption) || null;
         if (!this.canalOption) this.showCorridor = false;
-        // 默认主线 = 后端标记的 recommended；找不到就第一条
+        // 默认主线 = 后端标记的 recommended；找不到就第一条。
+        // 但调度员已人工选过一条时不能抢回去：否则十几秒后地图与 AMRI 都默默变回推荐线
         const rec = list.find(c => c.key === 'recommended');
-        const nextKey = (rec || list[0] || {}).key || '';
+        const nextKey = this.pinnedCandidateKey || (rec || list[0] || {}).key || '';
         if (nextKey) this.selectedCandidateKey = nextKey;
         // 离线兜底场景（demo-route.json）时 candidates 为空——保留 applyRouteResult 已经画好的主线
       } catch (e) {
@@ -1391,10 +1418,14 @@ export default {
       this.corridorAdvisory = null;
     },
     // 切换主线：直接把候选的几何替换为主线数据，无需再次请求后端（候选已含 coords/edgeIds/edgeSpans）
-    selectCandidate(key, candidateOverride) {
+    // silent=true 给轮钉回用：那是系统动作不是用户动作，不该每次都往时间线堆一条「主线切换」
+    selectCandidate(key, candidateOverride, silent) {
       const c = candidateOverride || (this.candidates || []).find(x => x.key === key);
       if (!c) return;
       this.selectedCandidateKey = key;
+      // 人工点选才钉住（silent 的钉回不改变钉住对象本身，但保持幂等赋值无害）
+      this.pinnedCandidateKey = key;
+      this.pinnedCandidate = c;
       // 1. 主线几何 = 候选的几何（coords 是 [[lat,lon],...]）
       this.routeCoords = (c.coords || []).map(p => ({ lat: p[0], lon: p[1] }));
       this.routeEdgeIds = c.edgeIds || [];
@@ -1419,7 +1450,15 @@ export default {
         };
       }
       this.bilingualWarning = '';
-      this.pushTimeline('主线切换', `${c.label || c.key} · ${c.hours != null ? c.hours + 'h' : '-'} · 风险 ${c.riskCount || 0} 段`, c.softened ? 'warn' : 'info');
+      if (!silent) {
+        this.pushTimeline('主线切换', `${c.label || c.key} · ${c.hours != null ? c.hours + 'h' : '-'} · 风险 ${c.riskCount || 0} 段`, c.softened ? 'warn' : 'info');
+      }
+    },
+    /** 解除人工选路钉住（清空路线 / 换起终点）：回到「跟随后端推荐线」 */
+    unpinCandidate() {
+      this.pinnedCandidate = null;
+      this.pinnedCandidateKey = '';
+      this.selectedCandidateKey = 'recommended';
     },
     /**
      * AgentPanel「开始导航派单」候选点选 → 大屏地图预览。
@@ -1451,7 +1490,7 @@ export default {
       }
     },
     // 解析 PlaceInput 草稿起终点 → 确认 originId/destinationId（只打字未选候选时兜底在线解析+吸附）。
-    // 成功返回 true；解析失败或起终点相同则弹提示返回 false。confirmSelection 与派单前分析共用这一套。
+    // 成功返回 true；解析失败或起终点相同则弹提示返回 false。「进入路线规划」与地图选点共用这一套。
     async ensureEndpoints() {
       if (!this.$refs.originInput || !this.$refs.destInput) return false;
       const o = await this.$refs.originInput.ensure();
@@ -1467,12 +1506,6 @@ export default {
         return false;
       }
       return true;
-    },
-    // 确认输入/选点得到的起终点：解析草稿后提交并触发规划，同时注册关注（风险时该路线会被重算推送）
-    async confirmSelection() {
-      if (!await this.ensureEndpoints()) return;
-      this.watchRoute(this.originId, this.destinationId);
-      this.planCrossBorder();
     },
     /** 注册关注某条路线：风险注入后，该路线会随其它关注路线一起被 AI 重算并推送 */
     watchRoute(originId, destinationId) {
@@ -1510,6 +1543,9 @@ export default {
       }
       this.risks = data.risks || [];
       this.bilingualWarning = '';
+      // 轮询/SSE 刚把主线重画成后端推荐线：调度员人工选过一条就立刻钉回去，
+      // 否则地图上的线、AMRI 的打分点都会十几秒一次地弹回默认方案
+      if (this.pinnedCandidate) this.selectCandidate(this.pinnedCandidateKey, this.pinnedCandidate, true);
     },
     connectAgent() {
       if (this._agentEs) this._agentEs.close();
@@ -1794,15 +1830,23 @@ export default {
         if (this.canalAlert) this.canalAlert.dispatching = false;
       }
     },
-    /** 派单前出车分析完成：记住订单信息、同步起终点并触发多智能体「派单前·常态」决策分析（版本一） */
+    /** 「进入路线规划」：确认起终点 + 规划主线与候选 + 触发派单前 AI 分析（原两个按钮合为一发） */
     async onPreDispatchAnalysis(payload) {
+      const done = payload && typeof payload.done === 'function' ? payload.done : () => {};
       // 起终点已并入本卡片的 PlaceInput：分析前先解析草稿，保证 AI 分析用的就是当前输入框/地图选点的起终点
-      if (!await this.ensureEndpoints()) return;
+      if (!await this.ensureEndpoints()) { done(false); return; }
       // 派单下发仍需 originId/destinationId：把解析后的起终点回填进订单快照（子组件表单已不再携带 OD）
       this.dispatchForm = { ...(payload || {}), originId: this.originId, destinationId: this.destinationId };
-      // 任务动态展开：把 AI 决策分析窗口在地图左上「任务操作台」就地弹出，再触发常态分析
+      // 任务动态展开：把 AI 决策分析窗口在地图左上「任务操作台」就地弹出
       this.openDock('agent');
-      this.pushTimeline('派单前 AI 决策分析', '调度员发起出车前分析，三智能体生成常态方案对比与多路线候选，选定一条后派单给司机', 'info');
+      this.pushTimeline('进入路线规划', '已确认起终点：先规划主线与多路线候选，再由三智能体生成六维对比与候选，选定一条后派单给司机', 'info');
+      try {
+        // 原「确认选择并规划」这一步：先把线与沿线气象点算出来（地图有线、AMRI 有点），
+        // 再让三智能体基于同一条线做对比——反过来会让分析面板与地图各自规划一次
+        await this.planCrossBorder();
+      } finally {
+        done(true);
+      }
       this.$nextTick(() => {
         if (this.$refs.agentPanelRef) this.$refs.agentPanelRef.runAnalysis(false, 'normal');
       });
@@ -2002,6 +2046,8 @@ export default {
       this._corridorAck = '';
       this.pickOriginNode = null;
       this.pickDestinationNode = null;
+      // 路线已清，人工选路钉住与它对应的 key 一并拆掉（不拆则下次规划会被旧几何盖回来）
+      this.unpinCandidate();
     },
     /**
      * 沙盘「快速模拟灾害注入」回调：注入/撤销已在子组件完成，
@@ -2527,6 +2573,9 @@ export default {
   transition:border-color .2s, box-shadow .2s;
 }
 .coords select:focus { border-color:#4f6df5; box-shadow:0 0 0 3px rgba(79,109,245,0.12); }
+/* 选点提示独占一行：原来跟在两个按钮后面挤在一起，按钮合并成「进入路线规划」后这里只剩说明文字，
+   给一点上间距并与按钮行拉开，避免读成按钮的一部分 */
+.coords .pick-hint { display:block; margin-top:8px; line-height:1.6; }
 
 /* Buttons */
 .btn {

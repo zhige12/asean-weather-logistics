@@ -16,12 +16,12 @@
           </svg>
         </button>
         <button class="hm-ctrl-btn base-btn" title="切换底图" @click="cycleBase">{{ baseName }}</button>
-        <!-- 整机界面语言切换（国际化演示）：中文 ↔ Tiếng Việt，字典翻译见 i18n.js -->
-        <button class="hm-ctrl-btn lang-toggle" :class="{ on: uiLang === 'vi' }" title="界面语言 Ngôn ngữ" @click="toggleUiLang">
+        <!-- 整机界面语言切换（国际化演示）：中文 → 越南语 → 英语 → 中文，字典翻译见 i18n.js -->
+        <button class="hm-ctrl-btn lang-toggle" :class="{ on: uiLang !== 'zh' }" title="界面语言 Language" @click="toggleUiLang">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
             <circle cx="12" cy="12" r="9"/><path d="M3.2 9.5h17.6M3.2 14.5h17.6"/><path d="M12 3c2.6 2.4 4 5.6 4 9s-1.4 6.6-4 9c-2.6-2.4-4-5.6-4-9s1.4-6.6 4-9Z"/>
           </svg>
-          <span class="lang-tag">{{ uiLang === 'zh' ? 'VN' : '中' }}</span>
+          <span class="lang-tag">{{ uiLang === 'zh' ? 'VI' : (uiLang === 'vi' ? 'EN' : '中') }}</span>
         </button>
         <!-- 桌面端专属：布局切换（PC 整窗大屏 ↔ 移动版 420px 手机窄列），手机上不显示 -->
         <button v-if="isDesktop" class="hm-ctrl-btn layout-btn" :title="pcLayout ? '切换到移动版（手机小屏样式）' : '切换到PC版（整窗大屏样式）'" @click="toggleLayoutMode">
@@ -418,7 +418,7 @@
             <span>✕</span>
           </button>
           <!-- 导航态也可切界面语言（与首页同一开关） -->
-          <button class="nav-back nav-lang" :class="{ on: uiLang === 'vi' }" title="界面语言 Ngôn ngữ" @click="toggleUiLang">{{ uiLang === 'zh' ? 'VN' : '中' }}</button>
+          <button class="nav-back nav-lang" :class="{ on: uiLang !== 'zh' }" title="界面语言 Language" @click="toggleUiLang">{{ uiLang === 'zh' ? 'VI' : (uiLang === 'vi' ? 'EN' : '中') }}</button>
           <div class="nav-route-label">
             <span class="nav-from">{{ originName }}</span>
             <span class="nav-arrow">→</span>
@@ -971,9 +971,9 @@ export default {
       lastRerouted: false,
       lastRiskCount: 0,
       tab: 'route',
-      // 整机界面语言：zh=中文 / vi=越南语。DOM 层字典翻译（i18n.js），未命中回落中文；
+      // 整机界面语言：zh=中文 / vi=越南语 / en=英语。DOM 层字典翻译（i18n.js），未命中回落中文；
       // 持久化到 localStorage，刷新/重开仍保持所选语言
-      uiLang: (() => { try { return localStorage.getItem('driver_ui_lang') === 'vi' ? 'vi' : 'zh' } catch (e) { return 'zh' } })(),
+      uiLang: (() => { try { const v = localStorage.getItem('driver_ui_lang'); return v === 'vi' || v === 'en' ? v : 'zh' } catch (e) { return 'zh' } })(),
       showReroute: false,
       voiceOn: true,
       // 行程（司机可手动选择/输入起点终点）
@@ -1593,7 +1593,7 @@ export default {
     // 整机中越切换：恢复上次语言并启动 DOM 翻译层（导航/抽屉里的动态文本由
     // 翻译器内部的 MutationObserver 增量重译，这里只管初始态）
     this._uiTranslator = createUiTranslator(() => this.$el)
-    if (this.uiLang === 'vi') this._uiTranslator.setLang('vi')
+    if (this.uiLang !== 'zh') this._uiTranslator.setLang(this.uiLang)
   },
   beforeUnmount() {
     clearInterval(this.timer)
@@ -1628,9 +1628,9 @@ export default {
     if (window.speechSynthesis) window.speechSynthesis.cancel()
   },
   methods: {
-    /** 整机界面语言切换：中文 ↔ Tiếng Việt（字典见 i18n.js，未覆盖文案回落中文） */
+    /** 整机界面语言切换：中文 → 越南语 → 英语 → 中文（三态循环，字典见 i18n.js，未覆盖文案回落中文） */
     toggleUiLang() {
-      this.uiLang = this.uiLang === 'zh' ? 'vi' : 'zh'
+      this.uiLang = this.uiLang === 'zh' ? 'vi' : (this.uiLang === 'vi' ? 'en' : 'zh')
       try { localStorage.setItem('driver_ui_lang', this.uiLang) } catch (e) { /* 忽略 */ }
       if (this._uiTranslator) this._uiTranslator.setLang(this.uiLang)
     },

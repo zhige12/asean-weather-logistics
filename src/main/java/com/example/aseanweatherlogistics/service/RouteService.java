@@ -1479,6 +1479,104 @@ public class RouteService {
     }
 
     /**
+     * 只读地取「本程调度员实际选中的那条候选」的沿线节点序列；取不到返回 null，由调用方退回基准线。
+     *
+     * <p>为什么只读缓存、绝不在这里补算：AMRI 面板每 8~15 秒就要问一次沿线点，而一轮候选生成
+     * 在 2 核服务器上实测要 7~18 秒；拖沙盘滑杆还会改变风险图签名、把快照判失效。
+     * 在这里触发重算等于把「打分接口」变成「算路接口」，面板会整片卡死。
+     * 宁可退回按基准线打分，也不能拖住调用方。</p>
+     */
+    public List<String> cachedCandidateNodeIds(String originId, String destinationId, String choice) {
+        if (originId == null || originId.isBlank() || destinationId == null || destinationId.isBlank()
+                || choice == null || choice.isBlank()) {
+            return null;
+        }
+        CachedCandidates snap;
+        synchronized (candidatesCache) {
+            snap = candidatesCache.get(candidatesKey(originId, destinationId));
+        }
+        if (snap == null || snap.byKey == null) {
+            return null;
+        }
+        CandidatePath picked = snap.byKey.get(choice);
+        // 选中的那条已不在快照里（风险变了、候选重排）：不拿推荐线冒充用户选的那条，交回调用方兜底
+        return picked == null ? null : picked.path.pathNodeIds();
+    }
+
+    /**
+     * 按「本程选定路线」的节点序列取沿线实时天气。
+     *
+     * <p>与 {@link #syncRealWeatherForRoute} 的分工：那边锚定无天气基准最短路，保证不同时刻纵向可比；
+     * 这边跟随调度员真正选中并画在地图上的那条候选——换一条经芒街的线，AMRI 就该给芒街打分。</p>
+     *
+     * <p>缓存里没有的沿线口岸（换走廊带进来的新口岸，如芒街/东兴）交给 {@link #schedulePathPull}
+     * 后台补拉，**请求线程一律不等**：实测在打分接口里 force 同步拉一次要 21~49 秒
+     * （AMRI 面板每 8~15 秒问一次，等于把面板与后端线程池一起拖死），
+     * 而且 {@code future.get(45s)} 超时后 cancel(true) 会把这次拉取掐死，新点永远进不了缓存，
+     * 下一轮又判「没覆盖」再拉一次——变成永久性的 49 秒阻塞。异步之后下一两次轮询就能看见新口岸。</p>
+     */
+    public List<Map<String, Object>> syncRealWeatherForPath(List<String> pathNodeIds) {
+        if (pathNodeIds == null || pathNodeIds.isEmpty()) {
+            return syncRealWeather(false);
+        }
+        if (!cachedPointsCover(pathNodeIds)) {
+            schedulePathPull(pathNodeIds);
+        }
+        return syncRealWeather(false, pathNodeIds);
+    }
+
+    /** 同一条新路线的补拉最少隔这么久再试一次：上游拉不到时不能跟着轮询频率无限重试 */
+    private static final long PATH_PULL_MIN_MS = 60_000;
+    private volatile long lastPathPullAtMs = 0;
+
+    /**
+     * 后台补拉选定路线沿线的有名节点（发起后立即返回）。
+     *
+     * <p>限流靠三层现成机制，不新增上游额度：本方法自身 60 秒限频；与定时守护共用
+     * {@code realPullInFlight} 单任务闸门（已有拉取在跑则直接放弃，不排队）；
+     * 真不真发请求仍由 {@code RealWeatherService} 的按源最小间隔、跨源间隔与熔断决定。</p>
+     */
+    private void schedulePathPull(List<String> pathNodeIds) {
+        long now = System.currentTimeMillis();
+        if (now - lastPathPullAtMs < PATH_PULL_MIN_MS) {
+            return;
+        }
+        if (!realPullInFlight.compareAndSet(false, true)) {
+            return;
+        }
+        lastPathPullAtMs = now;
+        List<String> ids = List.copyOf(pathNodeIds);
+        try {
+            realPullExecutor.submit(() -> {
+                try {
+                    pullRealWeatherForPath(ids);
+                } catch (Exception ignored) {
+                    // 补拉失败不影响打分：本轮退回已有沿线点，下个限频窗口再试
+                } finally {
+                    realPullInFlight.set(false);
+                }
+            });
+        } catch (Exception e) {
+            realPullInFlight.set(false); // 提交不上（线程池已关等）必须归还闸门，否则实时气象永久堵死
+        }
+    }
+
+    /** 沿线有名节点（城市/口岸）是否都已在实时气象缓存里；OSM 无名中间节点本就不取数，不参与判定。 */
+    private boolean cachedPointsCover(List<String> pathNodeIds) {
+        Set<String> have = realWeatherService.cachedPoints().keySet();
+        for (String id : pathNodeIds) {
+            RoadNode n = nodeById.get(id);
+            if (n == null || n.getName() == null || n.getName().isBlank()) {
+                continue;
+            }
+            if (!have.contains(id)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * 后台气象守护用：把多条关注走廊的沿线节点取并集，只发起一次实时气象同步。
      *
      * <p>为什么要合并：{@link #syncRealWeather} 开头会 clearRealRisks() 清掉全部实时风险再按

@@ -7,7 +7,7 @@
 | 1 | 承诺书（附件2） | 🟡⛔ | `06-承诺书草稿.md` 为通用草稿；**官方附件2 模板须下载原件填写签字盖章** |
 | 2 | 系统原型 / 可运行 Demo | ✅ | 在线 Demo 已部署：大屏 https://zhi-ning.cn:8443/ · 司机端 https://zhi-ning.cn:8443/driver.html（HTTPS 正式证书，手机可安装为应用）；`05-…Demo交付.md` 另含局域网/APK 方式与评委运行步骤 |
 | 3 | 演示视频（≤5 分钟） | 🟡 | `05-…Demo交付.md` 给了逐段分镜脚本；**视频需你按脚本录制** |
-| 4 | 源代码及技术文档 | ✅ | 源码 = 本仓库；技术文档 `01-技术文档.md` 按提交要求四段对齐：环境配置说明（二/四/十）、依赖列表（三/10.1）、部署步骤（五/11.1）、API 接口清单（六 19 控制器 96 端点）；关键配置已脱敏且给出可复现路径（10.3 脱敏对照、11.1 无凭证跑通、11.2 已知坑）；仓库根目录附 `.env.example` 脱敏模板 |
+| 4 | 源代码及技术文档 | ✅ | 源码 = 本仓库；技术文档 `01-技术文档.md` 按提交要求四段对齐：环境配置说明（二/四/十）、依赖列表（三/10.1）、部署步骤（五/11.1）、API 接口清单（六 23 控制器 105 端点）；关键配置已脱敏且给出可复现路径（10.3 脱敏对照、11.1 无凭证跑通、11.2 已知坑）；仓库根目录附 `.env.example` 脱敏模板 |
 | 5 | 服务设计可视化材料 | ✅ | 图文结合成稿 **《服务设计可视化材料.docx》**（五节，每节短说明+整页简洁成图）；文字版见 `02`、`03`（均为简洁清单/一句话链，不再用 mermaid 与字符画）；成图 `08`～`13` 已统一为简洁风（短语块+单主色），每张图同目录保留 HTML 源，改完重跑 `python build/_viz_render.py` 即可重导 PNG |
 | 6 | 知识产权等佐证材料 | ⛔ | 软著/专利/查重报告/开源许可清单等**需你向机构申请或导出**（见下方建议） |
 | 7 | 路演 PPT | ✅ | `04-路演PPT文案.md` 14 页文案 + 讲稿 + 现场演示脚本；**套用到 PPT 模板即可** |
@@ -37,10 +37,8 @@
 
 ## 提交前必做（直接影响“可复现”判定）
 
-1. **补齐未入库的源码文件**（缺任何一个，评委 clone 后编译不过）：
-   `src/main/java/.../service/CorridorAdvisoryService.java`、`src/main/java/.../service/RecommendationPool.java`、
-   `frontend/src/utils/corridorAdvisory.js`、`src/test/java/.../service/SolutionAgentDetourTriggerTest.java`。
-2. **入库本目录的成图与截图**：`10`～`13` 的 html/png 与 `_ui/` 目前仍为未跟踪状态，需一并 `git add`。
+1. ~~**补齐未入库的源码文件**~~ — **已入库**：`CorridorAdvisoryService.java`、`RecommendationPool.java`、`frontend/src/utils/corridorAdvisory.js`、`SolutionAgentDetourTriggerTest.java` 均已被 `git ls-files` 跟踪；本轮新增的 `DeepseekServiceConcurrencyGateTest.java` 需随本次提交一并 `git add`（提交前跑 `tools/_clone_integrity.mjs` 复核依赖闭包）。
+2. ~~**入库本目录的成图与截图**~~ — **已入库**：`交付材料/` 现共 57 个跟踪文件（含 `08`～`13` 的 html/png 与 `_ui/`）。
 3. **仓库只提交 `.env.example`**：根目录 `.env.local` 已被 `.gitignore` 排除，以 Git 仓库地址提交时凭证不会跟着出去。
    注意与 Demo 包的区隔：可运行 Demo 包内的 `asean-demo/.env.local` **为让评委开箱核验而内含申请人本人三份凭证**，
    该目录不入库，且包只定向交付评审人员——不得上传公开网盘、群发链接或传到仓库。
