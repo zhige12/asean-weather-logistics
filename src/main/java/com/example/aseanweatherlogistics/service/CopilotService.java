@@ -282,6 +282,14 @@ public class CopilotService {
             资料：
             """;
 
+    /**
+     * 供门户 AI（PortalCopilotService）复用的知识问答入口：与大屏「AI志宁」同一条
+     * 检索→改写作答→离线降级链路，出处（sources）照带，不另建一套作答逻辑。
+     */
+    public Map<String, Object> answerKnowledgeQuery(String topic) {
+        return answerKnowledge(topic);
+    }
+
     /** 检索知识条目→（有模型时）基于资料改写作答；模型不可用时直接给原文并标为离线检索。 */
     private Map<String, Object> answerKnowledge(String topic) {
         Map<String, Object> r = new LinkedHashMap<>();

@@ -6,7 +6,7 @@
  *  - pos='fixed' 用于调度大屏（相对视口右下角），pos='absolute' 用于司机端（相对 .phone 容器）。
  * 只负责「球 + 展开外壳」，不掺和具体指令逻辑，保持与两端聊天解耦。
  */
-import { ref } from "vue";
+import { ref, computed } from "vue";
 
 const props = defineProps({
   label: { type: String, default: "AI志宁" },
@@ -14,12 +14,51 @@ const props = defineProps({
   pos: { type: String, default: "fixed" },
   right: { type: String, default: "18px" },
   bottom: { type: String, default: "22px" },
+  // top：一旦传入，小球改从顶部锚定（右上角），面板向下展开（门户用）
+  top: { type: String, default: "" },
   // 展开面板宽度（手机窄列需收窄）
   panelWidth: { type: String, default: "360px" },
+  // draggable：允许用指针拖动小球改停留位置（仅门户启用；大屏/司机端默认 false，行为不变）
+  draggable: { type: Boolean, default: false },
 });
 
 const open = ref(false);
+const fabEl = ref(null);
+// 一旦被拖动就记下视口坐标（left/top），null 表示仍用 right/bottom/top 锚定
+const dragPos = ref(null);
+const fabStyle = computed(() => {
+  if (dragPos.value) return { left: dragPos.value.left + "px", top: dragPos.value.top + "px", right: "auto", bottom: "auto" };
+  return { right: props.right, bottom: props.top ? "auto" : props.bottom, top: props.top || "auto" };
+});
+
+// 拖拽态（非响应式，仅事件处理用）
+let dragging = false, moved = false, suppressClick = false;
+let grabDx = 0, grabDy = 0, dragW = 60, dragH = 60, startX = 0, startY = 0;
+function onPointerDown(e) {
+  if (!props.draggable || !fabEl.value) return;
+  const r = fabEl.value.getBoundingClientRect();
+  dragW = r.width; dragH = r.height;
+  grabDx = e.clientX - r.left; grabDy = e.clientY - r.top;
+  dragging = true; moved = false; startX = e.clientX; startY = e.clientY;
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+}
+function onPointerMove(e) {
+  if (!dragging) return;
+  if (!moved && (Math.abs(e.clientX - startX) > 4 || Math.abs(e.clientY - startY) > 4)) moved = true;
+  if (!moved) return;
+  const left = Math.max(4, Math.min(window.innerWidth - dragW - 4, e.clientX - grabDx));
+  const top = Math.max(4, Math.min(window.innerHeight - dragH - 4, e.clientY - grabDy));
+  dragPos.value = { left, top };
+}
+function onPointerUp() {
+  dragging = false;
+  window.removeEventListener("pointermove", onPointerMove);
+  window.removeEventListener("pointerup", onPointerUp);
+  if (moved) suppressClick = true; // 拖动后紧随的 click 不算“点开”，吞掉一次
+}
 function toggle() {
+  if (suppressClick) { suppressClick = false; return; }
   open.value = !open.value;
 }
 function close() {
@@ -35,7 +74,7 @@ defineExpose({
 </script>
 
 <template>
-  <div class="ai-fab" :class="pos" :style="{ right: props.right, bottom: props.bottom }">
+  <div class="ai-fab" :class="[pos, { 'from-top': !!props.top }]" :style="fabStyle" ref="fabEl">
     <!-- 展开的对话面板：点空白处或右上角关闭收起 -->
     <transition name="ai-pop">
       <div v-show="open" class="ai-panel" :style="{ width: props.panelWidth }">
@@ -52,7 +91,7 @@ defineExpose({
     </transition>
 
     <!-- 悬浮小球：AI 字样 + 星芒，无人像；下方「AI志宁」标签 -->
-    <button class="ai-ball" :class="{ active: open }" :title="props.label" @click="toggle">
+    <button class="ai-ball" :class="{ active: open, draggable: props.draggable }" :title="props.label" @pointerdown="onPointerDown" @click="toggle">
       <span class="ai-ball-orb">
         <span class="ai-ball-text">AI</span>
         <svg class="ai-ball-spark" viewBox="0 0 24 24" aria-hidden="true">
@@ -74,6 +113,10 @@ defineExpose({
 }
 .ai-fab.fixed { position: fixed; }
 .ai-fab.absolute { position: absolute; }
+/* 右上角锚定：球在上、面板在下（DOM 是面板→球，用 column-reverse 把球提到顶部），展开动画原点改到右上 */
+.ai-fab.from-top { flex-direction: column-reverse; align-items: flex-end; }
+.ai-fab.from-top .ai-panel { transform-origin: top right; top: calc(100% + 10px); bottom: auto; }
+.ai-fab.from-top .ai-panel.ai-pop-enter-from, .ai-fab.from-top .ai-panel.ai-pop-leave-to { transform: translateY(-12px) scale(0.92); }
 
 /* ---- 小球 ---- */
 .ai-ball {
@@ -100,6 +143,9 @@ defineExpose({
 }
 .ai-ball:hover .ai-ball-orb { transform: scale(1.06); }
 .ai-ball:active .ai-ball-orb { transform: scale(0.96); }
+/* 可拖拽：光标提示 + 屏蔽触屏滚动/文字选中（仅 draggable 时） */
+.ai-ball.draggable { cursor: grab; touch-action: none; user-select: none; }
+.ai-ball.draggable:active { cursor: grabbing; }
 .ai-ball.active .ai-ball-orb {
   box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.28), 0 8px 22px rgba(79, 70, 229, 0.5);
 }
@@ -137,6 +183,8 @@ defineExpose({
 
 /* ---- 展开面板 ---- */
 .ai-panel {
+  /* 脱离文档流：面板宽度不再撑开 .ai-fab 容器，避免“展开/收起时靠右的小球随容器变宽左右跳”（尤其拖动后 left 锚定时会向右跳） */
+  position: absolute; right: 0; bottom: calc(100% + 10px);
   max-width: calc(100vw - 24px);
   /* 聊天字号调大后面板变高，小笔记本（768px 高）上不能顶出视口：整体封顶，超出部分由 body 滚动 */
   max-height: calc(100vh - 110px);

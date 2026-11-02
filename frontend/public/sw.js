@@ -3,6 +3,7 @@ const CACHE = 'asean-weather-v2'
 const ASSETS = [
   '/',
   '/index.html',
+  '/dashboard.html',
   '/driver.html',
   '/manifest.json'
 ]

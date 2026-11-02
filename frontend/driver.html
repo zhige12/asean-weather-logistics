@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <title>ZLN-Map · 司机端跨境物流气象预警</title>
+  <title>司机端 - ZHINING 志宁</title>
 
   <!-- PWA：支持添加到手机主屏幕、独立窗口运行（无浏览器地址栏） -->
   <link rel="manifest" href="/manifest.json" />
@@ -54,7 +54,7 @@
     #boot-skip { position: absolute; top: calc(18px + env(safe-area-inset-top)); right: 18px; z-index: 2; display: inline-flex; align-items: center; gap: 4px; padding: 7px 15px; border-radius: 999px; border: 1px solid rgba(15,23,42,.16); background: rgba(15,23,42,.05); color: rgba(30,41,59,.8); font-size: 13px; letter-spacing: 1px; cursor: pointer; -webkit-tap-highlight-color: transparent; backdrop-filter: blur(6px); opacity: 0; animation: boot-fade .6s ease .6s forwards; }
     #boot-skip:active { background: rgba(15,23,42,.12); }
     #boot-skip b { font-weight: 700; font-variant-numeric: tabular-nums; }
-    @media (prefers-reduced-motion: reduce) { .bc, #boot-mid { animation: boot-fade .01s ease forwards; } #boot-bar i { animation: none; left: 29%; } #boot-veil::before, #boot-veil::after { animation: none; } }
+    @media (prefers-reduced-motion: reduce) { .bc { opacity: 1; animation: boot-shine 3.6s linear infinite; } #boot-mid { animation: boot-fade .01s ease forwards; } #boot-bar i { animation: boot-slide 1.35s ease-in-out infinite; } #boot-veil::before, #boot-veil::after { animation: none; } }
   </style>
 </head>
 <body>

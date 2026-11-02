@@ -72,7 +72,7 @@ public class WebConfig implements WebMvcConfigurer {
         // - /assets/** 文件名带内容 hash，内容不可变，长缓存减少手机重复拉取。
         String distUri = Paths.get(System.getProperty("user.dir"), "frontend", "dist").toUri().toString();
         registry.addResourceHandler(
-                        "/driver.html", "/index.html", "/sw.js",
+                        "/driver.html", "/index.html", "/dashboard.html", "/sw.js",
                         "/manifest.json", "/manifest.webmanifest")
                 .addResourceLocations(distUri)
                 .setCacheControl(CacheControl.noCache());

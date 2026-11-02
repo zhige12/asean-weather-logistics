@@ -3,18 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="manifest" href="/manifest.json" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <meta name="theme-color" content="#0f3460" />
-    <!-- 标准写法（Chrome/Edge 等）：mobile-web-app-capable。apple-* 仍保留给 iOS Safari -->
-    <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="跨境气象调度" />
-    <title>面向东盟跨境物流的突发气象预警与多路线协同调度平台 · 调度大屏</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b1f3a" />
+    <meta name="description" content="志宁护航 · 面向东盟跨境物流的突发气象预警与多路线协同调度平台 · 任务门户" />
+    <title>志宁护航</title>
+    <style>
+      /* 门户首屏遮罩：Vue 挂载前兜住白屏，挂载后整体替换 #app 即消失。深空蓝底、与调度大屏的浅底区分开。 */
+      html, body { margin: 0; height: 100%; }
+      body { background: radial-gradient(1200px 600px at 20% -10%, #16305a 0%, #0b1f3a 45%, #071528 100%); font-family: system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+      #boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; color: #cfe0ff; }
+      #boot .ring { width: 46px; height: 46px; border-radius: 50%; border: 3px solid rgba(120,170,255,.25); border-top-color: #4f9bff; animation: spin 0.9s linear infinite; }
+      #boot .txt { font-size: 14px; letter-spacing: 3px; opacity: .8; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
   </head>
   <body>
     <div id="app"></div>
-    <script type="module" src="/src/main.js"></script>
+    <div id="boot"><div class="ring"></div><div class="txt">正在装载任务门户…</div></div>
+    <script type="module" src="/src/home/main.js"></script>
   </body>
 </html>

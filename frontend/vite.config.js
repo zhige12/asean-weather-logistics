@@ -24,7 +24,10 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
+        // 门户（根路径 / 的 welcome page，静态托管自 dist/index.html）
         main: resolve(__dirname, 'index.html'),
+        // 调度大屏（原 index.html 的 SPA，迁移到 dashboard.html，旧地址仍可直接访问）
+        dashboard: resolve(__dirname, 'dashboard.html'),
         driver: resolve(__dirname, 'driver.html')
       },
       output: {

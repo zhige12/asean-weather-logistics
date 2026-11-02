@@ -1536,6 +1536,17 @@ export default {
           NAME_TO_ID[p.name.toLowerCase()] = p.nodeId
         }
       }
+      // 门户 AI 深链：?nav=河内 → 自动填终点并进入路线规划（与 AI 舱 navigate_to 同一条落地链路）。
+      // 放在地名库回包之后起跑：NAME_TO_ID 补全了，冷门地名才有机会命中；
+      // 归一失败（超出覆盖）由 searchRoutes 内部走地理编码+吸附并如实提示，不在此另搭一套。
+      try {
+        const navDest = (new URLSearchParams(window.location.search).get('nav') || '').trim()
+        if (navDest && navDest !== this.destinationId) {
+          this.destinationId = navDest
+          this.tab = 'route'
+          this.searchRoutes()
+        }
+      } catch (e) { /* 深链解析失败不影响司机端正常启动 */ }
     }).catch(() => {})
     // 越方司机默认越南语播报/展示
     if (this.driverRole === 'DRIVER_VN') this.taskLang = 'vi'

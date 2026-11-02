@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#0f3460" />
+    <!-- 标准写法（Chrome/Edge 等）：mobile-web-app-capable。apple-* 仍保留给 iOS Safari -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="跨境气象调度" />
+    <title>调度大屏 - ZHINING 志宁</title>
+    <style>
+      /* 手机端提示：调度大屏是电脑端操作台（左栏 + 地图 + 右侧图例为固定桌面布局，未做响应式），
+         手机浏览器上必然裁切重叠；移动端的入口是司机端。仅在 ≤820px 显示，桌面端完全不受影响。 */
+      .mob-tip { display: none; }
+      @media (max-width: 820px) {
+        .mob-tip { display: flex; position: fixed; left: 10px; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom));
+          z-index: 9999; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 12px; background: rgba(11, 31, 58, .94);
+          color: #e8eefc; font-size: 13px; line-height: 1.5; box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+          font-family: system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+        .mob-tip span { flex: 1; min-width: 0; }
+        .mob-tip a { color: #6cb6ff; font-weight: 700; white-space: nowrap; }
+        .mob-tip button { flex: none; width: 24px; height: 24px; border: none; border-radius: 50%; cursor: pointer;
+          background: rgba(255, 255, 255, .16); color: #cfe0ff; font-size: 13px; line-height: 1; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="mob-tip" id="mobTip" role="note">
+      <span>调度大屏为电脑端操作台，手机浏览器会裁切布局；手机端请用</span>
+      <a href="/driver.html">司机端</a>
+      <button type="button" aria-label="关闭提示" onclick="document.getElementById('mobTip').style.display='none'">✕</button>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

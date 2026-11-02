@@ -215,6 +215,22 @@ export const VI_UI = {
 
   // ===== 通用按钮 =====
   '播报': 'Đọc',
+
+  // ===== 门户（HomeApp）顶栏与通用标签 =====
+  '主页': 'Trang chính',
+  '调度大屏': 'Bảng điều phối',
+  '司机端': 'Tài xế',
+  '实时气象': 'Thời tiết trực tiếp',
+  'AMRI 风险': 'Rủi ro AMRI',
+  '水运': 'Vận tải thủy',
+  '通关时效': 'Thời gian thông quan',
+  '登录 / 注册': 'Đăng nhập / Đăng ký',
+  '公告': 'Thông báo',
+  '数据源': 'Nguồn dữ liệu',
+  '连接中…': 'Đang kết nối…',
+  '载入中…': 'Đang tải…',
+  '重试': 'Thử lại',
+  '跨境物流气象预警': 'Cảnh báo thời tiết logistics xuyên biên giới',
 }
 
 // 专名/术语兜底：动态拼接串里出现的城市、口岸等，逐词替换（长词优先，避免子串误替）
@@ -431,6 +447,22 @@ export const EN_UI = {
 
   // 通用按钮
   '播报': 'Read',
+
+  // 门户（HomeApp）顶栏与通用标签
+  '主页': 'Home',
+  '调度大屏': 'Dispatch board',
+  '司机端': 'Driver',
+  '实时气象': 'Live weather',
+  'AMRI 风险': 'AMRI risk',
+  '水运': 'Waterway',
+  '通关时效': 'Customs clearance',
+  '登录 / 注册': 'Log in / Sign up',
+  '公告': 'Notice',
+  '数据源': 'Data source',
+  '连接中…': 'Connecting…',
+  '载入中…': 'Loading…',
+  '重试': 'Retry',
+  '跨境物流气象预警': 'Cross-border logistics weather alerts',
 }
 
 // 英语专名/术语兜底（城市、口岸、灾害等；长词优先，逐词替换）
