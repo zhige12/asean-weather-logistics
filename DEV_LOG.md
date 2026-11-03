@@ -372,7 +372,15 @@
     - **AiBall 标签不跟随语种**：`label` 是自定义 prop，DOM 翻译器只遍历文本节点与 `placeholder`/`title`，接不到 → 改 `:label="t('AI志宁 · 快速导航')"`（品牌沿用 ZHINING 不译）。
     - **取证**：API 200 / 23851B / 23 城、覆盖 11 国（东盟 10 成员国 + 中国）、**0 城缺拉丁字段**、PNH 带 TMAX/TMIN/TCC/LCC；`cleanTest test` 14 类 76 用例全绿（一次全量 `test` 报 Java heap space——`tasks.named('test')` 未设 `maxHeapSize`（默认 512m）而 bootRun 有 `-Xmx6g`，重跑即过，判定为内存压力偶发非代码缺陷）；三语 × 桌面/430×932 手机双视口 CDP 全部 0 运行时报错、0 中文残留；探针跑完即删。
     - **决赛前文档与工具链订正**：① 入口 URL 三处过时（`/` 已是门户，大屏在 `/dashboard.html`）→ 改 `README.md`、`07-评委启动说明.txt`、包内 `README.txt`、`05`、`01` §5.2/§11.1，`start.bat` 黑窗补列三入口；② 端点数三处自相矛盾 → 以 `node tools/_api_inventory.mjs` 权威值 **26 控制器 / 112 端点** 统一 `00`/`01` 共 6 处，并把 `AseanSituationController`、`asean-cities.json`、门户入口补进清单；③ `driver.html` 缺 `rel="icon"` 导致浏览器每次请求 `/favicon.ico` 得 404 → 补声明，CDP Network 域实测司机端 favicon 请求变为 `/favicon.svg => 200`、不再请求 ico；④ 四个探针（`_ui_shots`/`_perf_auto_probe`/`_task_sync_e2e`/`_ai_ball_shot`）把 `/` 当大屏 → 改指 `dashboard.html`；⑤ **事实口径错误订正**：初稿把城市表写成「东盟 11 个成员国」，但东盟正式成员国只有 10 个（东帝汶尚未正式加入），第 11 国实为中国——`asean-cities.json` 里就是 10 国 20 城 + 中国 3 城。已把 `00`/`01`/`07` 共 6 处改为「东盟 10 个成员国 + 中国，共 11 国 23 城」（成员国数是评委一眼能判对错的常识题，写错比写少更伤）。
-    - **未做（不口头算完成）**：本轮改动**未 git 提交**；`asean-demo/app.jar` 仍为 10/21 的旧构建（不含门户与东盟态势）、且本机已无 `asean-demo-offline.zip` → **重打交付包**才能把这两周的东西交给评委；线上 `https://zhi-ning.cn/api/asean/situation` 实测 **404**（dist 已上线、后端 jar 未更新）→ 需部署。
+    - **上面的「未做」已全部做完（决赛交付三步）**：
+      - **提交推送**：`3ea5774`（23 个文件）→ `origin/main`，工作区归零。提交前 `git grep --cached` 两条凭证规则均无命中；`application.properties` 的 diff 逐行看过，只新增 `${ENV:空默认}` 形式的键。
+      - **线上部署**：`_srv_upload` → `_srv_apply`（备份 `app.jar.bak.20261103_154451` + `dist.bak.<同 ts>`，jar md5 `3cb383…` → `f4df0b…`）→ `_srv_verify` 全绿。服务日志直接给出 `[asean-situation] 预热完成：23 城 / 11 国，源=contest-observation，耗时 1542ms`；`/api/asean/situation` **404 → 200 / 22460B**，`/`、`/dashboard.html`、`/driver.html`、`/favicon.svg` 均 200；线上 `main-B2Dz3QsQ.js`、`driver-C48wCX8G.js` 与本地 dist 逐一对齐（证明上去的就是本次构建，且线上 driver.html 已带 `rel="icon"`）。旧功能回归：`riskCleared` 仍在。
+      - **重打交付包**：`_pkg_sync` 把包内 `app.jar` 从 10/21 的 65,662,598B 换成 11/2 的 51,413,211B、`robocopy /MIR` 镜像新 dist（exit=3，脚本已注释 0-7 均为正常）；`_pkg_rezip` 出 `asean-demo-offline.zip` **340.7MB / 32,431 条目**（32,431 = 含 29,493 张瓦片），同步发布到桌面与 `D:\Temp`。闸门全过：`frontend\dist` 内 token 命中 **0**、git HEAD 内 **0**、jar 默认值全为空占位、禁发密钥 0、`start.bat` 纯 ASCII+CRLF（nonAscii=0）、包内 `README.txt` BOM+CRLF。
+      - **包内端到端实测**（全新解压 `D:\Temp\pkg-extract`，373.9MB / 29,742 文件，只用包内 jre 跑包内 jar）：四入口 200，门户 bundle 确实引用 `/api/asean/situation`，接口回 **23 城 / 11 国 / CRA40**、缺 TMAX 的城市 **0** 个、审计计数 `{upstreamRequests:1, cacheHits:1, throttled:1, circuitOpens:0, minIntervalSeconds:1800}`；老链路回归 `aiChannel=online:deepseek-chat`、`waitHold`/`resumeFromHold` 在、DeepSeek 失败行 0。**评委拿到的包与线上跑的是同一套东西**。
+      - 随之订正 `07-评委启动说明.txt` 里写死的体积（原「约 336MB / 约 394MB」→ 实测「约 341MB / 约 374MB，含 247MB 瓦片缓存」）。
+    - **两个先查清才敢动的风险，都不是坏消息**：
+      - **新旧 jar 体积差 14MB 不是丢数据**：逐条目比对（临时脚本 `_tmp_jar_diff.ps1`，跑完已删）发现旧包 jar 里多了 `vietnam-road-network.json.bak`（34.83MB）与 `.pre-corridor.bak`（34.77MB）两个死数据；路网主文件两边同尺寸 63.85MB、`BOOT-INF/lib` 两边都是 64 个 / 36.6MB，新的只多出一个 `asean-cities.json`。那两份 `.bak` **至今仍躺在 `src/main/resources/data/`**（被 `.gitignore:59 *.bak` 排除、不入库），不打进 jar 全靠 `build.gradle` 的 `processResources { exclude '**/*.bak' }`——旧包是这条规则加入**之前**打的，所以体积反而更大。看到这个体积差就删 `.bak` 或怀疑新功能丢数据，都会错。
+      - **验收脚本集体停留在「上一版要交的东西」**：`_pkg_sync` 第 3-4 节、`_pkg_unzip_verify` 第 3-4b 节、`_srv_upload` 第 0 步、`_srv_verify` 末尾，全部在校验 `aiChannelLabel` / `riskCleared` / `waitHold` 这些历史关注点，对门户与东盟态势零覆盖——**所以一个 10/21 的旧包能一路报“ok”**。已各自补上本次判据（`_pkg_sync` §6、`_pkg_unzip_verify` §4c、`_srv_upload` 改查 `AseanSituationController.class` + `asean-cities.json` + dist 三入口、`_srv_verify` 改查四入口 + `/api/asean/situation`）。
 
 ---
 
@@ -384,6 +392,7 @@
 - **任何「已修好 / 已生效」的结论都要有当场证据**：能自动化的用 headless CDP 探针（`build/_*.mjs`、`tools/_*.mjs`：`Runtime.evaluate` 读 `getComputedStyle`/DOM 状态 + `Page.captureScreenshot` 出图），不能自动化的至少跑一次真实接口、打印原始回包。没有证据就写「未验证」，不写「应该没问题」。
 - **探针要选对观测量**：读几何用地理坐标而非屏幕坐标、读节奏用真实 tick 间隔而非名义常量、读样式用 `getComputedStyle` 而非 class 名——选错坐标系/标称值会造出假 PASS 或假 FAIL。
 - **自检脚本也要自检**：探测失败要能区分「服务没起」与「探测路径写错」，静默 skip 比显式报错更危险；跑完必须确认它真产生了预期 PASS 行。
+- **部署/打包脚本必须断言「本次」要交的东西，而不是沿用上一版的关注点**：这类脚本的校验项是历次需求叠下来的，只证明老功能没丢；一个完全过期的产物能全部报 ok。做法：每次交付前把「评委这一次真正会点的东西」写成新的判定项补进去（找产物而非找源码：jar 里要能列出新增 class 与数据文件、bundle 里要能 grep 到新接口路径、解压后的实例要真返回数据），而不是只改文档里那句「已同步」。
 - **“某资源不再被请求”这类结论只能看网络事件，不能看 HTML**：修完 `driver.html` 的 `rel="icon"` 后，声明在不在只证明源码改了，不证明浏览器行为变了。要开 CDP `Network` 域，把 `requestWillBeSent` 与 `responseReceived`/`loadingFailed` 按 `requestId` 串起来才能拿到状态码（单看一条事件只有 URL 没有成/败）。
 
 ### 构建与部署
@@ -407,6 +416,8 @@
 - **整机 DOM 翻译器接不到「静态文案 + 插值」混成的那一个文本节点**：Vue 会把同一元素内的相邻静态文本与插值编译成**单个**动态文本节点（形如 `气温 24.8℃ · 降水 0mm`），翻译器只做整串精确匹配 → 必然未命中、回落中文；而纯静态节点译得正常，很容易误诊成「字典漏词」。判据：用 `TreeWalker` 把页面全部含 CJK 的文本节点 dump 出来数一遍，再看落空的是不是都带数字。出路是**渲染期 `t()` 分段译**，不要为了省事去放宽翻译器匹配（那会拿子串错译别处）；也不要顺手改共享翻译器（大屏/司机端已靠它取过证，改动会连带回归）。**同理，自定义 prop / attribute 上的文案（如悬浮球 `label`）翻译器一律接不到**，它只遍历文本节点与 `placeholder`/`title`。
 
 ### 终端与脚本（Windows / PowerShell）
+- **无 BOM 的 UTF-8 `.ps1` 会被 PowerShell 5.1 按 GBK 解码**，中文注释里的乱码常含引号/括号 → 直接破坏语法（实际报错形如「表达式或语句中包含意外的标记”）。所以 **`.ps1` 写纯 ASCII 注释**（中文说明放到配套文档或 `DEV_LOG`）；反之 `.mjs` / `.md` 写中文安全。
+- **PowerShell 把字符串管道喂给 `ssh.exe` 的 stdin 时，会给「最后一行」附上 `\r`**（即使源文件里一个 CR 字节都没有，已按字节验证）。落点不巧就致命：末行是 `echo "…"` 时 CR 在引号里静默无害，末行是 `… | head` 时 bash 会去找名叫 `head\r` 的程序 → `bash: line 30: $'head\r': command not found`。反直觉的是：**它看起来像「功能没验到」，实际只是最后一条探测语句没跑**。正确做法是让 here-string 的最后一行是一个带引号的 `echo`（戒律：不要靠补 `"`n"` 修，那只会造出一个纯 CR 空行，变成 `bash: line 31: $'\r'`）。
 - **不要把复杂 PowerShell 塞进 `bash → powershell -Command "..."` 内联**：`$r`/`$_`/`$LASTEXITCODE` 会被中间层剥离成语法错误。逻辑写成 `.ps1` 文件用 `-File` 执行；公网验证用 `curl.exe -s -o 文件` + `findstr`。
 - **命令分隔用 `;` 不用 `&&`**（本 shell 不支持 `&&`）。
 - **探针脚本三条硬约定**：① 写在 `ev(\`...\`)` 模板字符串里的正则必须 `\\s`，`\s` 会被模板字符串吐成字面 `s`，正则静默变形不报错；② **断言要读列表自身的 DOM（如 `.pl-row .pl-name`），不要拿面板全文 `innerText` 匹配关键词**——沙盘说明文案里本来就写着「友谊关/芒街取沙盘滑杆模拟值」，全文匹配会在功能根本没生效时假 PASS；③ **延迟类断言必须带静态接口对照组**（本机 `/api/risk/model` 这类不走上游的）并取多次采样最小值，否则会把整机负载（DeepSeek 60 秒级阻塞调用 + 候选重算）误判成本轮改动的回归。

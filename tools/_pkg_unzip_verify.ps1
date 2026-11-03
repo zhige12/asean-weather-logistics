@@ -91,6 +91,41 @@ $chunk = Invoke-WebRequest -Uri "$base/assets/$ref" -UseBasicParsing -TimeoutSec
 Write-Output ('  served chunk has waitHold: ' + $chunk.Content.Contains('waitHold') +
               '   resumeFromHold: ' + $chunk.Content.Contains('resumeFromHold'))
 
+Write-Output '=== 4c. THIS delivery: portal + ASEAN situation, served by the extracted package ==='
+# Same trap as _pkg_sync section 6: sections 3-4b only re-prove older features, so a stale
+# package would still pass them. Everything a judge clicks for this round is asserted here.
+foreach ($p in @('/', '/dashboard.html', '/driver.html', '/favicon.svg')) {
+  try {
+    $r = Invoke-WebRequest -Uri ($base + $p) -UseBasicParsing -TimeoutSec 15
+    Write-Output ('  ' + $p + ' = ' + $r.StatusCode + '  ' + $r.Content.Length + 'B')
+  } catch { Write-Output ('  *** ' + $p + ' FAILED: ' + $_.Exception.Message.Split([char]10)[0]) }
+}
+# the root must be the portal (not the old dashboard), and its bundle must call the new endpoint
+$rootHtml = (Invoke-WebRequest -Uri "$base/" -UseBasicParsing -TimeoutSec 15).Content
+$mainRef = (([regex]::Matches($rootHtml, 'assets/main-[A-Za-z0-9_-]+\.js') | ForEach-Object { $_.Value } | Sort-Object -Unique) -join ',')
+Write-Output ('  / references: ' + $mainRef)
+if ($mainRef) {
+  $mainChunk = (Invoke-WebRequest -Uri ($base + '/' + $mainRef) -UseBasicParsing -TimeoutSec 30).Content
+  Write-Output ('  portal bundle calls /api/asean/situation: ' + $mainChunk.Contains('/api/asean/situation'))
+}
+# the driver entry must declare the icon, otherwise the browser asks for /favicon.ico and logs a 404
+$drvHtml = (Invoke-WebRequest -Uri "$base/driver.html" -UseBasicParsing -TimeoutSec 15).Content
+Write-Output ('  driver.html declares rel="icon": ' + $drvHtml.Contains('rel="icon"'))
+# and the new endpoint must really return the 23-city table from inside this package
+try {
+  $s = Invoke-RestMethod -Uri "$base/api/asean/situation" -TimeoutSec 240
+  $d = $s
+  if (-not $d.cities -and $d.data) { $d = $d.data }
+  $n = @($d.cities).Count
+  $cc = @($d.cities | ForEach-Object { $_.country } | Sort-Object -Unique).Count
+  Write-Output ('  /api/asean/situation OK: cities=' + $n + ' countries(in-package)=' + $cc + ' reportedCountries=' + $d.countries + ' source=' + $d.sourceLabel)
+  Write-Output ('  region peak city: ' + $d.regionPeak.name + ' / ' + $d.regionPeak.country + '  AMRI=' + $d.regionPeak.index + ' ' + $d.regionPeak.severity)
+  Write-Output ('  audit: ' + (($d.stats.PSObject.Properties | ForEach-Object { $_.Name + '=' + $_.Value }) -join '  '))
+  $noExt = @($d.cities | Where-Object { $null -eq $_.tempMaxC }).Count
+  Write-Output ('  cities missing tempMaxC (TMAX): ' + $noExt + '  (0 = the 11-element pull survived into the shipped jar)')
+  if ($n -lt 23) { Write-Output ('  *** only ' + $n + ' cities in the package - expected 23 ***') }
+} catch { Write-Output ('  *** /api/asean/situation FAILED: ' + $_.Exception.Message.Split([char]10)[0]) }
+
 Write-Output '=== 5. the online call must not have been rejected ==='
 # DeepseekService logs only on failure (the URL appears in the warn line), so silence here
 # plus aiChannel=online:* in section 3 is what proves a real, accepted model call.
