@@ -59,6 +59,8 @@ export const api = {
   corridor: () => getJson('/api/canal/corridor'),
   customsBulletin: () => getJson('/api/customs/bulletin'),
   customsEfficiency: () => getJson('/api/customs/efficiency'),
+  // 东盟态势：区域热点城市实况 + 单点 AMRI（后端独立节流通道，refresh 只越窗口不越熔断）
+  aseanSituation: (refresh) => getJson('/api/asean/situation', refresh ? { refresh: 'true' } : null),
   // 身份壳（演示级：内存账号，重启归零）；登录/注册需先取图形验证码（同源 Cookie 将会话与答案绑定）
   authSession: () => getJson('/api/auth/session'),
   authCaptcha: () => getJson('/api/auth/captcha'),

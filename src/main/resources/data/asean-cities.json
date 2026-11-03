@@ -1,0 +1,37 @@
+{
+  "cities": [
+    { "cityId": "NNG", "name": "南宁", "nameEn": "Nanning", "country": "中国", "countryEn": "China", "countryCode": "CN", "role": "中国—东盟枢纽", "roleEn": "China–ASEAN gateway", "latitude": 22.82, "longitude": 108.32, "corridor": true },
+    { "cityId": "KMG", "name": "昆明", "nameEn": "Kunming", "country": "中国", "countryEn": "China", "countryCode": "CN", "role": "面向南亚东南亚辐射中心", "roleEn": "Radiation hub for South/Southeast Asia", "latitude": 24.88, "longitude": 102.83, "corridor": false },
+    { "cityId": "CAN", "name": "广州", "nameEn": "Guangzhou", "country": "中国", "countryEn": "China", "countryCode": "CN", "role": "货源与港口枢纽", "roleEn": "Cargo origin and port hub", "latitude": 23.13, "longitude": 113.26, "corridor": false },
+
+    { "cityId": "HAN", "name": "河内", "nameEn": "Hanoi", "country": "越南", "countryEn": "Vietnam", "countryCode": "VN", "role": "首都", "roleEn": "Capital", "latitude": 21.03, "longitude": 105.85, "corridor": true },
+    { "cityId": "DDB", "name": "同登", "nameEn": "Dong Dang", "country": "越南", "countryEn": "Vietnam", "countryCode": "VN", "role": "边境口岸城市", "roleEn": "Border-crossing town", "latitude": 21.97, "longitude": 106.68, "corridor": true },
+    { "cityId": "HPH", "name": "海防", "nameEn": "Haiphong", "country": "越南", "countryEn": "Vietnam", "countryCode": "VN", "role": "北方港口枢纽", "roleEn": "Northern port hub", "latitude": 20.86, "longitude": 106.68, "corridor": false },
+    { "cityId": "DAD", "name": "岘港", "nameEn": "Da Nang", "country": "越南", "countryEn": "Vietnam", "countryCode": "VN", "role": "中部港口城市", "roleEn": "Central port city", "latitude": 16.05, "longitude": 108.22, "corridor": false },
+    { "cityId": "SGN", "name": "胡志明市", "nameEn": "Ho Chi Minh City", "country": "越南", "countryEn": "Vietnam", "countryCode": "VN", "role": "经济中心", "roleEn": "Economic centre", "latitude": 10.82, "longitude": 106.63, "corridor": false },
+
+    { "cityId": "VTE", "name": "万象", "nameEn": "Vientiane", "country": "老挝", "countryEn": "Laos", "countryCode": "LA", "role": "首都", "roleEn": "Capital", "latitude": 17.97, "longitude": 102.63, "corridor": false },
+
+    { "cityId": "PNH", "name": "金边", "nameEn": "Phnom Penh", "country": "柬埔寨", "countryEn": "Cambodia", "countryCode": "KH", "role": "首都", "roleEn": "Capital", "latitude": 11.59, "longitude": 104.92, "corridor": false },
+    { "cityId": "KHV", "name": "西哈努克城", "nameEn": "Sihanoukville", "country": "柬埔寨", "countryEn": "Cambodia", "countryCode": "KH", "role": "深水港口城市", "roleEn": "Deep-water port city", "latitude": 10.65, "longitude": 103.50, "corridor": false },
+
+    { "cityId": "BKK", "name": "曼谷", "nameEn": "Bangkok", "country": "泰国", "countryEn": "Thailand", "countryCode": "TH", "role": "首都", "roleEn": "Capital", "latitude": 13.76, "longitude": 100.50, "corridor": false },
+    { "cityId": "CNX", "name": "清迈", "nameEn": "Chiang Mai", "country": "泰国", "countryEn": "Thailand", "countryCode": "TH", "role": "北部经济中心", "roleEn": "Northern economic centre", "latitude": 18.79, "longitude": 98.99, "corridor": false },
+
+    { "cityId": "RGN", "name": "仰光", "nameEn": "Yangon", "country": "缅甸", "countryEn": "Myanmar", "countryCode": "MM", "role": "经济中心", "roleEn": "Economic centre", "latitude": 16.87, "longitude": 96.20, "corridor": false },
+    { "cityId": "NYT", "name": "内比都", "nameEn": "Naypyidaw", "country": "缅甸", "countryEn": "Myanmar", "countryCode": "MM", "role": "首都", "roleEn": "Capital", "latitude": 19.75, "longitude": 96.10, "corridor": false },
+
+    { "cityId": "KUL", "name": "吉隆坡", "nameEn": "Kuala Lumpur", "country": "马来西亚", "countryEn": "Malaysia", "countryCode": "MY", "role": "首都", "roleEn": "Capital", "latitude": 3.14, "longitude": 101.69, "corridor": false },
+    { "cityId": "PEN", "name": "槟城", "nameEn": "Penang", "country": "马来西亚", "countryEn": "Malaysia", "countryCode": "MY", "role": "北部港口与电子产业枢纽", "roleEn": "Northern port and electronics hub", "latitude": 5.41, "longitude": 100.33, "corridor": false },
+
+    { "cityId": "SIN", "name": "新加坡", "nameEn": "Singapore", "country": "新加坡", "countryEn": "Singapore", "countryCode": "SG", "role": "首都与区域转运枢纽", "roleEn": "Capital and regional transshipment hub", "latitude": 1.35, "longitude": 103.82, "corridor": false },
+
+    { "cityId": "JKT", "name": "雅加达", "nameEn": "Jakarta", "country": "印度尼西亚", "countryEn": "Indonesia", "countryCode": "ID", "role": "首都", "roleEn": "Capital", "latitude": -6.21, "longitude": 106.85, "corridor": false },
+    { "cityId": "SUB", "name": "泗水", "nameEn": "Surabaya", "country": "印度尼西亚", "countryEn": "Indonesia", "countryCode": "ID", "role": "东部港口城市", "roleEn": "Eastern port city", "latitude": -7.25, "longitude": 112.75, "corridor": false },
+
+    { "cityId": "MNL", "name": "马尼拉", "nameEn": "Manila", "country": "菲律宾", "countryEn": "Philippines", "countryCode": "PH", "role": "首都", "roleEn": "Capital", "latitude": 14.60, "longitude": 120.98, "corridor": false },
+    { "cityId": "CEB", "name": "宿务", "nameEn": "Cebu", "country": "菲律宾", "countryEn": "Philippines", "countryCode": "PH", "role": "中部港口城市", "roleEn": "Central port city", "latitude": 10.32, "longitude": 123.90, "corridor": false },
+
+    { "cityId": "BWN", "name": "斯里巴加湾", "nameEn": "Bandar Seri Begawan", "country": "文莱", "countryEn": "Brunei", "countryCode": "BN", "role": "首都", "roleEn": "Capital", "latitude": 4.90, "longitude": 114.94, "corridor": false }
+  ]
+}

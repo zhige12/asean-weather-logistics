@@ -2,7 +2,9 @@ package com.example.aseanweatherlogistics.service;
 
 import com.example.aseanweatherlogistics.model.entity.RoadNode;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.springframework.stereotype.Service;
 
 /**
@@ -61,5 +63,52 @@ public class SimulatedWeatherProvider implements WeatherProvider {
     @Override
     public List<RealWeatherService.WeatherPoint> interpolateFromLastFetch(List<RoadNode> nodes) {
         return fetchForNodes(nodes);
+    }
+
+    /**
+     * 日最高/最低气温与总云量：按同一套伪随机参数从 {@link #fetchForNodes} 的气温派生。
+     * <p>本类的定位就是「断网演示用的确定性模拟源」（界面上源标签写的是 离线模拟），
+     * 所以这里给值不等于拿假数冒充真数；但<b>不构造 LCC</b>——低云量与气温没有可以直接沿用的
+     * 常识关系，编一个只会让「哪些是真、哪些是模拟」变得难以分辨，缺项就让它缺。</p>
+     */
+    @Override
+    public Map<String, Map<String, Double>> fetchExtendedElements(List<RoadNode> nodes) {
+        if (nodes == null || nodes.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Map<String, Double>> out = new LinkedHashMap<>();
+        for (RealWeatherService.WeatherPoint p : fetchForNodes(nodes)) {
+            int h = Math.abs((p.nodeId() == null ? "" : p.nodeId()).hashCode());
+            Map<String, Double> one = new LinkedHashMap<>();
+            one.put("TMAX", round(p.temperatureC() + 4.0 + (h % 20) / 10.0));
+            one.put("TMIN", round(p.temperatureC() - 5.0 - (h % 15) / 10.0));
+            one.put("TCC", round(20.0 + (h / 11) % 70));
+            out.put(p.nodeId(), one);
+        }
+        return out;
+    }
+
+    private static double round(double v) {
+        return Math.round(v * 10.0) / 10.0;
+    }
+
+    /**
+     * 前瞻降雨：从本类自己的伪实况按固定倍数派生（未来 3h 取当前雨强的三小时量、6h 取两倍），
+     * 让离线演示的那一列不空转。界面上的源标签写的就是「离线模拟」，所以这不构成拿假数冒充真数；
+     * 但它和其余展示字段一样不驱动任何算路判据。
+     */
+    @Override
+    public Map<String, Map<String, Double>> fetchForecastOutlook(List<RoadNode> nodes) {
+        if (nodes == null || nodes.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Map<String, Double>> out = new LinkedHashMap<>();
+        for (RealWeatherService.WeatherPoint p : fetchForNodes(nodes)) {
+            Map<String, Double> one = new LinkedHashMap<>();
+            one.put("rain3hMm", round(p.precipitationMm()));
+            one.put("rain6hMm", round(p.precipitationMm() * 2.0));
+            out.put(p.nodeId(), one);
+        }
+        return out;
     }
 }

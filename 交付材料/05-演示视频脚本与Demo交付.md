@@ -18,7 +18,7 @@
 
 ## 二、可运行 Demo 交付方式（任选其一/组合）
 
-1. **在线链接**：把后端部署在可公网访问的机器（`server.address=0.0.0.0`，端口 8080），提供大屏 `http://<IP>:8080/` 与司机端 `http://<IP>:8080/driver.html`。⚠️ 公网部署需自行加访问控制/去掉演示注入接口，或仅评审时段开放。
+1. **在线链接**：把后端部署在可公网访问的机器（`server.address=0.0.0.0`，端口 8080），提供门户 `http://<IP>:8080/`、大屏 `http://<IP>:8080/dashboard.html` 与司机端 `http://<IP>:8080/driver.html`。⚠️ 公网部署需自行加访问控制/去掉演示注入接口，或仅评审时段开放。
 2. **局域网演示**：手机与演示电脑连同一 WiFi，`capacitor.config.json` 的 `server.url` 改为演示机 IP，提供 APK 安装包。
 3. **安装包**：`android/app/build/outputs/apk/debug/app-debug.apk`（约 10MB，Android）。随包附《5.3 部署步骤》说明如何起后端。
 4. **源码 + 技术文档**：见 `01-技术文档.md`，评委可本地复现。
@@ -32,6 +32,6 @@ ollama pull qwen2.5:14b && ollama serve
 gradlew.bat bootRun           # 监听 :8080，GET /ping 返回 OK
 # 4) 前端（已随 dist 托管则跳过；或开发模式）
 cd frontend && npm install && npm run build
-# 浏览器打开 http://localhost:8080/
+# 浏览器打开 http://localhost:8080/（根路径是东盟态势门户；调度大屏在 /dashboard.html，司机端在 /driver.html）
 ```
 > 无网络环境下：设 `WEATHER_SOURCE=simulated`，系统读取预生成决策缓存与磁盘瓦片，可完整演示核心流程。

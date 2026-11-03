@@ -13,7 +13,9 @@ import { writeFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const PORT = 9365;
-const APP = 'http://localhost:8080/';
+// 调度大屏专用的 e2e：派单卡与 SSE 监听都在大屏上，得打 dashboard.html。
+// 根路径 / 已被东盟态势门户占用，那些选择器在门户上不存在。
+const APP = 'http://localhost:8080/dashboard.html';
 const API = 'http://localhost:8080';
 const bin = ['C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe'].find(existsSync);

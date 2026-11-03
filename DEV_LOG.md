@@ -362,6 +362,17 @@
     - **大屏（dashboard.html）不改布局**（用户选只修门户）：它是桌面操作台（左栏+地图+右侧图例固定布局、未做响应式），手机上看必然裁切重叠，移动端原设计入口是司机端。只加一条 `≤820px` 才显示的底部提示条（“…手机端请用 司机端” + 可关闭），桌面端 `display:none` 零影响。
     - **取证**（CDP 探针 `tools/_tmp_mob.mjs`，`Emulation.setDeviceMetricsOverride` 强制 390×844/mobile + Android UA，跑完已删）：本地因 `vite preview` 不带 `/api` 代理、实时气象取不到数据，改用同款 scoped 属性注入 8 列表验样式（注：Vue scoped 把属性加在**选择器最后一个元素**上，`th/td` 也得带否则 `.tb th` 不生效，第一版探针因漏了这个误报 `white-space:normal`）；随后**直线上跑**（有真后端、真实 4 节点数据）。线上结果：首页 `scrollW 390 == clientW 390`、`hOverflow:false`（无任何横向裁切），顶栏 117px 两行，`.nav` 单行 h37 且 `scrollWidth 530 > clientWidth 362`（可横滑），`lang` x213–284 / `login` x294–376 / `src` x131–203 全在屏内，`brandWord` 0×0（已收起），球 `top:740 bottom:822`（右下）、展开面板 `x4 right372 y393–730 inView:true`，开屏字 `w172` 不溢出；实时气象真表 `rows:4`、`tableW:481` > 卡片 362、`cellWS:nowrap`、`cardOverflowX:auto`、`cardScrollable:true`、`cardRight:376`；大屏提示条 `display:flex`、w370 在 390 屏内；**1440 桌面回归**：顶栏 76px 一行、`brandWord` w141 可见、`navScrollW == navClientW`（不横滑）、球回到 `y:70` 右上角、`hOverflow:false`。截图 `D:\Temp\portal2\m_home.jpg`/`m_weather.jpg`/`m_dash.jpg`/`m_desktop.jpg`。
     - **已上线**：`tools/_fe_deploy.ps1` 只换 dist（不碰 jar、不重启 asean），备份 `dist.bak.20261102_161324`，新 chunk `main-D5OWSopO.js`，且上述取证数据就是**从 https://zhi-ning.cn 拉回来的**。构建 OK（329ms）、GetProblems 无错。
+  - **观感从一条走廊扩到全东盟：「东盟态势」视图 + 独立取数旁路**（用户：“首页这些任务里面不应该只是南宁到河内…应该是全东盟一些热点城市”；随后“能抓为什么不抓，官方提供的数据要用到极致”）：
+    - **后端旁路**（不沾走廊主链路）：新增 `data/asean-cities.json`（东盟 10 个成员国 + 中国（南宁/昆明/广州）共 11 国 23 城，城名/国名/职能均带拉丁字段）+ `AseanCity`/`AseanCityRepository`/`AseanSituationService`/`AseanSituationController`（`GET /api/asean/situation`）。复用现有 CRA40 Provider，但**独立**最小回源间隔 1800s + 独立熔断 + 独立缓存 + 独立审计计数（沿用 `ContestForecastService` 已有纪律）。口径换算走 `precipitationMm → rainMmH`，与走廊取数一致。
+    - **诚实性两条硬规则**：取不到的要素**不写键**（JSON null → 界面「—」），不拿 0 冒充“无”；算路判据取不到才填中性值且单独走 `read()`，两者分开到不同 helper，读代码时能一眼分辨哪条是降级、哪条是缺项。
+    - **官方 11 要素取满**：CRA40 开放但工程里从未取用的 TMAX/TMIN/TCC/LCC 补进，23 城多一行日最高/日最低/云量（低云量拿得到才写这一栏）。**通关时效经实测抓不到**：越南/老挝海关站超时、`en.customs.gov.vn`/`trade.asean.org` DNS 失败、菲律宾海关与世行 LPI 403、`customs.gov.my` PROTOCOL_ERROR，仅广西页能抽出「进口 11.65 小时 / 出口 0.38 小时」——保持现状（包内基线 + 出处 + 抓不到就 `ok=false` 降级），不假装有新源。
+    - **前端**：门户新增「东盟态势」视图（城市卡网格 + AMRI 风险色阶 + 高风险置顶 + 取数审计行），公告条从写死文案改为**真实数据驱动**（播报区域最不利城市）。
+    - **三语收尾（含一个真 bug）**：① `mainHazard` 的三个灾种标签（降雨/风速/正常）在 EN/VI 下无词条 → 补译；② **更深的坑**：Vue 把同一元素里的「静态标签 + 插值」编译成**一个**动态文本节点（实测形如 `气温 24.8℃ · 降水 0mm …`），而 `createUiTranslator` 只做整串精确匹配，混合串必然落空回落中文——用 CDP `TreeWalker` dump 出 EN 态残留 **96 个中文节点**，而纯静态节点译得好好的（反向证实了判据不是字典漏词）。改法：读数行改走**渲染期 `t()`**（新增 7 个构建方法），**不动共享 DOM 翻译器**（避免回归已取证的大屏/司机端）。复测 EN/VI 中文节点 **96 → 0**，zh 态 154（正常）。
+    - **顺手挖出一个长期存在的老 bug**：`mounted` 解 `#view=xxx` 深链时 `#view=home` 也命中分支并 `return`，跳过了下面为公告条做的 `ensure('asean')` 预取 → 凡从书签/AI 跳转以 `#view=home` 进入，公告条**永久停在回落文案**。修：home 就是默认视图、不算真深链（`if (v && v.id !== 'home')`）。复测三语均播报真实数据。
+    - **AiBall 标签不跟随语种**：`label` 是自定义 prop，DOM 翻译器只遍历文本节点与 `placeholder`/`title`，接不到 → 改 `:label="t('AI志宁 · 快速导航')"`（品牌沿用 ZHINING 不译）。
+    - **取证**：API 200 / 23851B / 23 城、覆盖 11 国（东盟 10 成员国 + 中国）、**0 城缺拉丁字段**、PNH 带 TMAX/TMIN/TCC/LCC；`cleanTest test` 14 类 76 用例全绿（一次全量 `test` 报 Java heap space——`tasks.named('test')` 未设 `maxHeapSize`（默认 512m）而 bootRun 有 `-Xmx6g`，重跑即过，判定为内存压力偶发非代码缺陷）；三语 × 桌面/430×932 手机双视口 CDP 全部 0 运行时报错、0 中文残留；探针跑完即删。
+    - **决赛前文档与工具链订正**：① 入口 URL 三处过时（`/` 已是门户，大屏在 `/dashboard.html`）→ 改 `README.md`、`07-评委启动说明.txt`、包内 `README.txt`、`05`、`01` §5.2/§11.1，`start.bat` 黑窗补列三入口；② 端点数三处自相矛盾 → 以 `node tools/_api_inventory.mjs` 权威值 **26 控制器 / 112 端点** 统一 `00`/`01` 共 6 处，并把 `AseanSituationController`、`asean-cities.json`、门户入口补进清单；③ `driver.html` 缺 `rel="icon"` 导致浏览器每次请求 `/favicon.ico` 得 404 → 补声明，CDP Network 域实测司机端 favicon 请求变为 `/favicon.svg => 200`、不再请求 ico；④ 四个探针（`_ui_shots`/`_perf_auto_probe`/`_task_sync_e2e`/`_ai_ball_shot`）把 `/` 当大屏 → 改指 `dashboard.html`；⑤ **事实口径错误订正**：初稿把城市表写成「东盟 11 个成员国」，但东盟正式成员国只有 10 个（东帝汶尚未正式加入），第 11 国实为中国——`asean-cities.json` 里就是 10 国 20 城 + 中国 3 城。已把 `00`/`01`/`07` 共 6 处改为「东盟 10 个成员国 + 中国，共 11 国 23 城」（成员国数是评委一眼能判对错的常识题，写错比写少更伤）。
+    - **未做（不口头算完成）**：本轮改动**未 git 提交**；`asean-demo/app.jar` 仍为 10/21 的旧构建（不含门户与东盟态势）、且本机已无 `asean-demo-offline.zip` → **重打交付包**才能把这两周的东西交给评委；线上 `https://zhi-ning.cn/api/asean/situation` 实测 **404**（dist 已上线、后端 jar 未更新）→ 需部署。
 
 ---
 
@@ -373,6 +384,7 @@
 - **任何「已修好 / 已生效」的结论都要有当场证据**：能自动化的用 headless CDP 探针（`build/_*.mjs`、`tools/_*.mjs`：`Runtime.evaluate` 读 `getComputedStyle`/DOM 状态 + `Page.captureScreenshot` 出图），不能自动化的至少跑一次真实接口、打印原始回包。没有证据就写「未验证」，不写「应该没问题」。
 - **探针要选对观测量**：读几何用地理坐标而非屏幕坐标、读节奏用真实 tick 间隔而非名义常量、读样式用 `getComputedStyle` 而非 class 名——选错坐标系/标称值会造出假 PASS 或假 FAIL。
 - **自检脚本也要自检**：探测失败要能区分「服务没起」与「探测路径写错」，静默 skip 比显式报错更危险；跑完必须确认它真产生了预期 PASS 行。
+- **“某资源不再被请求”这类结论只能看网络事件，不能看 HTML**：修完 `driver.html` 的 `rel="icon"` 后，声明在不在只证明源码改了，不证明浏览器行为变了。要开 CDP `Network` 域，把 `requestWillBeSent` 与 `responseReceived`/`loadingFailed` 按 `requestId` 串起来才能拿到状态码（单看一条事件只有 URL 没有成/败）。
 
 ### 构建与部署
 - **前端**：`cd frontend; npm run build` → 产物 `dist/assets/main-<hash>.js`；`index.html` 带 `no-cache`，换内容哈希即生效，无需重启。
@@ -392,6 +404,7 @@
 - **UI 主次**：结论（`summary`）优先于过程旁白（`say`）；溯源/元信息可 hover 查但不每屏占位。
 - **子组件模板里的按钮，样式必须写在子组件自己那**：父组件的 `.btn.primary` 编译成 `.btn.primary[data-v-父]`，只有父作用域元素（含具名插槽内容）带标记；子组件只挂 `class="btn primary"` 会无声掉进全局灰色兜底（本轮「进入路线规划」合并后蓝色不生效就是这个原因）。
 - **给上游节流留一条「不发包」的补数通道**：当一个新对象（新路线口岸）必须在秒级内拿到数据、而合规闸门是分钟级（按源 60s + 内容未变退避实测 240s）时，靠「异步限频补拉」会结构性不收敛（实测 9 分钟不进来）。正确做法是用**本机内存里上一轮已经取回的格点场**做范围内插值（接口名写死「绝不允许发起网络请求」、超出范围不补不臆造、按 TTL 判可用性），并给补数加审计计数（`gridFilledNodes`）与真实回源次数（`upstreamRequests`）分开上报，让「没多要上游一次」可证。
+- **整机 DOM 翻译器接不到「静态文案 + 插值」混成的那一个文本节点**：Vue 会把同一元素内的相邻静态文本与插值编译成**单个**动态文本节点（形如 `气温 24.8℃ · 降水 0mm`），翻译器只做整串精确匹配 → 必然未命中、回落中文；而纯静态节点译得正常，很容易误诊成「字典漏词」。判据：用 `TreeWalker` 把页面全部含 CJK 的文本节点 dump 出来数一遍，再看落空的是不是都带数字。出路是**渲染期 `t()` 分段译**，不要为了省事去放宽翻译器匹配（那会拿子串错译别处）；也不要顺手改共享翻译器（大屏/司机端已靠它取过证，改动会连带回归）。**同理，自定义 prop / attribute 上的文案（如悬浮球 `label`）翻译器一律接不到**，它只遍历文本节点与 `placeholder`/`title`。
 
 ### 终端与脚本（Windows / PowerShell）
 - **不要把复杂 PowerShell 塞进 `bash → powershell -Command "..."` 内联**：`$r`/`$_`/`$LASTEXITCODE` 会被中间层剥离成语法错误。逻辑写成 `.ps1` 文件用 `-File` 执行；公网验证用 `curl.exe -s -o 文件` + `findstr`。

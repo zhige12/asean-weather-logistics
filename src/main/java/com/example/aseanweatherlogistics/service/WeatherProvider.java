@@ -2,6 +2,7 @@ package com.example.aseanweatherlogistics.service;
 
 import com.example.aseanweatherlogistics.model.entity.RoadNode;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 气象数据源统一抽象（支持运行时切换）：
@@ -38,5 +39,35 @@ public interface WeatherProvider {
      */
     default List<RealWeatherService.WeatherPoint> interpolateFromLastFetch(List<RoadNode> nodes) {
         return List.of();
+    }
+
+    /**
+     * 官方接口另外开放、但算路判据用不到的要素：日最高气温 TMAX / 日最低气温 TMIN /
+     * 总云量 TCC / 低云量 LCC（{@code GET /api/v1/variables?product=observation} 列了 11 个要素，
+     * 主链路取其中 7 个——雨/风/能见度/气压/气温/湿度够驱动边权，多出来的 4 个不驱动任何权重）。
+     *
+     * <p>它们不进 {@link RealWeatherService.WeatherPoint}：那个记录被算路、缓存签名、熔断退避共用，
+     * 为展示型字段去改它会牵动主链路；这里单独一条通道，取不到就返回空 Map，
+     * 界面按缺项显示「—」，<b>绝不用默认值凑一个看起来合理的数字</b>。</p>
+     *
+     * @return 节点 id → （变量名 → 值），缺项不填
+     */
+    default Map<String, Map<String, Double>> fetchExtendedElements(List<RoadNode> nodes) {
+        return Map.of();
+    }
+
+    /**
+     * 区域前瞻预报：官方 {@code GET /api/v1/forecasts/3h} 同样是开放接口，
+     * 走廊侧已由 {@link ContestForecastService} 取满 11 个要素（PRE 驱动沙盘熔断），
+     * 但区域态势以前只拿实况——只看“现在”、不看“接下来六小时会不会下”，在物流调度语境里是不完整的。
+     *
+     * <p>不复用 {@link ContestForecastService}：那个服务只有一份缓存（lastResult），
+     * 走廊小框与区域大框轮流调用会互相返回对方 bbox 的错位结果（详见 AseanSituationService 类注释）。
+     * 本方法无状态，频度完全由调用方（区域态势自己的一轮节流）控制。</p>
+     *
+     * @return 节点 id → （"rain3hMm" / "rain6hMm" → 毫米），取不到的项不填
+     */
+    default Map<String, Map<String, Double>> fetchForecastOutlook(List<RoadNode> nodes) {
+        return Map.of();
     }
 }

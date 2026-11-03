@@ -19,7 +19,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 const MODE = process.argv[2] || 'all';
 const PORT = 9351;
 const OUT = 'D:\\Temp\\ui_shots';
-const BIG = 'http://127.0.0.1:8080/';
+// 大屏现在住在 dashboard.html：根路径 / 已被东盟态势门户占走。这里的 BIG 必须跟着走，
+// 否则下面那些 .panel / 「确认选择并规划」一类大屏专属选择器会在门户页上全部落空，
+// 交付材料《11-界面原型图》就会静悄悄被门户截图顶替。
+const BIG = 'http://127.0.0.1:8080/dashboard.html';
 const DRV = 'http://127.0.0.1:8080/driver.html';
 const VIEW_W = 1600, VIEW_H = 1000;
 const COL_X = 14, COL_W = 372, COL_TOP = 106;   // 左栏取景框（视口坐标）

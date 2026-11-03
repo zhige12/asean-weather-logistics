@@ -9,8 +9,9 @@
 3. **后端编译 + 单元测试**：`gradlew.bat compileJava compileTestJava test`
 4. **前端构建**：`cd frontend && npm ci && npm run build`（产物 `frontend/dist` 由后端静态托管）。
 5. **启动**：`gradlew.bat bootRun`，随后打开
-   - 调度大屏　`http://localhost:8080/`
-   - 司机端　　　`http://localhost:8080/driver.html`
+   - 东盟态势门户　`http://localhost:8080/`（根路径就是门户，顶部导航可一跳进入下面两个页面）
+   - 调度大屏　　　`http://localhost:8080/dashboard.html`
+   - 司机端　　　　`http://localhost:8080/driver.html`
 
 > 国内直连 Maven Central / npm / services.gradle.org 偶发较慢时，可配置国内镜像或代理加速。
 

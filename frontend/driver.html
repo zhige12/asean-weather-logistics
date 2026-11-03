@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>司机端 - ZHINING 志宁</title>
 
+  <!-- 浏览器标签图标：必须显式声明。门户与大屏的 index/dashboard 都写了这一行，司机端漏写时
+       浏览器会自行去请求 /favicon.ico，而服务端只有 favicon.svg、没有 ico，于是每次开司机端
+       都在控制台留一条 404，标签页也显示默认灰图。与另两个入口保持同款写法。 -->
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
   <!-- PWA：支持添加到手机主屏幕、独立窗口运行（无浏览器地址栏） -->
   <link rel="manifest" href="/manifest.json" />
   <meta name="theme-color" content="#0f3460" />

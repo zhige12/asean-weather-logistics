@@ -231,6 +231,65 @@ export const VI_UI = {
   '载入中…': 'Đang tải…',
   '重试': 'Thử lại',
   '跨境物流气象预警': 'Cảnh báo thời tiết logistics xuyên biên giới',
+  // 门户「东盟态势」视图（标题/徽标/单位词；动态拼接靠术语逐词补）
+  '东盟态势': 'Tình hình ASEAN',
+  '区域气象态势': 'Tình hình thời tiết khu vực',
+  '热点城市风险分布': 'Phân bố rủi ro tại các đô thị trọng điểm',
+  '按 AMRI 指数降序 · 高风险置顶': 'Sắp xếp theo chỉ số AMRI giảm dần · rủi ro cao nhất ở đầu',
+  '刷新区域数据': 'Làm mới dữ liệu khu vực',
+  '刷新中…': 'Đang làm mới…',
+  '走廊': 'Hành lang',
+  '本次真实回源': 'Lấy mới từ nguồn',
+  '节流窗口内缓存': 'Dùng cache trong cửa sổ chặn nhịp',
+  '本区域当前最不利城市': 'Đô thị bất lợi nhất khu vực lúc này',
+  '主灾种': 'Loại rủi ro chính',
+  '覆盖': 'Phủ',
+  '国': 'quốc gia',
+  '城': 'đô thị',
+  '气温': 'Nhiệt độ',
+  '降水': 'Mưa',
+  '风': 'Gió',
+  '能见度': 'Tầm nhìn',
+  // AMRI 灾种贡献的 label 枚举（后端动态下发，不是界面静态文案）：
+  // 漏一个就会在满屏拉丁文里夹出中文，逐词术语表也接不住「风速」这种组合词
+  '降雨': 'Lượng mưa',
+  '风速': 'Tốc độ gió',
+  '正常': 'Bình thường',
+  // 取数审计行：标签与数字同处在一个文本节点里，只能渲染期逐段译
+  '取数': 'Lấy dữ liệu',
+  '回源': 'về nguồn',
+  '命中': 'đụng cache',
+  '节流': 'chặn nhịp',
+  '本轮耗时': 'vòng',
+  // 悬浮球标签是 AiBall 的自定义 prop，DOM 翻译器只遍历文本节点与 placeholder/title，接不到它，只能渲染期绑
+  'AI志宁 · 快速导航': 'AI ZHINING · điều hướng nhanh',
+  '缓存已超过设定时长，下列读数为最近一次成功回源的值，不代表此刻实况。':
+    'Bộ nhớ đã vượt cửa sổ quy định; các số liệu dưới đây là giá trị lần về nguồn thành công gần nhất, không phản ánh thực tế lúc này.',
+  '区域取数异常': 'Về nguồn khu vực có lỗi',
+  '（已降级为上次成功结果，不以空表冒充「区域无风险」）':
+    ' (đã giáng cấp về kết quả thành công trước đó, không dùng bảng trống để giả «khu vực không có rủi ro»)',
+  '日最高': 'Cao nhất ngày',
+  '日最低': 'Thấp nhất ngày',
+  '云量': 'Lượng mây',
+  '低云量': 'Mây thấp',
+  '未来3h 降水': 'Mưa 3h tới',
+  '未来6h 累计': 'Tổng 6h tới',
+  '离线模拟': 'Mô phỏng ngoại tuyến',
+  // 后端下发的长注脚（数据溯源说明）：按整串精确匹配，文案改了就是未命中→回落中文，不会译错
+  '城市为区域热点固定点位（真实 CRA40 格点就近取值），非全站地理覆盖；路线规划仍仅覆盖中国—越南走廊路网。':
+    'Các đô thị là điểm quan trắc cố định trong khu vực (lấy từ lưới CRA40 thật, chọn ô gần nhất), không phủ toàn bộ địa lý; việc quy hoạch tuyến vẫn chỉ bao phủ mạng đường bộ hành lang Trung Quốc—Việt Nam.',
+  '本视图只出城市单点气象风险，不出路线：跨东盟城市对在当前路网中没有边，拿来算路会造出不存在的路。':
+    'Khung nhìn này chỉ đưa rủi ro thời tiết từng đô thị, không vẽ tuyến: các cặp đô thị ASEAN chưa có cung trong mạng đường bộ hiện tại, đem tính tuyến sẽ tạo ra con đường không tồn tại.',
+  '已取满官方实测开放的 11 个要素（主链路 7 个 + 日最高/最低气温与总/低云量 4 个）':
+    'Đã lấy đủ 11 yếu tố mà giao diện chính thức mở (7 yếu tố luồng chính + 4 yếu tố nhiệt cao/thấp nhất ngày và tổng/thấp lượng mây)',
+  '当前数据源未返回日较差/云量要素，界面按「—」显示，不填默认值':
+    'Nguồn dữ liệu hiện tại không trả về yếu tố chênh nhiệt trong ngày/lượng mây, giao diện hiển thị «—», không điền giá trị mặc định',
+  '未来 3h/6h 累计降雨取自数据源的前瞻预报（与走廊沙盘同一套起报时次与时效），只作态势前瞻，不并入本视图的 AMRI 单点指数，也不参与算路熔断判定':
+    'Lượng mưa tích lũy 3h/6h tới lấy từ bản tin dự báo của nguồn dữ liệu (cùng thời điểm khởi báo và thời hiệu với hộp cát hành lang), chỉ để xem trước tình hình, không gộp vào chỉ số AMRI từng điểm, cũng không tham gia phán định đứt luồng khi tính tuyến',
+  '当前数据源未返回前瞻预报，界面按「—」显示，不拿 0 mm 冒充未来无雨':
+    'Nguồn dữ liệu hiện tại không trả về bản tin dự báo sắp tới, giao diện hiển thị «—», không lấy 0 mm để giả không mưa trong tương lai',
+  '高温预警沿用 AMRI 气温项的标定中心 36℃（日最高温只作读数展示，不另起一套阈值）。':
+    'Cảnh báo nóng theo ngưỡng gốc 36℃ của hạng mục nhiệt độ AMRI (nhiệt cao nhất ngày chỉ để đọc, không đặt thêm bộ ngưỡng khác).',
 }
 
 // 专名/术语兜底：动态拼接串里出现的城市、口岸等，逐词替换（长词优先，避免子串误替）
@@ -463,6 +522,62 @@ export const EN_UI = {
   '载入中…': 'Loading…',
   '重试': 'Retry',
   '跨境物流气象预警': 'Cross-border logistics weather alerts',
+  // 门户「东盟态势」视图（标题/徽标/单位词；动态拼接靠术语逐词补）
+  '东盟态势': 'ASEAN situation',
+  '区域气象态势': 'Regional weather situation',
+  '热点城市风险分布': 'Hotspot city risk distribution',
+  '按 AMRI 指数降序 · 高风险置顶': 'Sorted by AMRI index, high risk first',
+  '刷新区域数据': 'Refresh regional data',
+  '刷新中…': 'Refreshing…',
+  '走廊': 'Corridor',
+  '本次真实回源': 'Fetched live',
+  '节流窗口内缓存': 'Cached (within throttle window)',
+  '本区域当前最不利城市': 'Most adverse city in the region right now',
+  '主灾种': 'Main hazard',
+  '覆盖': 'Covers',
+  '国': 'countries',
+  '城': 'cities',
+  '气温': 'Temp',
+  '降水': 'Precip',
+  '风': 'Wind',
+  '能见度': 'Visibility',
+  // AMRI 灾种贡献的 label 枚举（后端动态下发）：同上，未命中就会中英夹杂
+  '降雨': 'Rainfall',
+  '风速': 'Wind speed',
+  '正常': 'Normal',
+  '取数': 'Fetched',
+  '回源': 'upstream',
+  '命中': 'cache',
+  '节流': 'throttled',
+  '本轮耗时': 'round',
+  'AI志宁 · 快速导航': 'AI ZHINING · quick navigation',
+  '缓存已超过设定时长，下列读数为最近一次成功回源的值，不代表此刻实况。':
+    'The cache is older than the configured window; the readings below are from the last successful fetch and do not describe the current moment.',
+  '区域取数异常': 'Regional fetch error',
+  '（已降级为上次成功结果，不以空表冒充「区域无风险」）':
+    ' (degraded to the last successful result; an empty table is never presented as "no risk in the region")',
+  '日最高': 'Daily max',
+  '日最低': 'Daily min',
+  '云量': 'Cloud cover',
+  '低云量': 'Low cloud',
+  '未来3h 降水': 'Next 3h rain',
+  '未来6h 累计': 'Next 6h total',
+  '离线模拟': 'Offline simulation',
+  // 后端下发的长注脚（数据溯源说明），同样按整串精确匹配
+  '城市为区域热点固定点位（真实 CRA40 格点就近取值），非全站地理覆盖；路线规划仍仅覆盖中国—越南走廊路网。':
+    'Cities are fixed regional observation points (nearest cell of the real CRA40 grid), not full geographic coverage; route planning still covers only the China–Vietnam corridor road network.',
+  '本视图只出城市单点气象风险，不出路线：跨东盟城市对在当前路网中没有边，拿来算路会造出不存在的路。':
+    'This view reports per-city weather risk only, no routes: city pairs across ASEAN have no edges in the current road network, so routing them would invent roads that do not exist.',
+  '已取满官方实测开放的 11 个要素（主链路 7 个 + 日最高/最低气温与总/低云量 4 个）':
+    'All 11 variables the official API was verified to expose are fetched (7 on the routing path + daily max/min temperature and total/low cloud cover)',
+  '当前数据源未返回日较差/云量要素，界面按「—」显示，不填默认值':
+    'The current source returned no daily temperature range or cloud cover; the UI shows "—" instead of a default value',
+  '未来 3h/6h 累计降雨取自数据源的前瞻预报（与走廊沙盘同一套起报时次与时效），只作态势前瞻，不并入本视图的 AMRI 单点指数，也不参与算路熔断判定':
+    'Next 3h/6h accumulated rain comes from the source forecast (same run time and lead hours as the corridor sandbox); it is forward-looking only — not folded into the per-city AMRI index and not used for routing closure decisions',
+  '当前数据源未返回前瞻预报，界面按「—」显示，不拿 0 mm 冒充未来无雨':
+    'The current source provides no forecast; the UI shows "—" rather than 0 mm pretending "no rain ahead"',
+  '高温预警沿用 AMRI 气温项的标定中心 36℃（日最高温只作读数展示，不另起一套阈值）。':
+    'The heat warning keeps the AMRI temperature term calibrated at 36 °C (daily max temperature is a reading only, not a second threshold set).',
 }
 
 // 英语专名/术语兜底（城市、口岸、灾害等；长词优先，逐词替换）
@@ -535,6 +650,30 @@ export function translateToVi(zh) {
 /** 当前语言下是否要做界面替换（vi 或 en 才译，zh 原样） */
 export function shouldTranslate(lang) {
   return lang === 'vi' || lang === 'en'
+}
+
+/**
+ * 专名（地名/国名/城市定位）取目标语言写法。
+ * <p>为什么不能直接把中文丢给 {@link translate} 逐词替换：术语表里只收录了走廊沿线的十几个专名，
+ * 逐词拆一个没收录的地名会拼出「看着像译名、实际不存在」的词（专名错比不译更难发现）。
+ * 所以这里只走两道可靠的路：
+ * <ul>
+ *   <li>vi：整词命中已有词典（VI_UI 精确表 + VI_TERMS 里本就存在的专名）才用；</li>
+ *   <li>其余情况一律用后端随城市表下发的拉丁名（nameEn/countryEn/roleEn）；</li>
+ *   <li>两边都没有才回落中文。</li>
+ * </ul>
+ * 不臆造越南语译写：拿不到就降一级用国际写法，而不是编一个看着像对的译名。
+ */
+export function localizePlace(zh, lang, latin) {
+  if (lang === 'zh' || !shouldTranslate(lang)) return zh
+  if (lang === 'vi') {
+    const key = (zh || '').trim()
+    if (key && VI_UI[key]) return VI_UI[key]
+    const hit = VI_TERMS.find(([cn]) => cn === key)
+    if (hit) return hit[1]
+  }
+  const l = (latin || '').trim()
+  return l || zh
 }
 
 /**

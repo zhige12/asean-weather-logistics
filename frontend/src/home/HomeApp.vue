@@ -53,9 +53,10 @@
       <!-- 门户首页：政务/企业门户式三段——公告条 + 数据概览卡 + 服务入口卡（均读后端真实数据） -->
       <section v-if="active === 'home'" class="home">
         <!-- ① 公告条 -->
+        <!-- 公告条：区域态势数据到位后改为播报「本区域当前最不利城市」，未到位时回落门户说明 -->
         <div class="notice">
           <span class="nc-tag">公告</span>
-          <span class="nc-txt">志宁护航 · 面向东盟跨境物流的气象感知调度门户，已接入 CRA40 实况与官方通关公告，各视图数据均来自后端真实接口、可溯源。</span>
+          <span class="nc-txt">{{ noticeText }}</span>
           <span class="nc-src"><i class="dot" :class="srcFresh ? 'ok' : 'cache'"></i>{{ srcLabel || '连接中…' }} · 版本 {{ buildTag }}</span>
         </div>
 
@@ -78,6 +79,62 @@
           <button class="retry" @click="reload(active)">重试</button>
         </div>
         <template v-else>
+
+          <!-- 东盟态势：区域热点城市（东盟 10 国 + 中国枢纽）实况气象与单点 AMRI，数据来自官方 CRA40 格点 -->
+          <div v-if="active === 'asean'" class="grid">
+            <div class="card-blk span2">
+              <h3>区域气象态势
+                <span class="mut">{{ aseanHeadSub() }}</span>
+              </h3>
+              <div class="bands">
+                <span class="band CRITICAL">CRITICAL {{ (data.asean.row.severityBands || {}).CRITICAL || 0 }}</span>
+                <span class="band HIGH">HIGH {{ (data.asean.row.severityBands || {}).HIGH || 0 }}</span>
+                <span class="band MEDIUM">MEDIUM {{ (data.asean.row.severityBands || {}).MEDIUM || 0 }}</span>
+                <span class="band LOW">LOW {{ (data.asean.row.severityBands || {}).LOW || 0 }}</span>
+                <button class="retry" :disabled="aseanRefreshing" @click="refreshAsean">
+                  {{ aseanRefreshing ? '刷新中…' : '刷新区域数据' }}
+                </button>
+              </div>
+              <div v-if="data.asean.row.regionPeak" class="worst">
+                <div class="w-idx" :class="'sev-' + data.asean.row.regionPeak.severity">{{ fmt.num(data.asean.row.regionPeak.index) }}</div>
+                <div class="w-meta">
+                  <b>{{ pName(data.asean.row.regionPeak) }}<span class="mut"> · {{ pCountry(data.asean.row.regionPeak) }}</span></b>
+                  <span class="sev-tag" :class="'sev-' + data.asean.row.regionPeak.severity">{{ data.asean.row.regionPeak.severity }}</span>
+                  <span class="mut">{{ aseanPeakMeta() }}</span>
+                </div>
+              </div>
+              <p v-if="data.asean.row.stale && data.asean.row.count" class="foot warn mut">缓存已超过设定时长，下列读数为最近一次成功回源的值，不代表此刻实况。</p>
+              <p v-if="data.asean.row.error" class="foot err">{{ aseanErrorLine() }}</p>
+            </div>
+
+            <div class="card-blk span2">
+              <h3>热点城市风险分布 <span class="mut">按 AMRI 指数降序 · 高风险置顶</span></h3>
+              <div class="acities">
+                <div v-for="c in data.asean.row.cities" :key="c.cityId" class="aci">
+                  <div class="aci-head">
+                    <b class="aci-nm">{{ pName(c) }}</b>
+                    <span class="aci-idx" :class="'sev-' + c.severity">{{ fmt.num(c.index) }}</span>
+                  </div>
+                  <div class="aci-sub mut">{{ pCountry(c) }} · {{ pRole(c) }}</div>
+                  <div class="aci-tags">
+                    <span class="sev-tag" :class="'sev-' + c.severity">{{ c.severity }}</span>
+                    <span class="hz">{{ t(c.mainHazard) }}</span>
+                    <span v-if="c.corridor" class="cbadge">走廊</span>
+                  </div>
+                  <div class="aci-wx mut">{{ aseanWx(c) }}</div>
+                  <!-- 官方额外要素（日最高/最低温、总/低云量）：拿不到的项直接不写这一栏，不拿 0 充数 -->
+                  <div class="aci-wx mut">{{ aseanExt(c) }}</div>
+                  <!-- 前瞻预报：源没给这一项（forecastCities=0）时整栏不写，也不在每张卡上排一串「—」占位 -->
+                  <div v-if="data.asean.row.forecastCities" class="aci-wx mut">{{ aseanFc(c) }}</div>
+                </div>
+              </div>
+              <p class="foot mut">{{ data.asean.row.coverageNote }}</p>
+              <p class="foot mut">{{ data.asean.row.routingNote }}</p>
+              <p class="foot mut">{{ aseanExtNote() }}</p>
+              <p class="foot mut">{{ data.asean.row.forecastNote }}</p>
+              <p class="foot mut">{{ aseanStatLine() }}</p>
+            </div>
+          </div>
 
           <!-- 实时气象 -->
           <div v-if="active === 'weather'" class="grid">
@@ -231,7 +288,7 @@
 
     <!-- 门户 AI志宁·快速导航：复用调度大屏/司机端同款悬浮球，点开才展开对话；锚点桌面右上角、窄屏右下角 -->
     <!-- 手机端（≤820px）顶栏导航已占一整行，悬浮球改锚右下角（:top 传空即回落 bottom 锚定、面板向上展开），避免压住导航条 -->
-    <AiBall pos="fixed" :top="ballTop" right="18px" panel-width="380px" label="AI志宁 · 快速导航" draggable>
+    <AiBall pos="fixed" :top="ballTop" right="18px" panel-width="380px" :label="t('AI志宁 · 快速导航')" draggable>
       <div class="ai-ball-chat">
         <p class="ai-cap">只能帮你打开功能、跳转导航与回答知识库问题；模拟/推演由调度大屏的 AI 助手负责</p>
         <div class="ai-msgs" ref="aiListEl">
@@ -285,11 +342,17 @@
 <script>
 import { api, fmt } from './api.js'
 import AiBall from '../components/AiBall.vue'
-import { createUiTranslator } from '../driver/i18n.js'
+import { createUiTranslator, localizePlace, translate } from '../driver/i18n.js'
 
 // 门户 AI 回包的 action → 前端动作。open/navigate 只跳页面，knowledge/say 只说话——
 // 界面层同样没有任何沙盘/推演执行入口，与后端 PortalCopilotService 的收窄双保险。
 const EXTERNAL_TARGET = { dashboard: '/dashboard.html', driver: '/driver.html' }
+
+// 公告条在未拿到区域态势时的回落文案（门户能力描述，不含任何实时数字）。
+// 同一句话写三种语言而不是丢给 DOM 翻译器逐词拆：整段口语拆词会拼出半中半英的句子，观感不如直接给写好的译文。
+const NOTICE_FALLBACK_ZH = '志宁护航 · 面向东盟跨境物流的气象感知调度门户，已接入 CRA40 实况与官方通关公告，各视图数据均来自后端真实接口、可溯源。'
+const NOTICE_FALLBACK_EN = 'ZHINING Escort · weather-aware dispatch portal for ASEAN cross-border logistics, fed by CRA40 observations and official customs bulletins; every view reads from real backend endpoints and is traceable.'
+const NOTICE_FALLBACK_VI = 'ZHINING Escort · cổng điều phối cảm biến thời tiết cho logistics xuyên biên giới ASEAN, dùng quan trắc CRA40 và thông báo hải quan chính thức; mọi số liệu đều đọc từ backend thật và truy vết được.'
 
 export default {
   components: { AiBall },
@@ -300,6 +363,9 @@ export default {
       srcLabel: '',
       srcFresh: false,
       buildTag: (typeof __BUILD_TAG__ !== 'undefined' ? __BUILD_TAG__ : ''),
+      // 区域态势手动刷新态：一次回源要拉满整张东盟 bbox 的格点（百 KB 级、秒级耗时），按钮必须防连点——
+      // 后端的 refresh 只越节流窗口、不越熔断，前端再给一个无限点击入口没有意义
+      aseanRefreshing: false,
       // 界面语言：简(zh) / EN / VI；复用 driver/i18n.js 的 DOM 整机翻译器，字典未命中即回落中文，可增量补齐
       uiLang: (() => { try { const v = localStorage.getItem('portal_ui_lang'); return v === 'en' || v === 'vi' ? v : 'zh' } catch (e) { return 'zh' } })(),
       langs: [{ id: 'zh', label: '简' }, { id: 'en', label: 'EN' }, { id: 'vi', label: 'VI' }],
@@ -321,12 +387,15 @@ export default {
       },
       // 每个只读视图的加载态
       states: {
+        asean: { loading: false, error: '', loaded: false },
         weather: { loading: false, error: '', loaded: false },
         amri: { loading: false, error: '', loaded: false },
         waterway: { loading: false, error: '', loaded: false },
         customs: { loading: false, error: '', loaded: false }
       },
       data: {
+        // 东盟态势：一个接口带回「城市 × 实况要素 × AMRI 单点指数 + 区域聚合」，row 为空对象表示尚未取到
+        asean: { row: {} },
         weather: { servedSourceLabel: '', servedFresh: false, points: [] },
         amri: { model: null, live: null },
         water: { live: null, inter: null, st: null },
@@ -334,6 +403,7 @@ export default {
       },
       views: [
         { id: 'home', label: '主页' },
+        { id: 'asean', label: '东盟态势' },
         { id: 'weather', label: '实时气象' },
         { id: 'amri', label: 'AMRI 风险' },
         { id: 'waterway', label: '水运' },
@@ -344,6 +414,7 @@ export default {
         { id: 'home', label: '主页' },
         { id: 'dashboard', label: '调度大屏', external: '/dashboard.html' },
         { id: 'driver', label: '司机端', external: '/driver.html' },
+        { id: 'asean', label: '东盟态势' },
         { id: 'weather', label: '实时气象' },
         { id: 'amri', label: 'AMRI 风险' },
         { id: 'waterway', label: '水运' },
@@ -352,6 +423,7 @@ export default {
       cards: [
         { id: 'dashboard', title: '调度大屏', desc: '多路线协同调度操作台 · 算路/沙盘/触达', icon: '🖥️', color: '#4f6df5', external: '/dashboard.html' },
         { id: 'driver', title: '司机端', desc: '跨境货运司机气象预警与智能绕行助手', icon: '🚚', color: '#22b8cf', external: '/driver.html' },
+        { id: 'asean', title: '东盟态势', desc: '东盟十国 + 中国枢纽热点城市实况与单点风险', icon: '🌏', color: '#0ea5e9' },
         { id: 'weather', title: '实时气象', desc: '沿线节点实况气象（只读 · 真实数据源）', icon: '🌡️', color: '#16a34a' },
         { id: 'amri', title: 'AMRI 风险', desc: '气象-路网可解释风险指数与当前最不利点', icon: '⚠️', color: '#f5a600' },
         { id: 'waterway', title: '水运', desc: '平陆运河支流风险 · 联运方案 · 通航接入', icon: '🛳️', color: '#0ea5e9' },
@@ -376,9 +448,40 @@ export default {
       }
     },
     // 浏览器标签页标题随当前视图变化：「<视图名> - ZHINING 志宁」（home 显示「主页」，与顶栏菜单「主页」同名）
+    // <title> 被 DOM 翻译器故意跳过（不影响页面可见文本），所以这里按语种自己取译文
     pageTitle() {
-      const map = { home: '主页', weather: '实时气象', amri: 'AMRI 风险', waterway: '水运', customs: '通关时效' }
-      return (map[this.active] || '志宁护航') + ' - ZHINING 志宁'
+      const map = { home: '主页', asean: '东盟态势', weather: '实时气象', amri: 'AMRI 风险', waterway: '水运', customs: '通关时效' }
+      const zh = map[this.active] || '志宁护航'
+      if (this.uiLang === 'zh') return zh + ' - ZHINING 志宁'
+      return translate(zh, this.uiLang) + ' - ZHINING'
+    },
+    // 公告条：区域态势到位后播报「本区域当前最不利城市」——文案全部来自后端同一份缓存，不另算一套；
+    // 未到位（还没成功回源过 / 请求失败）时回落门户说明，绝不写死一个「看起来像实时」的风险数字
+    noticeText() {
+      const r = this.data.asean.row || {}
+      const peak = r.regionPeak
+      const lang = this.uiLang
+      if (!peak || !r.count) {
+        return lang === 'en' ? NOTICE_FALLBACK_EN : lang === 'vi' ? NOTICE_FALLBACK_VI : NOTICE_FALLBACK_ZH
+      }
+      const bands = r.severityBands || {}
+      const hi = (bands.HIGH || 0) + (bands.CRITICAL || 0)
+      const num = fmt.num(peak.index)
+      const tail = r.stale
+        ? (lang === 'en' ? ' (values from the last successful fetch, older than the configured window)'
+          : lang === 'vi' ? ' (lấy từ lần về nguồn thành công gần nhất, đã quá cửa sổ quy định)'
+            : '（读数取自最近一次成功回源，已超过设定时长）')
+        : (lang === 'en' ? ` (source ${translate(r.sourceLabel || '—', 'en')})`
+          : lang === 'vi' ? ` (nguồn ${translate(r.sourceLabel || '—', 'vi')})`
+            : `（来源 ${r.sourceLabel || '—'}）`)
+      // 同一条播报、同一批后端数字，只换描述语言；不因为切了语种就把风险等级改词重写
+      if (lang === 'en') {
+        return `ASEAN live situation: ${hi} of ${r.count} hotspot cities at HIGH or above; ` + `worst now ${this.pName(peak)} (${this.pCountry(peak)}) AMRI ${num} · ${peak.severity}, main hazard ${translate(peak.mainHazard, 'en')}` + tail
+      }
+      if (lang === 'vi') {
+        return `Tình hình khu vực trực tiếp: ${hi}/${r.count} đô thị trọng điểm ở HIGH trở lên; ` + `bất lợi nhất lúc này ${this.pName(peak)} (${this.pCountry(peak)}) AMRI ${num} · ${peak.severity}, rủi ro chính ${translate(peak.mainHazard, 'vi')}` + tail
+      }
+      return `东盟区域实况：${r.count} 个热点城市中 ${hi} 个处于 HIGH 及以上，` + `当前最不利城市 ${this.pName(peak)}（${this.pCountry(peak)}）AMRI ${num} · ${peak.severity}，主灾种 ${peak.mainHazard}` + tail
     },
     // AiBall 的 top 为空即回落 bottom 锚定（桌面态仍是右上角 70px，行为不变）
     ballTop() { return this.isNarrow ? '' : '70px' }
@@ -392,6 +495,61 @@ export default {
   },
   methods: {
     st(id) { return this.states[id] || { loading: false, error: '', loaded: false } },
+    // 专名（地名/国名/城市定位）按界面语言取值：vi 只认词典里本就收录的专名，其余走后端拉丁名。
+    // 依赖 uiLang（响应式），切语言时这些列会跟着重算，不需要重建数据。
+    pName(o) { return o ? localizePlace(o.name, this.uiLang, o.nameEn) : '' },
+    pCountry(o) { return o ? localizePlace(o.country, this.uiLang, o.countryEn) : '' },
+    pRole(o) { return o ? localizePlace(o.role, this.uiLang, o.roleEn) : '' },
+    // 单条标签按当前语种取译文（zh 原样返回）。
+    // 为什么卡片读数行必须走这里、而不能交给 DOM 整机翻译器：Vue 会把同一元素里的
+    // 「静态标签 + 插值」合并成一个文本节点（实测形如 "气温 24.8℃ · 降水 0mm"），
+    // DOM 层只做整串精确匹配，这种混合串必然未命中→回落中文（实测 EN 态残留 96 个中文节点）。
+    // 这类行只能在渲染期把标签逐个译掉；纯静态文案仍由翻译器负责，不重复处理。
+    t(s) { return s ? translate(s, this.uiLang) : s },
+    aseanHeadSub() {
+      const r = this.data.asean.row || {}
+      const fresh = this.t(r.servedFresh ? '本次真实回源' : '节流窗口内缓存')
+      return `${r.sourceLabel || '—'} · ${fresh} · ` +
+        `${this.t('覆盖')} ${r.countries || 0} ${this.t('国')} · ${r.count || 0} ${this.t('城')}`
+    },
+    aseanPeakMeta() {
+      const p = this.data.asean.row.regionPeak || {}
+      return `${this.t('本区域当前最不利城市')} · ${this.t('主灾种')} ${this.t(p.mainHazard)}`
+    },
+    aseanErrorLine() {
+      const r = this.data.asean.row || {}
+      // 上游原始错误串不译也不遮掩：它就是排查时的第一手信息
+      return `${this.t('区域取数异常')}: ${r.error || ''}${this.t('（已降级为上次成功结果，不以空表冒充「区域无风险」）')}`
+    },
+    aseanWx(c) {
+      return `${this.t('气温')} ${fmt.num(c.temperatureC)}℃ · ${this.t('降水')} ${fmt.num(c.precipitationMm)}mm · ` +
+        `${this.t('风速')} ${fmt.num(c.windKph)}km/h · ${this.t('能见度')} ${fmt.num(c.visibilityM, 0)}m`
+    },
+    aseanExt(c) {
+      const line = `${this.t('日最高')} ${fmt.num(c.tempMaxC)}℃ · ${this.t('日最低')} ${fmt.num(c.tempMinC)}℃ · ` +
+        `${this.t('云量')} ${fmt.num(c.cloudPct, 0)}%`
+      // 低云量取不到就不写这一栏：不拿 0% 冒充「晴空无低云」
+      if (c.lowCloudPct === null || c.lowCloudPct === undefined) return line
+      return `${line} · ${this.t('低云量')} ${fmt.num(c.lowCloudPct, 0)}%`
+    },
+    aseanFc(c) {
+      return `${this.t('未来3h 降水')} ${fmt.num(c.rainNext3hMm)}mm · ${this.t('未来6h 累计')} ${fmt.num(c.rainNext6hMm)}mm`
+    },
+    aseanExtNote() {
+      const note = this.t((this.data.asean.row || {}).extendedElementNote || '')
+      const heat = this.t('高温预警沿用 AMRI 气温项的标定中心 36℃（日最高温只作读数展示，不另起一套阈值）。')
+      if (!note) return heat
+      // 后端注脚本身不带句末标点（中文用「；」续句），非中文补一个句号，否则两句会黏在一起
+      return this.uiLang === 'zh' ? `${note}；${heat}` : `${note}. ${heat}`
+    },
+    aseanStatLine() {
+      const r = this.data.asean.row || {}
+      const s = r.stats || {}
+      // 审计计数照实上报：评委能从这里看出节流/熔断真的在工作，而不是每次都打上游
+      return `${this.t('取数')} ${fmt.time(r.lastSuccessAt)} · ` +
+        `${this.t('回源')} ${s.upstreamRequests || 0} / ${this.t('命中')} ${s.cacheHits || 0} / ${this.t('节流')} ${s.throttled || 0} · ` +
+        `${this.t('本轮耗时')} ${r.elapsedMs || 0}ms`
+    },
     go(v) {
       if (v.id === 'home') { this.active = 'home'; return }
       this.active = v.id
@@ -443,6 +601,28 @@ export default {
           st: s.ok ? s.data : null
         }
       })
+    },
+    load_asean() {
+      return api.aseanSituation(false).then((r) => {
+        if (!r.ok) return Promise.reject(new Error('区域态势暂不可用：' + r.error))
+        const row = r.data || {}
+        this.data.asean.row = row
+        // 一次都没成功回源过（上游不可达且无历史缓存）时如实失败：
+        // 空表渲染成「23 城全是 LOW」会被读成「区域无风险」，那是最坏的一种假数据
+        if (!row.count) {
+          return Promise.reject(new Error('区域态势暂无观测数据：' + (row.error || '上游未返回格点场')))
+        }
+      })
+    },
+    refreshAsean() {
+      if (this.aseanRefreshing) return
+      this.aseanRefreshing = true
+      api.aseanSituation(true)
+        .then((r) => {
+          this.aseanRefreshing = false
+          if (r.ok && r.data && r.data.count) this.data.asean.row = r.data
+        })
+        .catch(() => { this.aseanRefreshing = false })
     },
     load_customs() {
       return Promise.all([api.customsBulletin(), api.customsEfficiency()]).then(([b, e]) => {
@@ -584,14 +764,17 @@ export default {
     this.refreshSession()
     if (mv) {
       const v = this.views.find((x) => x.id === mv[1])
-      if (v) { this.active = v.id; this.ensure(v.id); return }
+      // home 不算真的深链目标（它就是默认视图）：这里必须不能 return，
+      // 否则会跳过下面公告条要的 asean 预取，首页通知栏会永久停在回落文案
+      if (v && v.id !== 'home') { this.active = v.id; this.ensure(v.id); return }
     }
     // 顶栏数据源小徽标：轻量拉一次 source，失败不影响门户
     api.weatherSource().then((r) => {
       if (r.ok) { this.srcLabel = r.data.currentLabel || ''; this.srcFresh = !!r.data.servedFresh }
     })
-    // 首页概览卡：预取四个视图的真实数据（ensure 已去重，后续切到对应视图不重复拉）
-    if (this.active === 'home') { this.ensure('weather'); this.ensure('amri'); this.ensure('customs'); this.ensure('waterway') }
+    // 首页概览卡：预取各视图的真实数据（ensure 已去重，后续切到对应视图不重复拉）；
+    //  ASEAN 一并预取，是因为公告条要播报区域最不利城市——它得和面板同一份数据，不能各拉各的
+    if (this.active === 'home') { this.ensure('asean'); this.ensure('weather'); this.ensure('amri'); this.ensure('customs'); this.ensure('waterway') }
   }
 }
 </script>
@@ -741,6 +924,18 @@ a { color: #2b62d9; }
 .contrib .cl { width: 52px; color: #5a6b88; } .contrib .cv { width: 88px; text-align: right; color: #33406a; }
 .cbar { flex: 1; height: 8px; background: #e6eefc; border-radius: 6px; overflow: hidden; }
 .cbar i { display: block; height: 100%; background: linear-gradient(90deg,#4f9bff,#7c3aed); }
+/* 东盟态势：城市卡网格。auto-fill + minmax 让列数随宽度自适应（窄屏自动塌成单列，不必再写一份 media query） */
+.acities { display: grid; grid-template-columns: repeat(auto-fill, minmax(212px, 1fr)); gap: 10px; }
+.aci { background: #fff; border: 1px solid #e2ebf9; border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.aci-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.aci-nm { font-size: 15px; }
+/* 指数角标沿用 .w-idx 的色阶，只是缩到卡片尺寸——同一套风险色在两个视图里必须完全一致 */
+.aci-idx { flex: none; font-size: 17px; font-weight: 800; line-height: 1; padding: 3px 8px; border-radius: 8px; color: #fff; background: #16a34a; }
+.aci-idx.sev-MEDIUM { background: #d4b106; } .aci-idx.sev-HIGH { background: #ea8c00; } .aci-idx.sev-CRITICAL { background: #dc2626; }
+.aci-tags { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.aci-tags .hz { font-size: 11px; padding: 2px 8px; border-radius: 6px; background: #eef3fb; color: #33435f; }
+.cbadge { font-size: 11px; padding: 2px 7px; border-radius: 6px; background: #2b62d9; color: #fff; }
+.aci-wx { font-size: 11px; line-height: 1.6; }
 /* 水运 */
 .trib { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .titem { background: #eef4ff; border-radius: 10px; padding: 10px 12px; }

@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -38,6 +39,18 @@ public class ContestWeatherProvider implements WeatherProvider {
     private static final List<String> OBS_SECONDARY_VARS = List.of("WIN_U", "WIN_V", "VIS");
     /** 气压单独一批：接口单次最多 3 变量，前两批已满；PRS 用于台风/强对流判据 */
     private static final List<String> OBS_PRESSURE_VARS = List.of("PRS");
+    /**
+     * 官方还开放、主链路没取的 4 个要素（实测 {@code /api/v1/variables?product=observation} 返回 11 个）。
+     * 分两批取满：接口单次上限 3 个，TMAX/TMIN/TCC 一批、LCC 一批；仅区域态势视图调用，
+     * 走廊主链路不取——它们不驱动任何边权，为展示值给每 60 秒一轮的主链路多加一批请求不划算。
+     */
+    private static final List<String> OBS_EXT_DAILY_VARS = List.of("TMAX", "TMIN", "TCC");
+    private static final List<String> OBS_EXT_LOW_CLOUD_VARS = List.of("LCC");
+    /**
+     * 前瞻预报只取 PRE 一批：区域态势要看的是「接下来几小时会不会下」，
+     * 其余要素实况已取满，不再拿重复变量去占上游带宽。
+     */
+    private static final List<String> FC_OUTLOOK_VARS = List.of("PRE");
 
     @Value("${weather.real.base-url:}")
     private String baseUrl;
@@ -52,6 +65,11 @@ public class ContestWeatherProvider implements WeatherProvider {
     /** 缓存 TTL（与 RealWeatherService 同一份配置）：上一轮格点超过这个时长就不再拿来补数 */
     @Value("${weather.real.ttl-minutes:10}")
     private long ttlMinutes;
+    /** 起报时次与时效与走廊沙盘共用同一份配置，免得两个视图读到两套预报基准 */
+    @Value("${weather.forecast.run-time:202412312000}")
+    private String forecastRunTime;
+    @Value("${weather.forecast.hours:3,6}")
+    private String forecastHoursRaw;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -132,6 +150,121 @@ public class ContestWeatherProvider implements WeatherProvider {
         double maxLon = Collections.max(g.longitudes());
         return node.getLatitude() >= minLat && node.getLatitude() <= maxLat
                 && node.getLongitude() >= minLon && node.getLongitude() <= maxLon;
+    }
+
+    /**
+     * 取满官方额外开放的 4 个要素（日最高/最低气温、总/低云量）：与主链路同一套 bbox、
+     * 同一个就近取值规则，只是另起一批请求。失败/无 Token 时返回空 Map，由调用方按缺项展示。
+     *
+     * <p>频度：这批由调用方 AseanSituationService 自己的 30 分钟窗口约束，
+     * 两批同属一轮取数，不因为取满要素而提高对上游的访问频度——与 {@code ContestForecastService}
+     * 拆 4 批并行是同一个纪律。</p>
+     */
+    @Override
+    public Map<String, Map<String, Double>> fetchExtendedElements(List<RoadNode> nodes) {
+        if (nodes == null || nodes.isEmpty() || !isConfigured()) {
+            return Map.of();
+        }
+        Bbox bbox = buildBbox(nodes);
+        CompletableFuture<ObservationResponse> dailyFuture =
+                CompletableFuture.supplyAsync(() -> queryObservations(OBS_EXT_DAILY_VARS, bbox), fetchExecutor);
+        CompletableFuture<ObservationResponse> cloudFuture =
+                CompletableFuture.supplyAsync(() -> queryObservations(OBS_EXT_LOW_CLOUD_VARS, bbox), fetchExecutor);
+        try {
+            CompletableFuture.allOf(dailyFuture, cloudFuture)
+                    .get(requestTimeoutSeconds + 5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            dailyFuture.cancel(true);
+            cloudFuture.cancel(true);
+        }
+        ObservationResponse daily = dailyFuture.getNow(null);
+        ObservationResponse cloud = cloudFuture.getNow(null);
+        Map<String, VariableGrid> merged = new HashMap<>();
+        if (daily != null) {
+            merged.putAll(daily.data());
+        }
+        if (cloud != null) {
+            merged.putAll(cloud.data());
+        }
+        if (merged.isEmpty()) {
+            return Map.of();
+        }
+        ObservationResponse axisFrom = (daily != null && !daily.latitudes().isEmpty()) ? daily : cloud;
+        if (axisFrom == null || axisFrom.latitudes().isEmpty()
+                || axisFrom.longitudes().isEmpty() || axisFrom.times().isEmpty()) {
+            return Map.of();
+        }
+        List<Double> latitudes = axisFrom.latitudes();
+        List<Double> longitudes = axisFrom.longitudes();
+        int lastTime = axisFrom.times().size() - 1;
+        Map<String, Map<String, Double>> out = new LinkedHashMap<>();
+        for (RoadNode node : nodes) {
+            int latIdx = nearestIndex(latitudes, node.getLatitude());
+            int lonIdx = nearestIndex(longitudes, node.getLongitude());
+            Map<String, Double> one = new LinkedHashMap<>();
+            for (String v : List.of("TMAX", "TMIN", "TCC", "LCC")) {
+                putPresent(one, merged, v, lastTime, latIdx, lonIdx);
+            }
+            if (!one.isEmpty()) {
+                out.put(node.getId(), one);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 区域前瞻预报：官方 {@code /api/v1/forecasts/3h} 的逐 3h 降水量，汇总成「未来 3h / 未来 6h 累计」。
+     * 单位口径与 {@code ContestForecastService} 一致——PRE 是该时效对应 3 小时时段内的降水量(mm)，
+     * 所以 6h 累计 = 3h 时效值 + 6h 时效值。
+     * <p>只一批请求，且落在调用方（区域态势）自己的半小时窗口内，不因取前瞻而提高对上游的访问频度；
+     * 失败返回空 Map，界面显示「—」——<b>绝不拿 0 mm 冒充「未来无雨」</b>。</p>
+     */
+    @Override
+    public Map<String, Map<String, Double>> fetchForecastOutlook(List<RoadNode> nodes) {
+        if (nodes == null || nodes.isEmpty() || !isConfigured()) {
+            return Map.of();
+        }
+        List<Integer> hours = parseForecastHours(forecastHoursRaw);
+        if (hours.isEmpty()) {
+            return Map.of();
+        }
+        ObservationResponse resp = queryForecast(hours, buildBbox(nodes));
+        if (resp == null || resp.latitudes().isEmpty() || resp.longitudes().isEmpty()) {
+            return Map.of();
+        }
+        VariableGrid pre = resp.data().get("PRE");
+        if (pre == null) {
+            return Map.of();
+        }
+        List<Double> latitudes = resp.latitudes();
+        List<Double> longitudes = resp.longitudes();
+        Map<String, Map<String, Double>> out = new LinkedHashMap<>();
+        for (RoadNode node : nodes) {
+            int latIdx = nearestIndex(latitudes, node.getLatitude());
+            int lonIdx = nearestIndex(longitudes, node.getLongitude());
+            Map<String, Double> one = new LinkedHashMap<>();
+            double first = pre.valueAt(0, latIdx, lonIdx);
+            if (Double.isFinite(first)) {
+                one.put("rain3hMm", first);
+            }
+            double sum = 0;
+            boolean any = false;
+            for (int h = 0; h < hours.size(); h++) {
+                double v = pre.valueAt(h, latIdx, lonIdx);
+                if (!Double.isFinite(v)) {
+                    continue;
+                }
+                sum += v;
+                any = true;
+            }
+            if (any) {
+                one.put("rain6hMm", sum);
+            }
+            if (!one.isEmpty()) {
+                out.put(node.getId(), one);
+            }
+        }
+        return out;
     }
 
     private List<RealWeatherService.WeatherPoint> fetchObservation(List<RoadNode> nodes) {
@@ -242,6 +375,69 @@ public class ContestWeatherProvider implements WeatherProvider {
         }
     }
 
+    /** 拉一批前瞻预报（只 PRE）；失败不抛异常，由调用方按缺项处理 */
+    private ObservationResponse queryForecast(List<Integer> hours, Bbox bbox) {
+        try {
+            StringBuilder hs = new StringBuilder();
+            for (int h : hours) {
+                if (hs.length() > 0) {
+                    hs.append(',');
+                }
+                hs.append(h);
+            }
+            Map<String, String> params = new LinkedHashMap<>();
+            params.put("variables", String.join(",", FC_OUTLOOK_VARS));
+            params.put("run_time", forecastRunTime);
+            params.put("forecast_hours", hs.toString());
+            params.put("bbox", bbox.toParam());
+            String url = HttpUtil.joinUrl(baseUrl, "/api/v1/forecasts/3h")
+                    + "?" + HttpUtil.encodeQuery(params);
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .timeout(Duration.ofSeconds(Math.max(1, requestTimeoutSeconds)))
+                    .header("User-Agent", USER_AGENT)
+                    .header("Accept", "application/json")
+                    .header("Authorization", "Bearer " + SecretCodec.resolve(token))
+                    .GET()
+                    .build();
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+                return null;
+            }
+            // 预报响应的结构与实况一致（coordinates + data.<VAR>.shape/values），shape 为 [时效, 纬, 经]
+            return parseObservation(resp.body(), FC_OUTLOOK_VARS);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 时效配置解析：与走廊沙盘同一套约束（3–168 内 3 的倍数、最多 5 个），非法就不回源 */
+    private static List<Integer> parseForecastHours(String raw) {
+        List<Integer> out = new ArrayList<>();
+        if (raw == null || raw.isBlank()) {
+            return out;
+        }
+        for (String p : raw.split(",")) {
+            String s = p == null ? "" : p.trim();
+            if (s.isEmpty()) {
+                continue;
+            }
+            try {
+                int v = Integer.parseInt(s);
+                if (v < 3 || v > 168 || v % 3 != 0 || out.size() >= 5 || out.contains(v)) {
+                    continue;
+                }
+                out.add(v);
+            } catch (NumberFormatException e) {
+                return List.of();
+            }
+        }
+        return out;
+    }
+
     private ObservationResponse parseObservation(String body, List<String> variables) throws Exception {
         JsonNode root = mapper.readTree(body);
         List<String> times = toStringList(root.path("times"));
@@ -272,6 +468,22 @@ public class ContestWeatherProvider implements WeatherProvider {
         }
         double v = grid.valueAt(t, lat, lon);
         return Double.isFinite(v) ? v : fallback;
+    }
+
+    /**
+     * 与 {@link #read} 的区分：read 给算路判据用，取不到必须填一个「不触发任何判据」的中性值；
+     * 本方法给展示用，取不到就<b>不写这个键</b>——界面宁愿显示「—」，也不能看到一个编出来的日温。
+     */
+    private static void putPresent(Map<String, Double> target, Map<String, VariableGrid> grids,
+                                   String variable, int t, int lat, int lon) {
+        VariableGrid grid = grids.get(variable);
+        if (grid == null) {
+            return;
+        }
+        double v = grid.valueAt(t, lat, lon);
+        if (Double.isFinite(v)) {
+            target.put(variable, v);
+        }
     }
 
     private int nearestIndex(List<Double> values, double target) {
